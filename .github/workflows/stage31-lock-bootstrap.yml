@@ -1,0 +1,53 @@
+name: Stage 3.1 Lock Bootstrap
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap-lock:
+    name: Generate review-only Python 3.14 uv.lock artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout acceptance envelope
+        uses: actions/checkout@v7.0.1
+
+      - name: Reconstruct and verify RC1 source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/agentforge-rc1
+          cat rc/rc1.part*.b64 | base64 -d > /tmp/agentforge-rc1.tar.gz
+          echo "20a19cd990dbf121cecc308e446d322432ab41ad85d2255f57695e3f2cb5f05d  /tmp/agentforge-rc1.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/agentforge-rc1.tar.gz -C /tmp/agentforge-rc1
+
+      - name: Refuse embedded lockfile
+        shell: bash
+        run: |
+          test ! -f /tmp/agentforge-rc1/uv.lock || {
+            echo "RC1 payload unexpectedly contains uv.lock." >&2
+            exit 2
+          }
+
+      - name: Generate lockfile in pinned Python 3.14 toolchain
+        shell: bash
+        run: |
+          cd /tmp/agentforge-rc1
+          ./scripts/bootstrap_stage31_lock_containerized.sh
+
+      - name: Record lockfile digest
+        shell: bash
+        run: sha256sum /tmp/agentforge-rc1/uv.lock | tee /tmp/agentforge-rc1/uv.lock.sha256
+
+      - name: Upload review-only lockfile artifact
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: stage31-uv-lock-review
+          path: |
+            /tmp/agentforge-rc1/uv.lock
+            /tmp/agentforge-rc1/uv.lock.sha256
+          if-no-files-found: error
+          retention-days: 7
