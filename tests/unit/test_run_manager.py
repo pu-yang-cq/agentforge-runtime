@@ -539,21 +539,16 @@ async def test_exhausted_tool_budget_discards_model_result_before_tool_call() ->
 async def test_model_result_after_deadline_is_discarded_for_progression() -> None:
     run_holder: dict[str, Run] = {}
 
+    scripted = ScriptedFakeModel([FinalStep("too late")])
+
     class DeadlineCrossingModel:
         async def invoke(self, request):
             run_holder["run"].deadline_at = utcnow() - timedelta(seconds=1)
-            return ScriptedFakeModel([FinalStep("too late")]).invoke(request)
+            return await scripted.invoke(request)
 
     registry = InMemoryToolRegistry([])
-    model = DeadlineCrossingModel()
-
-    class AwaitingDeadlineCrossingModel:
-        async def invoke(self, request):
-            response = await model.invoke(request)
-            return response
-
     manager = RunManager(
-        NativeRunner(AwaitingDeadlineCrossingModel(), registry),
+        NativeRunner(DeadlineCrossingModel(), registry),
         ToolCoordinator(registry),
     )
     av = AgentVersion(uuid4(), uuid4(), 1, "deadline")
