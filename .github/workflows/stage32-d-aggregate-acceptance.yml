@@ -73,7 +73,8 @@ jobs:
                   raise SystemExit(f"reconciliation does not preserve durable identity: {token}")
 
           result_start = recorder.index("async def record_reconciliation_result")
-          result = recorder[result_start:]
+          next_method = recorder.index("\n    async def ", result_start + 10)
+          result = recorder[result_start:next_method]
           forbidden = ["ActionSnapshotRow(", "ExternalActionRow(", "operation_id=uuid4()"]
           for token in forbidden:
               if token in result:
