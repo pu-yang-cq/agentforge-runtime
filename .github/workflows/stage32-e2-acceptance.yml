@@ -1,0 +1,146 @@
+name: Stage 3.2-E2 Acceptance
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/RUN_STAGE32_E2_ACCEPTANCE
+
+permissions:
+  contents: read
+
+jobs:
+  accept:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Verify committed E2 surface
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f docs/implementation/stage3.2-e1-cancellation.md
+          test -f migrations/versions/0015_action_resolution.py
+          test ! -f scripts/stage32_e2_patch.py
+          grep -R 'class ActionResolutionOutcome' -n src/agentforge
+          grep -R 'class ActionResolutionRow' -n src/agentforge
+          grep -R 'async def resolve_action' -n src/agentforge
+          grep -R 'ACTION_RESOLUTION_RECORDED' -n src/agentforge
+          grep -R 'QueueReason.ACTION_RESOLVED' -n src/agentforge
+
+      - name: Prove Run Action ToolCall lock order
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          source = Path("src/agentforge/infrastructure/db/runtime_store.py").read_text()
+          tree = ast.parse(source)
+          fn = next(
+              node for node in ast.walk(tree)
+              if isinstance(node, ast.AsyncFunctionDef) and node.name == "resolve_action"
+          )
+          body = ast.get_source_segment(source, fn) or ""
+          run_pos = body.find("select(RunRow)")
+          action_pos = body.find("select(ExternalActionRow)")
+          call_pos = body.find("select(ToolCallRow)")
+          if min(run_pos, action_pos, call_pos) < 0 or not run_pos < action_pos < call_pos:
+              raise SystemExit(
+                  f"invalid resolution lock order: Run={run_pos}, Action={action_pos}, Call={call_pos}"
+              )
+          if "ExternalActionStatus.MANUAL_REVIEW" not in body:
+              raise SystemExit("manual resolution is not fenced to MANUAL_REVIEW")
+          if "ToolCallStatus.UNRESOLVED" not in body:
+              raise SystemExit("manual resolution lacks UNRESOLVED ToolCall projection guard")
+          print("Run -> ExternalAction -> ToolCall lock order: PASS")
+          PY
+
+      - name: Prove one final resolution and replay semantics
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          grep -n 'uq_action_resolutions_external_action' migrations/versions/0015_action_resolution.py
+          python - <<'PY'
+          from pathlib import Path
+
+          source = Path("src/agentforge/infrastructure/db/runtime_store.py").read_text()
+          start = source.index("async def resolve_action")
+          end = source.index("\n    async def claim_next_run", start)
+          body = source[start:end]
+          for token in [
+              "existing is not None",
+              "same_request",
+              "contradictory final resolution",
+              "ActionResolutionConflictError",
+          ]:
+              if token not in body:
+                  raise SystemExit(f"missing final-resolution invariant: {token}")
+          print("single final resolution + exact replay: PASS")
+          PY
+
+      - name: Prove cancelled resolution is fact-only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          source = Path("src/agentforge/infrastructure/db/runtime_store.py").read_text()
+          tree = ast.parse(source)
+          fn = next(
+              node for node in ast.walk(tree)
+              if isinstance(node, ast.AsyncFunctionDef) and node.name == "resolve_action"
+          )
+          body = ast.get_source_segment(source, fn) or ""
+          cancelled = body.find("if run_row.status is RunStatus.CANCELLED")
+          queued = body.find("run_row.status = RunStatus.QUEUED")
+          if cancelled < 0 or queued < 0 or cancelled >= queued:
+              raise SystemExit("CANCELLED branch must dominate any ACTION_RESOLVED queue")
+          if "Post-terminal resolution updates facts only" not in body:
+              raise SystemExit("fact-only CANCELLED resolution branch missing")
+          print("CANCELLED manual resolution cannot reopen business progression: PASS")
+          PY
+
+      - name: Prove success deadline and failure branches
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          source = Path("src/agentforge/infrastructure/db/runtime_store.py").read_text()
+          start = source.index("async def resolve_action")
+          end = source.index("\n    async def claim_next_run", start)
+          body = source[start:end]
+          required = [
+              "db_now < run_row.deadline_at",
+              "QueueReason.ACTION_RESOLVED",
+              "DEADLINE_EXCEEDED_AFTER_ACTION_RESOLUTION",
+              "MANUAL_ACTION_RESOLUTION_FAILED",
+              "MANUAL_ACTION_RESOLUTION_ABORTED",
+          ]
+          for token in required:
+              if token not in body:
+                  raise SystemExit(f"manual continuation branch missing: {token}")
+          print("manual success/deadline/failure branches: PASS")
+          PY
+
+      - name: Verify explicit E2 regression cases
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          grep -R 'test_manual_success_resolution_requeues_action_resolved_and_continues' -n tests
+          grep -R 'test_manual_success_after_deadline_finalizes_action_but_fails_run' -n tests
+          grep -R 'test_manual_failed_or_aborted_resolution_terminalizes_failed_run' -n tests
+          grep -R 'test_cancelled_manual_review_resolution_never_reopens_run_and_is_idempotent' -n tests
+          grep -R 'test_manual_resolution_rejects_non_manual_review_action' -n tests
+
+      - name: Run independent E2 acceptance gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ./scripts/validate_stage31_containerized.sh
