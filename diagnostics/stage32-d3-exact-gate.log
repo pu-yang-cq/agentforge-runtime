@@ -1,0 +1,482 @@
+exit_code=1
+==> Stage 3.1 acceptance: isolated Python 3.14 + PostgreSQL 18 environment
+ validator Pulling 
+ postgres Pulling 
+ 6b37362b3da7 Pulling fs layer 
+ 5c21337b2448 Pulling fs layer 
+ 8def98961a31 Pulling fs layer 
+ ad232412d02e Pulling fs layer 
+ 44b21d030312 Pulling fs layer 
+ ad232412d02e Waiting 
+ 44b21d030312 Waiting 
+ 5c21337b2448 Downloading [>                                                  ]  13.78kB/1.294MB
+ 8def98961a31 Downloading [>                                                  ]    129kB/12.36MB
+ 5c21337b2448 Verifying Checksum 
+ 5c21337b2448 Download complete 
+ 6b37362b3da7 Downloading [>                                                  ]  310.2kB/29.83MB
+ 8def98961a31 Verifying Checksum 
+ 8def98961a31 Download complete 
+ 6b37362b3da7 Downloading [===============================================>   ]  28.32MB/29.83MB
+ 6b37362b3da7 Verifying Checksum 
+ 6b37362b3da7 Download complete 
+ ad232412d02e Downloading [==================================================>]     249B/249B
+ ad232412d02e Verifying Checksum 
+ 6b37362b3da7 Extracting [>                                                  ]  327.7kB/29.83MB
+ 6b37362b3da7 Extracting [===========>                                       ]  6.881MB/29.83MB
+ 774043ccc8cc Pulling fs layer 
+ 211cec8da20e Pulling fs layer 
+ c56d732b49fe Pulling fs layer 
+ a9bacfc8d232 Pulling fs layer 
+ c043c1caa591 Pulling fs layer 
+ 6bd876b3b38f Pulling fs layer 
+ bdbb8057313b Pulling fs layer 
+ d1c18bcbca3a Pulling fs layer 
+ 0e6c3beb32b1 Pulling fs layer 
+ 980abddbe295 Pulling fs layer 
+ 5178c10d12ba Pulling fs layer 
+ 9dd6e8795674 Pulling fs layer 
+ ddda533f81f8 Pulling fs layer 
+ c56d732b49fe Waiting 
+ a9bacfc8d232 Waiting 
+ c043c1caa591 Waiting 
+ 6bd876b3b38f Waiting 
+ bdbb8057313b Waiting 
+ d1c18bcbca3a Waiting 
+ 0e6c3beb32b1 Waiting 
+ 980abddbe295 Waiting 
+ 5178c10d12ba Waiting 
+ 9dd6e8795674 Waiting 
+ ddda533f81f8 Waiting 
+ 44b21d030312 Downloading [>                                                  ]  244.4kB/23.52MB
+ 6b37362b3da7 Extracting [==================>                                ]  10.81MB/29.83MB
+ 44b21d030312 Downloading [===========>                                       ]  5.407MB/23.52MB
+ 6b37362b3da7 Extracting [==========================>                        ]  16.06MB/29.83MB
+ 44b21d030312 Downloading [=====================>                             ]  10.06MB/23.52MB
+ 211cec8da20e Downloading [==================================================>]  1.169kB/1.169kB
+ 211cec8da20e Verifying Checksum 
+ 211cec8da20e Download complete 
+ 774043ccc8cc Downloading [>                                                  ]  294.3kB/28.24MB
+ 6b37362b3da7 Extracting [========================================>          ]  23.92MB/29.83MB
+ 44b21d030312 Downloading [======================>                            ]  10.55MB/23.52MB
+ 774043ccc8cc Downloading [========================================>          ]  22.71MB/28.24MB
+ 774043ccc8cc Verifying Checksum 
+ 774043ccc8cc Download complete 
+ 774043ccc8cc Extracting [>                                                  ]  294.9kB/28.24MB
+ 44b21d030312 Downloading [=========================================>         ]  19.36MB/23.52MB
+ 6b37362b3da7 Extracting [===========================================>       ]  26.21MB/29.83MB
+ c56d732b49fe Downloading [>                                                  ]  48.55kB/4.534MB
+ 774043ccc8cc Extracting [========>                                          ]  5.014MB/28.24MB
+ c56d732b49fe Verifying Checksum 
+ c56d732b49fe Download complete 
+ 44b21d030312 Downloading [============================================>      ]  21.05MB/23.52MB
+ 44b21d030312 Verifying Checksum 
+ 44b21d030312 Download complete 
+ a9bacfc8d232 Downloading [>                                                  ]  15.79kB/1.25MB
+ a9bacfc8d232 Verifying Checksum 
+ a9bacfc8d232 Download complete 
+ 6b37362b3da7 Extracting [===============================================>   ]  28.51MB/29.83MB
+ 774043ccc8cc Extracting [================>                                  ]  9.142MB/28.24MB
+ 774043ccc8cc Extracting [====================>                              ]   11.5MB/28.24MB
+ c043c1caa591 Downloading [>                                                  ]  81.32kB/8.066MB
+ 6bd876b3b38f Downloading [>                                                  ]  15.79kB/1.196MB
+ bdbb8057313b Downloading [==================================================>]     116B/116B
+ bdbb8057313b Verifying Checksum 
+ bdbb8057313b Download complete 
+ 6bd876b3b38f Download complete 
+ 774043ccc8cc Extracting [================================>                  ]  18.28MB/28.24MB
+ c043c1caa591 Verifying Checksum 
+ c043c1caa591 Download complete 
+ 6b37362b3da7 Extracting [================================================>  ]  29.16MB/29.83MB
+ 774043ccc8cc Extracting [=========================================>         ]   23.3MB/28.24MB
+ 6b37362b3da7 Extracting [==================================================>]  29.83MB/29.83MB
+ 6b37362b3da7 Pull complete 
+ 5c21337b2448 Extracting [=>                                                 ]  32.77kB/1.294MB
+ d1c18bcbca3a Downloading [==================================================>]  3.138kB/3.138kB
+ d1c18bcbca3a Verifying Checksum 
+ d1c18bcbca3a Download complete 
+ 980abddbe295 Downloading [=========>                                         ]  3.499kB/19.32kB
+ 980abddbe295 Downloading [==================================================>]  19.32kB/19.32kB
+ 980abddbe295 Verifying Checksum 
+ 980abddbe295 Download complete 
+ 0e6c3beb32b1 Downloading [>                                                  ]  539.4kB/113.9MB
+ 774043ccc8cc Extracting [==========================================>        ]  23.89MB/28.24MB
+ 5c21337b2448 Extracting [===================================>               ]  917.5kB/1.294MB
+ 5c21337b2448 Extracting [==================================================>]  1.294MB/1.294MB
+ 0e6c3beb32b1 Downloading [==========>                                        ]  22.89MB/113.9MB
+ 774043ccc8cc Extracting [==============================================>    ]  26.54MB/28.24MB
+ 5178c10d12ba Downloading [==================================================>]     128B/128B
+ 5178c10d12ba Verifying Checksum 
+ 5178c10d12ba Download complete 
+ 9dd6e8795674 Downloading [============================>                      ]    3.5kB/6.109kB
+ 9dd6e8795674 Download complete 
+ 0e6c3beb32b1 Downloading [====================>                              ]  46.82MB/113.9MB
+ 774043ccc8cc Extracting [===============================================>   ]  26.84MB/28.24MB
+ 0e6c3beb32b1 Downloading [==================================>                ]  78.09MB/113.9MB
+ 0e6c3beb32b1 Downloading [================================================>  ]    111MB/113.9MB
+ 0e6c3beb32b1 Verifying Checksum 
+ 0e6c3beb32b1 Download complete 
+ ddda533f81f8 Downloading [==================================================>]     184B/184B
+ ddda533f81f8 Verifying Checksum 
+ ddda533f81f8 Download complete 
+ 774043ccc8cc Extracting [================================================>  ]  27.43MB/28.24MB
+ 774043ccc8cc Extracting [==================================================>]  28.24MB/28.24MB
+ 774043ccc8cc Pull complete 
+ 211cec8da20e Extracting [==================================================>]  1.169kB/1.169kB
+ 211cec8da20e Extracting [==================================================>]  1.169kB/1.169kB
+ 211cec8da20e Pull complete 
+ c56d732b49fe Extracting [>                                                  ]  65.54kB/4.534MB
+ c56d732b49fe Extracting [==>                                                ]  262.1kB/4.534MB
+ c56d732b49fe Extracting [=================================================> ]  4.522MB/4.534MB
+ c56d732b49fe Extracting [==================================================>]  4.534MB/4.534MB
+ c56d732b49fe Pull complete 
+ 5c21337b2448 Pull complete 
+ a9bacfc8d232 Extracting [=>                                                 ]  32.77kB/1.25MB
+ 8def98961a31 Extracting [>                                                  ]  131.1kB/12.36MB
+ a9bacfc8d232 Extracting [==================================================>]   1.25MB/1.25MB
+ a9bacfc8d232 Pull complete 
+ c043c1caa591 Extracting [>                                                  ]   98.3kB/8.066MB
+ 8def98961a31 Extracting [===>                                               ]  917.5kB/12.36MB
+ c043c1caa591 Extracting [=====================>                             ]  3.441MB/8.066MB
+ 8def98961a31 Extracting [===============>                                   ]  3.801MB/12.36MB
+ c043c1caa591 Extracting [==================================>                ]  5.603MB/8.066MB
+ 8def98961a31 Extracting [==========================>                        ]  6.554MB/12.36MB
+ c043c1caa591 Extracting [==============================================>    ]  7.569MB/8.066MB
+ c043c1caa591 Extracting [==================================================>]  8.066MB/8.066MB
+ c043c1caa591 Pull complete 
+ 6bd876b3b38f Extracting [=>                                                 ]  32.77kB/1.196MB
+ 8def98961a31 Extracting [=======================================>           ]  9.699MB/12.36MB
+ 6bd876b3b38f Extracting [==================================================>]  1.196MB/1.196MB
+ 6bd876b3b38f Extracting [==================================================>]  1.196MB/1.196MB
+ 6bd876b3b38f Pull complete 
+ bdbb8057313b Extracting [==================================================>]     116B/116B
+ bdbb8057313b Extracting [==================================================>]     116B/116B
+ bdbb8057313b Pull complete 
+ d1c18bcbca3a Extracting [==================================================>]  3.138kB/3.138kB
+ d1c18bcbca3a Extracting [==================================================>]  3.138kB/3.138kB
+ d1c18bcbca3a Pull complete 
+ 8def98961a31 Extracting [===========================================>       ]  10.88MB/12.36MB
+ 0e6c3beb32b1 Extracting [>                                                  ]  557.1kB/113.9MB
+ 8def98961a31 Extracting [===============================================>   ]  11.67MB/12.36MB
+ 0e6c3beb32b1 Extracting [===>                                               ]  7.242MB/113.9MB
+ 8def98961a31 Extracting [==================================================>]  12.36MB/12.36MB
+ 8def98961a31 Pull complete 
+ ad232412d02e Extracting [==================================================>]     249B/249B
+ ad232412d02e Extracting [==================================================>]     249B/249B
+ ad232412d02e Pull complete 
+ 44b21d030312 Extracting [>                                                  ]  262.1kB/23.52MB
+ 0e6c3beb32b1 Extracting [====>                                              ]   9.47MB/113.9MB
+ 44b21d030312 Extracting [================>                                  ]  7.864MB/23.52MB
+ 0e6c3beb32b1 Extracting [=====>                                             ]  12.81MB/113.9MB
+ 44b21d030312 Extracting [================================>                  ]   15.2MB/23.52MB
+ 0e6c3beb32b1 Extracting [=======>                                           ]  16.15MB/113.9MB
+ 44b21d030312 Extracting [===============================================>   ]  22.28MB/23.52MB
+ 44b21d030312 Extracting [==================================================>]  23.52MB/23.52MB
+ 0e6c3beb32b1 Extracting [========>                                          ]   19.5MB/113.9MB
+ 44b21d030312 Pull complete 
+ validator Pulled 
+ 0e6c3beb32b1 Extracting [===========>                                       ]  25.07MB/113.9MB
+ 0e6c3beb32b1 Extracting [==============>                                    ]  33.42MB/113.9MB
+ 0e6c3beb32b1 Extracting [==================>                                ]  42.89MB/113.9MB
+ 0e6c3beb32b1 Extracting [======================>                            ]  51.81MB/113.9MB
+ 0e6c3beb32b1 Extracting [=========================>                         ]  57.38MB/113.9MB
+ 0e6c3beb32b1 Extracting [============================>                      ]  64.06MB/113.9MB
+ 0e6c3beb32b1 Extracting [================================>                  ]  74.65MB/113.9MB
+ 0e6c3beb32b1 Extracting [====================================>              ]  83.56MB/113.9MB
+ 0e6c3beb32b1 Extracting [========================================>          ]  92.47MB/113.9MB
+ 0e6c3beb32b1 Extracting [==========================================>        ]  97.48MB/113.9MB
+ 0e6c3beb32b1 Extracting [============================================>      ]  101.4MB/113.9MB
+ 0e6c3beb32b1 Extracting [=============================================>     ]  104.7MB/113.9MB
+ 0e6c3beb32b1 Extracting [===============================================>   ]  108.1MB/113.9MB
+ 0e6c3beb32b1 Extracting [================================================>  ]  110.3MB/113.9MB
+ 0e6c3beb32b1 Extracting [=================================================> ]  112.5MB/113.9MB
+ 0e6c3beb32b1 Extracting [==================================================>]  113.9MB/113.9MB
+ 0e6c3beb32b1 Pull complete 
+ 980abddbe295 Extracting [==================================================>]  19.32kB/19.32kB
+ 980abddbe295 Extracting [==================================================>]  19.32kB/19.32kB
+ 980abddbe295 Pull complete 
+ 5178c10d12ba Extracting [==================================================>]     128B/128B
+ 5178c10d12ba Extracting [==================================================>]     128B/128B
+ 5178c10d12ba Pull complete 
+ 9dd6e8795674 Extracting [==================================================>]  6.109kB/6.109kB
+ 9dd6e8795674 Extracting [==================================================>]  6.109kB/6.109kB
+ 9dd6e8795674 Pull complete 
+ ddda533f81f8 Extracting [==================================================>]     184B/184B
+ ddda533f81f8 Extracting [==================================================>]     184B/184B
+ ddda533f81f8 Pull complete 
+ postgres Pulled 
+ Network agentforge_stage31_acceptance_default  Creating
+ Network agentforge_stage31_acceptance_default  Created
+ Container agentforge_stage31_acceptance-postgres-1  Creating
+ Container agentforge_stage31_acceptance-postgres-1  Created
+ Container agentforge_stage31_acceptance-validator-1  Creating
+ Container agentforge_stage31_acceptance-validator-1  Created
+Attaching to validator-1
+validator-1  | ==> Stage 3.1 container acceptance: lockfile preflight
+validator-1  | ==> Stage 3.1 container acceptance: Python 3.14 / locked dependency environment
+validator-1  | Using CPython 3.14.7 interpreter at: /usr/local/bin/python3.14
+validator-1  | Resolved 52 packages in 1ms
+validator-1  | Using CPython 3.14.7 interpreter at: /usr/local/bin/python3.14
+validator-1  | Creating virtual environment at: /tmp/agentforge-venv
+validator-1  | Resolved 52 packages in 0.91ms
+validator-1  |    Building agentforge @ file:///workspace
+validator-1  |       Built agentforge @ file:///workspace
+validator-1  | Downloading pydantic-core (2.0MiB)
+validator-1  | Downloading pygments (1.2MiB)
+validator-1  | Downloading uvloop (4.2MiB)
+validator-1  | Downloading psycopg-binary (5.0MiB)
+validator-1  | Downloading ruff (9.9MiB)
+validator-1  | Downloading sqlalchemy (3.2MiB)
+validator-1  | Downloading mypy (14.0MiB)
+validator-1  |  Downloaded pygments
+validator-1  |  Downloaded pydantic-core
+validator-1  |  Downloaded sqlalchemy
+validator-1  |  Downloaded psycopg-binary
+validator-1  |  Downloaded uvloop
+validator-1  |  Downloaded ruff
+validator-1  |  Downloaded mypy
+validator-1  | Prepared 49 packages in 546ms
+validator-1  | Installed 49 packages in 71ms
+validator-1  |  + agentforge==0.1.0 (from file:///workspace)
+validator-1  |  + alembic==1.20.0
+validator-1  |  + annotated-doc==0.0.5
+validator-1  |  + annotated-types==0.8.0
+validator-1  |  + anyio==4.15.1
+validator-1  |  + certifi==2026.7.22
+validator-1  |  + charset-normalizer==3.5.2
+validator-1  |  + click==8.5.0
+validator-1  |  + docker==7.2.0
+validator-1  |  + fastapi==0.142.2
+validator-1  |  + greenlet==3.5.6
+validator-1  |  + h11==0.16.0
+validator-1  |  + httpcore==1.0.9
+validator-1  |  + httptools==0.8.0
+validator-1  |  + httpx==0.28.1
+validator-1  |  + idna==3.20
+validator-1  |  + iniconfig==2.3.0
+validator-1  |  + librt==0.16.0
+validator-1  |  + mako==1.4.3
+validator-1  |  + markupsafe==3.0.4
+validator-1  |  + mypy==1.20.2
+validator-1  |  + mypy-extensions==1.1.0
+validator-1  |  + opentelemetry-api==1.45.0
+validator-1  |  + packaging==26.3
+validator-1  |  + pathspec==1.1.1
+validator-1  |  + pluggy==1.6.0
+validator-1  |  + psycopg==3.3.6
+validator-1  |  + psycopg-binary==3.3.6
+validator-1  |  + pydantic==2.13.5
+validator-1  |  + pydantic-core==2.46.5
+validator-1  |  + pydantic-settings==2.15.0
+validator-1  |  + pygments==2.21.0
+validator-1  |  + pytest==9.1.1
+validator-1  |  + pytest-asyncio==1.4.0
+validator-1  |  + python-dotenv==1.2.4
+validator-1  |  + pyyaml==6.0.3
+validator-1  |  + requests==2.34.2
+validator-1  |  + ruff==0.16.10
+validator-1  |  + sqlalchemy==2.0.54
+validator-1  |  + starlette==1.7.0
+validator-1  |  + testcontainers==4.15.0
+validator-1  |  + typing-extensions==4.16.0
+validator-1  |  + typing-inspection==0.4.4
+validator-1  |  + urllib3==2.8.0
+validator-1  |  + uvicorn==0.54.0
+validator-1  |  + uvloop==0.23.0
+validator-1  |  + watchfiles==1.3.0
+validator-1  |  + websockets==17.2
+validator-1  |  + wrapt==2.5.0
+validator-1  | ==> Stage 3.1 container acceptance: installed project import
+validator-1  | agentforge import: /workspace/src/agentforge/__init__.py
+validator-1  | ==> Stage 3.1 container acceptance: quality gates
+validator-1  | I001 [*] Import block is un-sorted or un-formatted
+validator-1  |   --> src/agentforge/application/ports.py:1:1
+validator-1  |    |
+validator-1  |  1 | / from __future__ import annotations
+validator-1  |  2 | |
+validator-1  |  3 | | from dataclasses import dataclass
+validator-1  |  4 | | from typing import Any, Protocol, runtime_checkable
+validator-1  |  5 | | from uuid import UUID
+validator-1  |  6 | |
+validator-1  |  7 | | from agentforge.domain.actions import ActionSnapshot, ExternalAction
+validator-1  |  8 | | from agentforge.domain.enums import ReconciliationBusinessResult
+validator-1  |  9 | | from agentforge.domain.model_contract import ModelRequest, ModelResponse, ModelToolSpec
+validator-1  | 10 | | from agentforge.domain.models import (
+validator-1  | 11 | |     AgentVersion,
+validator-1  | 12 | |     ModelInvocation,
+validator-1  | 13 | |     Run,
+validator-1  | 14 | |     RunMessage,
+validator-1  | 15 | |     ReconciliationAttempt,
+validator-1  | 16 | |     RunState,
+validator-1  | 17 | |     ToolBinding,
+validator-1  | 18 | |     ToolCall,
+validator-1  | 19 | |     ToolExecutionAttempt,
+validator-1  | 20 | |     ToolProposal,
+validator-1  | 21 | | )
+validator-1  |    | |_^
+validator-1  | help: Organize imports
+validator-1  |    |
+validator-1  | 12 |     ModelInvocation,
+validator-1  | 13 +     ReconciliationAttempt,
+validator-1  | 14 |     Run,
+validator-1  | 15 |     RunMessage,
+validator-1  |    -     ReconciliationAttempt,
+validator-1  | 16 |     RunState,
+validator-1  |    |
+validator-1  | 
+validator-1  | I001 [*] Import block is un-sorted or un-formatted
+validator-1  |   --> src/agentforge/infrastructure/db/execution_recorder.py:1:1
+validator-1  |    |
+validator-1  |  1 | / from __future__ import annotations
+validator-1  |  2 | |
+validator-1  |  3 | | from datetime import datetime, timedelta
+validator-1  |  4 | | from typing import Any, cast
+validator-1  |  5 | | from uuid import UUID, uuid4
+validator-1  |  6 | |
+validator-1  |  7 | | from sqlalchemy import func, select, text, update
+validator-1  |  8 | | from sqlalchemy.engine import CursorResult
+validator-1  |  9 | | from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+validator-1  | 10 | | from sqlalchemy.sql import Select
+validator-1  | 11 | |
+validator-1  | 12 | | from agentforge.application.errors import BusinessProgressionBlockedError, StaleExecutorError
+validator-1  | 13 | | from agentforge.application.ports import ExecutionRecorder, ReconciliationResult
+validator-1  | 14 | | from agentforge.domain.actions import ActionSnapshot, ExternalAction
+validator-1  | 15 | | from agentforge.domain.enums import (
+validator-1  | 16 | |     EventType,
+validator-1  | 17 | |     ExternalActionStatus,
+validator-1  | 18 | |     MessageRole,
+validator-1  | 19 | |     ModelInvocationStatus,
+validator-1  | 20 | |     ReconciliationAttemptStatus,
+validator-1  | 21 | |     ReconciliationBusinessResult,
+validator-1  | 22 | |     ReconciliationMode,
+validator-1  | 23 | |     QueueReason,
+validator-1  | 24 | |     RunStatus,
+validator-1  | 25 | |     ToolCallStatus,
+validator-1  | 26 | |     ToolEffectType,
+validator-1  | 27 | |     ToolExecutionAttemptStatus,
+validator-1  | 28 | | )
+validator-1  | 29 | | from agentforge.domain.models import (
+validator-1  | 30 | |     ModelInvocation,
+validator-1  | 31 | |     ReconciliationAttempt,
+validator-1  | 32 | |     Run,
+validator-1  | 33 | |     RunMessage,
+validator-1  | 34 | |     RunState,
+validator-1  | 35 | |     ToolBinding,
+validator-1  | 36 | |     ToolCall,
+validator-1  | 37 | |     ToolExecutionAttempt,
+validator-1  | 38 | |     ToolProposal,
+validator-1  | 39 | | )
+validator-1  | 40 | | from agentforge.infrastructure.db.mappers import (
+validator-1  | 41 | |     action_snapshot_from_row,
+validator-1  | 42 | |     external_action_from_row,
+validator-1  | 43 | |     message_from_row,
+validator-1  | 44 | |     run_state_from_row,
+validator-1  | 45 | |     tool_call_from_row,
+validator-1  | 46 | | )
+validator-1  | 47 | | from agentforge.infrastructure.db.models import (
+validator-1  | 48 | |     ActionSnapshotRow,
+validator-1  | 49 | |     AgentVersionToolRow,
+validator-1  | 50 | |     DomainEventRow,
+validator-1  | 51 | |     ExternalActionRow,
+validator-1  | 52 | |     ModelInvocationRow,
+validator-1  | 53 | |     ReconciliationAttemptRow,
+validator-1  | 54 | |     RunCounterRow,
+validator-1  | 55 | |     RunMessageRow,
+validator-1  | 56 | |     RunRow,
+validator-1  | 57 | |     RunStateRow,
+validator-1  | 58 | |     ToolCallRow,
+validator-1  | 59 | |     ToolExecutionAttemptRow,
+validator-1  | 60 | |     ToolProposalRow,
+validator-1  | 61 | |     ToolVersionRow,
+validator-1  | 62 | | )
+validator-1  | 63 | | from agentforge.infrastructure.db.runtime_store import _allocate_event_sequences
+validator-1  | 64 | | from agentforge.runtime.tool_coordinator import tool_result_message_content
+validator-1  |    | |___________________________________________________________________________^
+validator-1  | help: Organize imports
+validator-1  |    |
+validator-1  | 19 |     ModelInvocationStatus,
+validator-1  | 20 +     QueueReason,
+validator-1  | 21 |     ReconciliationAttemptStatus,
+validator-1  | 22 |     ReconciliationBusinessResult,
+validator-1  | 23 |     ReconciliationMode,
+validator-1  |    -     QueueReason,
+validator-1  | 24 |     RunStatus,
+validator-1  |    |
+validator-1  | 
+validator-1  | I001 [*] Import block is un-sorted or un-formatted
+validator-1  |   --> tests/integration/test_postgres_runtime.py:31:1
+validator-1  |    |
+validator-1  | 29 |       )
+validator-1  | 30 |
+validator-1  | 31 | / from agentforge.application.errors import (
+validator-1  | 32 | |     BusinessProgressionBlockedError,
+validator-1  | 33 | |     IdempotencyConflictError,
+validator-1  | 34 | |     RunExecutionFailedError,
+validator-1  | 35 | |     SideEffectTransientError,
+validator-1  | 36 | |     StaleExecutorError,
+validator-1  | 37 | |     ToolAdapterError,
+validator-1  | 38 | |     ToolTransientError,
+validator-1  | 39 | | )
+validator-1  | 40 | | from agentforge.application.run_manager import RunManager
+validator-1  | 41 | | from agentforge.application.worker import CoreWorker
+validator-1  | 42 | | from agentforge.demo import (
+validator-1  | 43 | |     DEMO_AGENT_ID,
+validator-1  | 44 | |     DEMO_AGENT_VERSION_ID,
+validator-1  | 45 | |     DEMO_TOOL_ID,
+validator-1  | 46 | |     DEMO_TOOL_VERSION_ID,
+validator-1  | 47 | |     build_demo_model,
+validator-1  | 48 | |     build_demo_registry,
+validator-1  | 49 | | )
+validator-1  | 50 | | from agentforge.domain.enums import (
+validator-1  | 51 | |     EventType,
+validator-1  | 52 | |     QueueReason,
+validator-1  | 53 | |     ReconciliationAttemptStatus,
+validator-1  | 54 | |     ReconciliationBusinessResult,
+validator-1  | 55 | |     RunStatus,
+validator-1  | 56 | |     ToolCallStatus,
+validator-1  | 57 | |     ToolEffectType,
+validator-1  | 58 | |     ToolExecutionAttemptStatus,
+validator-1  | 59 | | )
+validator-1  | 60 | | from agentforge.application.ports import ReconciliationResult
+validator-1  | 61 | | from agentforge.domain.models import ToolProposal
+validator-1  | 62 | | from agentforge.infrastructure.db.execution_recorder import (
+validator-1  | 63 | |     PostgresExecutionRecorder,
+validator-1  | 64 | |     PostgresExecutionRecorderFactory,
+validator-1  | 65 | | )
+validator-1  | 66 | | from agentforge.infrastructure.db.models import (
+validator-1  | 67 | |     AgentRow,
+validator-1  | 68 | |     AgentVersionRow,
+validator-1  | 69 | |     AgentVersionToolRow,
+validator-1  | 70 | |     DomainEventRow,
+validator-1  | 71 | |     ReconciliationAttemptRow,
+validator-1  | 72 | |     RunMessageRow,
+validator-1  | 73 | |     ToolCallRow,
+validator-1  | 74 | |     ToolDefinitionRow,
+validator-1  | 75 | |     ToolExecutionAttemptRow,
+validator-1  | 76 | |     ToolProposalRow,
+validator-1  | 77 | |     ToolVersionRow,
+validator-1  | 78 | | )
+validator-1  | 79 | | from agentforge.infrastructure.db.runtime_store import PostgresRuntimeStore
+validator-1  | 80 | | from agentforge.infrastructure.db.session import create_engine, create_session_factory
+validator-1  | 81 | | from agentforge.runtime.fake_model import FinalStep, ScriptedFakeModel, ToolStep
+validator-1  | 82 | | from agentforge.runtime.native_runner import NativeRunner
+validator-1  | 83 | | from agentforge.runtime.tool_coordinator import ToolCoordinator
+validator-1  | 84 | | from agentforge.runtime.tools import FunctionTool, InMemoryToolRegistry, SideEffectFunctionTool
+validator-1  |    | |_______________________________________________________________________________________________^
+validator-1  | help: Organize imports
+validator-1  |    |
+validator-1  | 39 | )
+validator-1  | 40 + from agentforge.application.ports import ReconciliationResult
+validator-1  | 41 | from agentforge.application.run_manager import RunManager
+validator-1  | --------------------------------------------------------------------------------
+validator-1  | 60 | )
+validator-1  |    - from agentforge.application.ports import ReconciliationResult
+validator-1  | 61 | from agentforge.domain.models import ToolProposal
+validator-1  |    |
+validator-1  | 
+validator-1  | Found 3 errors.
+validator-1  | [*] 3 fixable with the `--fix` option.
+[Kvalidator-1 exited with code 1
+Aborting on container exit...
+ Container agentforge_stage31_acceptance-validator-1  Stopping
+ Container agentforge_stage31_acceptance-validator-1  Stopped
+
