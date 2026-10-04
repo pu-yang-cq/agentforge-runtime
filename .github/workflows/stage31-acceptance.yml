@@ -28,24 +28,24 @@ jobs:
             exit 2
           }
 
-      - name: Reconstruct and verify RC1 source
+      - name: Reconstruct and verify RC3 source
         shell: bash
         run: |
           set -Eeuo pipefail
-          rm -rf /tmp/agentforge-rc2
-          mkdir -p /tmp/agentforge-rc2
-          cat rc/rc2.part*.b64 | base64 -d > /tmp/agentforge-rc2.tar.gz
-          echo "81a5efecdd1e9a7f23918ce444b9e4fe74a03f984192961f337b4fe6ea4ed6ce  /tmp/agentforge-rc2.tar.gz" | sha256sum -c -
-          tar -xzf /tmp/agentforge-rc2.tar.gz -C /tmp/agentforge-rc2
-          test ! -f /tmp/agentforge-rc2/uv.lock || {
-            echo "RC2 payload unexpectedly contains uv.lock." >&2
+          rm -rf /tmp/agentforge-rc3
+          mkdir -p /tmp/agentforge-rc3
+          cat rc/rc3.part*.b64 | base64 -d > /tmp/agentforge-rc3.tar.gz
+          echo "f0fb353981cc27060f83c4aafa949f9dd4feb57a5b5263878ca1231e2ad582c4  /tmp/agentforge-rc3.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/agentforge-rc3.tar.gz -C /tmp/agentforge-rc3
+          test ! -f /tmp/agentforge-rc3/uv.lock || {
+            echo "RC3 payload unexpectedly contains uv.lock." >&2
             exit 2
           }
-          cp uv.lock /tmp/agentforge-rc2/uv.lock
-          echo "ea589824df68c1412a9ba797f673cf4110e122540a06e02ffcf15bb3e4fa406a  /tmp/agentforge-rc2/uv.lock" | sha256sum -c -
+          cp uv.lock /tmp/agentforge-rc3/uv.lock
+          echo "ea589824df68c1412a9ba797f673cf4110e122540a06e02ffcf15bb3e4fa406a  /tmp/agentforge-rc3/uv.lock" | sha256sum -c -
 
       - name: Run isolated Stage 3.1 target gate
         shell: bash
         run: |
-          cd /tmp/agentforge-rc2
+          cd /tmp/agentforge-rc3
           ./scripts/validate_stage31_containerized.sh
