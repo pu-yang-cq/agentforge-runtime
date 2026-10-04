@@ -1,0 +1,5 @@
+Promote Stage 3.1 V1.0-RC3 from the last target-validated mypy candidate.
+
+Source: RC2
+Evidence: mypy probe run 37180341817
+Scope: apps package markers + SQLAlchemy typing narrowing only
