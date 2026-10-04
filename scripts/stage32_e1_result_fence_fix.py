@@ -324,7 +324,8 @@ method_replace(
 
 # ---------------------------------------------------------------------------
 # Reconciliation NOT_EXECUTED: cancel suppresses physical business retry.
-# Safe NOT_EXECUTED -> ABORT/CANCEL. Unsafe evidence -> MANUAL_REVIEW/CANCEL.
+# Use a higher-priority cancelled branch so the existing D3 retry branch stays
+# byte-for-byte structurally intact.
 # ---------------------------------------------------------------------------
 method_replace(
     "src/agentforge/infrastructure/db/execution_recorder.py",
@@ -338,67 +339,62 @@ method_replace(
             ):
                 physical_number = int(
 ''',
-    '''            elif result.outcome is ReconciliationBusinessResult.NOT_EXECUTED and (
+    '''            elif (
+                result.outcome is ReconciliationBusinessResult.NOT_EXECUTED
+                and (
+                    binding.reconciliation_mode is ReconciliationMode.AUTHORITATIVE
+                    or (
+                        binding.reconciliation_mode is ReconciliationMode.BEST_EFFORT
+                        and binding.idempotency_supported
+                    )
+                )
+                and run_row.cancel_requested
+            ):
+                action_row.status = ExternalActionStatus.ABORTED
+                action_row.updated_at = db_now
+                call_row.status = ToolCallStatus.NOT_EXECUTED
+                call_row.error = "reconciliation proved NOT_EXECUTED after cancellation"
+                run_row.status = RunStatus.CANCELLED
+                run_row.queue_reason = None
+                run_row.available_at = None
+                run_row.final_output = None
+                run_row.failure_reason = None
+                run_row.completed_at = db_now
+                run_row.owner_worker_id = None
+                run_row.lease_expires_at = None
+                session.add(
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[1],
+                        event_type=EventType.ACTION_ABORTED.value,
+                        payload={
+                            "external_action_id": str(action.id),
+                            "operation_id": str(action.operation_id),
+                            "reason": "CANCEL_REQUESTED_RECONCILED_NOT_EXECUTED",
+                        },
+                    )
+                )
+                session.add(
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[2],
+                        event_type=EventType.RUN_CANCELLED.value,
+                        payload={},
+                    )
+                )
+
+            elif result.outcome is ReconciliationBusinessResult.NOT_EXECUTED and (
                 binding.reconciliation_mode is ReconciliationMode.AUTHORITATIVE
                 or (
                     binding.reconciliation_mode is ReconciliationMode.BEST_EFFORT
                     and binding.idempotency_supported
                 )
             ):
-                if run_row.cancel_requested:
-                    action_row.status = ExternalActionStatus.ABORTED
-                    action_row.updated_at = db_now
-                    call_row.status = ToolCallStatus.NOT_EXECUTED
-                    call_row.error = "reconciliation proved NOT_EXECUTED after cancellation"
-                    run_row.status = RunStatus.CANCELLED
-                    run_row.queue_reason = None
-                    run_row.available_at = None
-                    run_row.final_output = None
-                    run_row.failure_reason = None
-                    run_row.completed_at = db_now
-                    run_row.owner_worker_id = None
-                    run_row.lease_expires_at = None
-                    session.add(
-                        DomainEventRow(
-                            id=uuid4(),
-                            run_id=run.id,
-                            sequence=seqs[1],
-                            event_type=EventType.ACTION_ABORTED.value,
-                            payload={
-                                "external_action_id": str(action.id),
-                                "operation_id": str(action.operation_id),
-                                "reason": "CANCEL_REQUESTED_RECONCILED_NOT_EXECUTED",
-                            },
-                        )
-                    )
-                    session.add(
-                        DomainEventRow(
-                            id=uuid4(),
-                            run_id=run.id,
-                            sequence=seqs[2],
-                            event_type=EventType.RUN_CANCELLED.value,
-                            payload={},
-                        )
-                    )
-                else:
-                    physical_number = int(
+                physical_number = int(
 ''',
 )
-
-# Indent the existing NOT_EXECUTED retry body under the new else, up to final else.
-path = Path("src/agentforge/infrastructure/db/execution_recorder.py")
-text = path.read_text()
-start = text.index("                else:\n                    physical_number = int(", text.index("async def record_reconciliation_result"))
-body_start = start + len("                else:\n")
-end_marker = "\n            else:\n                reason = ("
-end = text.index(end_marker, body_start)
-segment = text[body_start:end]
-# Only indent if physical retry section is still at 20 spaces.
-if "                    physical_number = int(" not in segment:
-    raise SystemExit("reconciliation retry segment anchor missing")
-indented = "".join("    " + line if line.strip() else line for line in segment.splitlines(True))
-text = text[:body_start] + indented + text[end:]
-path.write_text(text)
 
 # Domain projection for safe NOT_EXECUTED after cancelled reconciliation.
 method_replace(
@@ -428,6 +424,7 @@ method_replace(
             elif run_row.status is RunStatus.QUEUED:
 ''',
 )
+
 
 # Reconciliation request budget exhaustion under cancellation => terminal
 # CANCELLED + MANUAL_REVIEW, while retryable reconciliation remains allowed.
