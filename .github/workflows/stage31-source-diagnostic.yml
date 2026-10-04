@@ -1,0 +1,32 @@
+name: Stage 3.1 Source Diagnostic
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/RUN_SOURCE_DIAGNOSTIC
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Reconstruct RC3 and print targeted source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/agentforge-diagnostic
+          mkdir -p /tmp/agentforge-diagnostic
+          cat rc/rc3.part*.b64 | base64 -d > /tmp/agentforge-rc3.tar.gz
+          echo "f0fb353981cc27060f83c4aafa949f9dd4feb57a5b5263878ca1231e2ad582c4  /tmp/agentforge-rc3.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/agentforge-rc3.tar.gz -C /tmp/agentforge-diagnostic
+          echo '===== seed_demo and imports ====='
+          nl -ba /tmp/agentforge-diagnostic/tests/integration/test_postgres_runtime.py | sed -n '1,125p'
+          echo '===== ORM config rows ====='
+          grep -n -A35 -B10 -E 'class (ToolDefinitionRow|ToolVersionRow|AgentVersionRow|AgentVersionToolRow)' /tmp/agentforge-diagnostic/src/agentforge/infrastructure/db/models.py
+          echo '===== migration contract ====='
+          nl -ba /tmp/agentforge-diagnostic/tests/unit/test_migration_contract.py | sed -n '1,110p'
