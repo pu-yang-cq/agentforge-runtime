@@ -18,6 +18,22 @@ def append_text(path: str, marker: str, block: str) -> None:
     file.write_text(text + block)
 
 
+def replace_in_method(path: str, method: str, old: str, new: str) -> None:
+    file = Path(path)
+    text = file.read_text()
+    start = text.index(f"    async def {method}(")
+    end = text.find("\n    async def ", start + 10)
+    if end < 0:
+        end = len(text)
+    body = text[start:end]
+    count = body.count(old)
+    if count != 1:
+        raise SystemExit(
+            f"{path}:{method}: expected one anchor, found {count}: {old[:160]!r}"
+        )
+    file.write_text(text[:start] + body.replace(old, new) + text[end:])
+
+
 # ---------------------------------------------------------------------------
 # Domain: cancellation is orthogonal durable intent, not rollback.
 # ---------------------------------------------------------------------------
@@ -366,43 +382,16 @@ def _assert_model_budget(run: RunRow, state: RunStateRow) -> None:
 ''',
 )
 
-# Add cancellation guard to business-start transactions by inserting directly
-# after their owned Run lock. Specific anchors keep safety-work reconciliation
-# deliberately exempt.
-for anchor in [
-    '''            run_row = await _lock_owned_run(
-                session,
-                run_id=call.run_id,
-                expected_generation=expected_generation,
-            )
-            action_row = (
-''',
-]:
-    # First occurrence is Action Commit. Only replace one.
-    replace_once(
-        "src/agentforge/infrastructure/db/execution_recorder.py",
-        anchor,
-        '''            run_row = await _lock_owned_run(
-                session,
-                run_id=call.run_id,
-                expected_generation=expected_generation,
-            )
-            _assert_business_progression_allowed(run_row)
-            action_row = (
-''',
-    )
-
-# record_recovered_read_started
-replace_once(
+# Add cancellation guards only to business-start/consequence methods.
+# Reconciliation safety-work methods deliberately remain exempt.
+replace_in_method(
     "src/agentforge/infrastructure/db/execution_recorder.py",
+    "record_side_effect_attempt_started",
     '''            run_row = await _lock_owned_run(
                 session,
                 run_id=call.run_id,
                 expected_generation=expected_generation,
             )
-            await _assert_no_active_tool_calls(session, call.run_id)
-            await _assert_no_started_tool_attempts(session, call.run_id)
-            state = await _lock_run_state(session, call.run_id)
 ''',
     '''            run_row = await _lock_owned_run(
                 session,
@@ -410,79 +399,101 @@ replace_once(
                 expected_generation=expected_generation,
             )
             _assert_business_progression_allowed(run_row)
-            await _assert_no_active_tool_calls(session, call.run_id)
-            await _assert_no_started_tool_attempts(session, call.run_id)
-            state = await _lock_run_state(session, call.run_id)
 ''',
 )
 
-# begin_model_invocation
-replace_once(
+replace_in_method(
     "src/agentforge/infrastructure/db/execution_recorder.py",
-    '''            row = await _lock_owned_run(
+    "record_recovered_read_started",
+    '''            run_row = await _lock_owned_run(
+                session, run_id=call.run_id, expected_generation=expected_generation
+            )
+''',
+    '''            run_row = await _lock_owned_run(
+                session, run_id=call.run_id, expected_generation=expected_generation
+            )
+            _assert_business_progression_allowed(run_row)
+''',
+)
+
+replace_in_method(
+    "src/agentforge/infrastructure/db/execution_recorder.py",
+    "begin_model_invocation",
+    '''            run_row = await _lock_owned_run(
                 session, run_id=run_id, expected_generation=expected_generation
             )
-            await _assert_no_active_tool_calls(session, run_id)
-            await _assert_no_started_tool_attempts(session, run_id)
-            await _assert_no_started_model_invocations(session, run_id)
+''',
+    '''            run_row = await _lock_owned_run(
+                session, run_id=run_id, expected_generation=expected_generation
+            )
+            _assert_business_progression_allowed(run_row)
+''',
+)
+
+replace_in_method(
+    "src/agentforge/infrastructure/db/execution_recorder.py",
+    "record_model_tool_started",
+    '''            run_row = await _lock_owned_run(
+                session,
+                run_id=invocation.run_id,
+                expected_generation=expected_generation,
+            )
+''',
+    '''            run_row = await _lock_owned_run(
+                session,
+                run_id=invocation.run_id,
+                expected_generation=expected_generation,
+            )
+            _assert_business_progression_allowed(run_row)
+''',
+)
+
+replace_in_method(
+    "src/agentforge/infrastructure/db/execution_recorder.py",
+    "record_model_side_effect_prepared",
+    '''            run_row = await _lock_owned_run(
+                session,
+                run_id=call.run_id,
+                expected_generation=expected_generation,
+            )
+''',
+    '''            run_row = await _lock_owned_run(
+                session,
+                run_id=call.run_id,
+                expected_generation=expected_generation,
+            )
+            _assert_business_progression_allowed(run_row)
+''',
+)
+
+replace_in_method(
+    "src/agentforge/infrastructure/db/execution_recorder.py",
+    "record_model_tool_denied_and_fail_run",
+    '''            row = await _lock_owned_run(
+                session, run_id=run.id, expected_generation=expected_generation
+            )
 ''',
     '''            row = await _lock_owned_run(
-                session, run_id=run_id, expected_generation=expected_generation
+                session, run_id=run.id, expected_generation=expected_generation
             )
             _assert_business_progression_allowed(row)
-            await _assert_no_active_tool_calls(session, run_id)
-            await _assert_no_started_tool_attempts(session, run_id)
-            await _assert_no_started_model_invocations(session, run_id)
 ''',
 )
 
-# READ proposal consequence / side-effect preparation both have dedicated
-# deadline/budget checks; add cancel guard after the locked run.
-replace_once(
+replace_in_method(
     "src/agentforge/infrastructure/db/execution_recorder.py",
-    '''            run_row = await _lock_owned_run(
-                session,
-                run_id=call.run_id,
-                expected_generation=expected_generation,
+    "record_model_final_decision",
+    '''            row = await _lock_owned_run(
+                session, run_id=run.id, expected_generation=expected_generation
             )
-            await _assert_no_active_tool_calls(session, call.run_id)
-            await _assert_deadline_not_expired(session, run_row)
-            state = await _lock_run_state(session, call.run_id)
 ''',
-    '''            run_row = await _lock_owned_run(
-                session,
-                run_id=call.run_id,
-                expected_generation=expected_generation,
+    '''            row = await _lock_owned_run(
+                session, run_id=run.id, expected_generation=expected_generation
             )
-            _assert_business_progression_allowed(run_row)
-            await _assert_no_active_tool_calls(session, call.run_id)
-            await _assert_deadline_not_expired(session, run_row)
-            state = await _lock_run_state(session, call.run_id)
+            _assert_business_progression_allowed(row)
 ''',
 )
 
-replace_once(
-    "src/agentforge/infrastructure/db/execution_recorder.py",
-    '''            run_row = await _lock_owned_run(
-                session,
-                run_id=call.run_id,
-                expected_generation=expected_generation,
-            )
-            await _assert_no_active_tool_calls(session, call.run_id)
-            await _assert_no_started_tool_attempts(session, call.run_id)
-            state = await _lock_run_state(session, call.run_id)
-''',
-    '''            run_row = await _lock_owned_run(
-                session,
-                run_id=call.run_id,
-                expected_generation=expected_generation,
-            )
-            _assert_business_progression_allowed(run_row)
-            await _assert_no_active_tool_calls(session, call.run_id)
-            await _assert_no_started_tool_attempts(session, call.run_id)
-            state = await _lock_run_state(session, call.run_id)
-''',
-)
 
 # New recorder operations used when cancellation blocks a model consequence or
 # when stable in-flight work reaches the cancellation boundary.
@@ -872,53 +883,6 @@ replace_once(
                 raise RunExecutionFailedError(run.failure_reason) from exc
             try:
                 call = await self._tools.execute_prepared(prepared)
-''',
-)
-
-
-# ---------------------------------------------------------------------------
-# Consequence methods must observe cancellation while still authorized.
-# ---------------------------------------------------------------------------
-# Final decision persistence: reject consequence after locking current Run.
-replace_once(
-    "src/agentforge/infrastructure/db/execution_recorder.py",
-    '''            row = await _lock_owned_run(
-                session, run_id=run.id, expected_generation=expected_generation
-            )
-            await _assert_no_active_tool_calls(session, run.id)
-            result = await session.execute(
-''',
-    '''            row = await _lock_owned_run(
-                session, run_id=run.id, expected_generation=expected_generation
-            )
-            _assert_business_progression_allowed(row)
-            await _assert_no_active_tool_calls(session, run.id)
-            result = await session.execute(
-''',
-)
-
-# Side-effect/READ proposal persistence guards were added above. Denied proposal
-# is also a business consequence; block it under cancel.
-replace_once(
-    "src/agentforge/infrastructure/db/execution_recorder.py",
-    '''            run_row = await _lock_owned_run(
-                session,
-                run_id=run.id,
-                expected_generation=expected_generation,
-            )
-            await _assert_no_active_tool_calls(session, run.id)
-            await _assert_deadline_not_expired(session, run_row)
-            state = await _lock_run_state(session, run.id)
-''',
-    '''            run_row = await _lock_owned_run(
-                session,
-                run_id=run.id,
-                expected_generation=expected_generation,
-            )
-            _assert_business_progression_allowed(run_row)
-            await _assert_no_active_tool_calls(session, run.id)
-            await _assert_deadline_not_expired(session, run_row)
-            state = await _lock_run_state(session, run.id)
 ''',
 )
 
