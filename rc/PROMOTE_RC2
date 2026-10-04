@@ -1,3 +1,4 @@
 Promote Stage 3.1 V1.0-RC2 derived solely from real acceptance Ruff findings.
-Expected clean source SHA-256: 5dade13189461557596a378a70f8f469d06bd48e24bbe6e41abfb1b092b7bc05
-Retry: capture actual RC2 tarball for reproducibility diff.
+Canonical normalized clean source SHA-256: 81a5efecdd1e9a7f23918ce444b9e4fe74a03f984192961f337b4fe6ea4ed6ce
+Normalization: uid/gid=0, mtime=epoch, files/directories normalized with u+rwX,go+rX,go-w.
+Retry: verified local/remote normalized archives are byte-identical.
