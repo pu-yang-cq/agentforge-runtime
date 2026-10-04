@@ -1,4 +1,4 @@
 Stage 3.2-C1 fenced Action Commit Boundary
-patcher-fix: 2ed982fe35f65ca58f9d2bdae2c3a798d7d64ad6
-reason: candidate Ruff import/annotation repair
+patcher-fix: 0ffc7fc6a97b0c4e3895a5575d5e023d420d363c
+reason: align B2 preparation fixtures with explicit C1 side-effect adapter contract
 B aggregate freeze: 217be42a7b6e87c6558d6bca5ce0dfacd103fcf2
