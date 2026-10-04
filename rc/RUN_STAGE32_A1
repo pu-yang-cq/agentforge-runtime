@@ -3,3 +3,5 @@ Run Stage 3.2-A1 unified ToolExecutionAttempt implementation gate.
 Retry with exact non-YAML patcher.
 
 Retry after aligning integration import anchors.
+
+Retry after Ruff-clean import formatting.
