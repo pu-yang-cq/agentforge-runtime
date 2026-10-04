@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -82,14 +83,15 @@ async def _lock_run_state(session: AsyncSession, run_id: UUID) -> RunStateRow:
     ).scalar_one()
 
 
-async def _database_now(session: AsyncSession):
-    return await session.scalar(select(func.clock_timestamp()))
+async def _database_now(session: AsyncSession) -> datetime:
+    value = await session.scalar(select(func.clock_timestamp()))
+    if value is None:
+        raise RuntimeError("database clock_timestamp() returned no value")
+    return cast(datetime, value)
 
 
 async def _assert_deadline_not_expired(session: AsyncSession, run: RunRow) -> None:
     db_now = await _database_now(session)
-    if db_now is None:
-        raise RuntimeError("database clock_timestamp() returned no value")
     if db_now >= run.deadline_at:
         raise BusinessProgressionBlockedError(
             "DEADLINE_EXCEEDED",
