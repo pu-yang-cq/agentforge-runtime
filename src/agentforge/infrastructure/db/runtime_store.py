@@ -13,6 +13,7 @@ from agentforge.application.errors import IdempotencyConflictError
 from agentforge.application.ports import RuntimeStore
 from agentforge.domain.enums import (
     EventType,
+    ExternalActionStatus,
     MessageRole,
     ModelInvocationStatus,
     QueueReason,
@@ -38,6 +39,7 @@ from agentforge.infrastructure.db.models import (
     AgentVersionRow,
     AgentVersionToolRow,
     DomainEventRow,
+    ExternalActionRow,
     IdempotencyRecordRow,
     ModelInvocationRow,
     RunCounterRow,
@@ -120,6 +122,72 @@ async def _close_orphaned_model_invocations_on_recovery(
         )
         invocation.completed_at = func.clock_timestamp()
         recovered.append(invocation.id)
+    return recovered
+
+
+async def _recover_orphaned_side_effect_attempts(
+    session: AsyncSession, run_id: UUID
+) -> list[tuple[UUID, UUID, UUID]]:
+    """Close stale side-effect authorization as UNKNOWN under Run lock.
+
+    claim_next_run already owns the Run row lock. This helper then obeys:
+    ExternalAction -> ToolCall -> ToolExecutionAttempt.
+    """
+    actions = (
+        (
+            await session.execute(
+                select(ExternalActionRow)
+                .where(
+                    ExternalActionRow.run_id == run_id,
+                    ExternalActionRow.status == ExternalActionStatus.EXECUTING,
+                )
+                .order_by(ExternalActionRow.id)
+                .with_for_update()
+            )
+        )
+        .scalars()
+        .all()
+    )
+    recovered: list[tuple[UUID, UUID, UUID]] = []
+    for action in actions:
+        if action.current_attempt_id is None:
+            raise RuntimeError("EXECUTING ExternalAction lost current_attempt_id")
+        call = (
+            await session.execute(
+                select(ToolCallRow)
+                .where(
+                    ToolCallRow.id == action.tool_call_id,
+                    ToolCallRow.run_id == run_id,
+                )
+                .with_for_update()
+            )
+        ).scalar_one()
+        attempt = (
+            await session.execute(
+                select(ToolExecutionAttemptRow)
+                .where(
+                    ToolExecutionAttemptRow.id == action.current_attempt_id,
+                    ToolExecutionAttemptRow.tool_call_id == call.id,
+                    ToolExecutionAttemptRow.external_action_id == action.id,
+                )
+                .with_for_update()
+            )
+        ).scalar_one()
+        if call.status is not ToolCallStatus.EXECUTING:
+            raise RuntimeError("EXECUTING ExternalAction does not project to EXECUTING ToolCall")
+        if attempt.status is not ToolExecutionAttemptStatus.STARTED:
+            raise RuntimeError("current side-effect attempt is not STARTED")
+
+        attempt.status = ToolExecutionAttemptStatus.UNKNOWN
+        attempt.definite_not_executed = False
+        attempt.outcome_reason = "LEASE_LOST_RESULT_NOT_DURABLE"
+        attempt.finished_at = func.clock_timestamp()
+        action.status = ExternalActionStatus.UNKNOWN
+        action.current_attempt_id = None
+        action.updated_at = func.clock_timestamp()
+        call.status = ToolCallStatus.UNRESOLVED
+        call.error = "previous executor lease expired with external truth unresolved"
+        recovered.append((action.id, call.id, attempt.id))
     return recovered
 
 
@@ -315,6 +383,11 @@ class PostgresRuntimeStore(RuntimeStore):
                 if was_recovery
                 else []
             )
+            recovered_side_effects = (
+                await _recover_orphaned_side_effect_attempts(session, row.id)
+                if was_recovery
+                else []
+            )
             recovered_call_ids = (
                 await _prepare_orphaned_read_calls_for_retry(session, row.id)
                 if was_recovery
@@ -325,7 +398,10 @@ class PostgresRuntimeStore(RuntimeStore):
                 await _allocate_event_sequences(
                     session,
                     row.id,
-                    base_event_count + len(recovered_model_ids) + len(recovered_call_ids),
+                    base_event_count
+                    + len(recovered_model_ids)
+                    + len(recovered_side_effects)
+                    + len(recovered_call_ids),
                 )
             )
             if was_recovery:
@@ -369,6 +445,22 @@ class PostgresRuntimeStore(RuntimeStore):
                         payload={
                             "invocation_id": str(invocation_id),
                             "reason": "LEASE_LOST_MODEL_RESULT_NOT_DURABLE",
+                        },
+                    )
+                )
+                offset += 1
+            for external_action_id, tool_call_id, attempt_id in recovered_side_effects:
+                session.add(
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=row.id,
+                        sequence=sequences[offset],
+                        event_type=EventType.ACTION_UNKNOWN.value,
+                        payload={
+                            "external_action_id": str(external_action_id),
+                            "tool_call_id": str(tool_call_id),
+                            "attempt_id": str(attempt_id),
+                            "reason": "LEASE_LOST_RESULT_NOT_DURABLE",
                         },
                     )
                 )
@@ -440,6 +532,9 @@ class PostgresRuntimeStore(RuntimeStore):
                         ToolVersionRow.credential_ref,
                         ToolVersionRow.idempotency_supported,
                         ToolVersionRow.reconciliation_mode,
+                        ToolVersionRow.side_effect_retry_max_attempts,
+                        ToolVersionRow.side_effect_retry_initial_backoff_seconds,
+                        ToolVersionRow.side_effect_retry_max_backoff_seconds,
                     )
                     .join(
                         ToolVersionRow,
@@ -467,6 +562,9 @@ class PostgresRuntimeStore(RuntimeStore):
                         credential_ref,
                         idempotency_supported,
                         reconciliation_mode,
+                        side_effect_retry_max_attempts,
+                        side_effect_retry_initial_backoff_seconds,
+                        side_effect_retry_max_backoff_seconds,
                     )
                     for (
                         tool_version_id,
@@ -480,6 +578,9 @@ class PostgresRuntimeStore(RuntimeStore):
                         credential_ref,
                         idempotency_supported,
                         reconciliation_mode,
+                        side_effect_retry_max_attempts,
+                        side_effect_retry_initial_backoff_seconds,
+                        side_effect_retry_max_backoff_seconds,
                     ) in rows
                 ],
             )

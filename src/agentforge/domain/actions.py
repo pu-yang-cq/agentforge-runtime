@@ -159,6 +159,18 @@ class ExternalAction:
         self.status = ExternalActionStatus.FAILED
         self.current_attempt_id = None
 
+    def retry_ready_after_definite_not_executed(self) -> None:
+        if self.status is not ExternalActionStatus.EXECUTING or self.current_attempt_id is None:
+            raise ValueError("external action can only retry from EXECUTING")
+        self.status = ExternalActionStatus.READY
+        self.current_attempt_id = None
+
+    def abort_after_definite_not_executed(self) -> None:
+        if self.status is not ExternalActionStatus.EXECUTING or self.current_attempt_id is None:
+            raise ValueError("external action can only abort an executing proven-no-effect attempt")
+        self.status = ExternalActionStatus.ABORTED
+        self.current_attempt_id = None
+
     def abort(self) -> None:
         if self.status is not ExternalActionStatus.READY or self.current_attempt_id is not None:
             raise ValueError("external action can only abort before Action Commit")

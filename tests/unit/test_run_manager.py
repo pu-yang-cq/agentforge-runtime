@@ -5,6 +5,7 @@ import pytest
 
 from agentforge.application.errors import (
     RunExecutionFailedError,
+    SideEffectTransientError,
     ToolAdapterError,
     ToolTransientError,
 )
@@ -1522,3 +1523,154 @@ async def test_definite_not_executed_side_effect_failure_is_not_unknown() -> Non
     event_types = [event.type for event in journal.events]
     assert EventType.ACTION_FAILED in event_types
     assert EventType.ACTION_UNKNOWN not in event_types
+
+
+@pytest.mark.asyncio
+async def test_safe_side_effect_retry_reuses_operation_id_and_next_attempt_number() -> None:
+    from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode, ToolEffectType
+
+    version_id = uuid4()
+    operation_ids = []
+    calls = 0
+
+    async def flaky(invocation):
+        nonlocal calls
+        calls += 1
+        operation_ids.append(invocation.operation_id)
+        if calls == 1:
+            raise SideEffectTransientError("connection failed before request bytes were sent")
+        return {"resource": "R-1"}
+
+    registry = InMemoryToolRegistry(
+        [
+            SideEffectFunctionTool(
+                version_id=version_id,
+                name="safe_retry_write",
+                description="write",
+                input_schema={"type": "object"},
+                func=flaky,
+            )
+        ]
+    )
+    model = ScriptedFakeModel(
+        [
+            ToolStep("safe_retry_write", {"value": "same"}),
+            FinalStep("done"),
+        ]
+    )
+    manager = RunManager(NativeRunner(model, registry), ToolCoordinator(registry))
+    av = AgentVersion(
+        uuid4(),
+        uuid4(),
+        1,
+        "safe retry",
+        (
+            ToolBinding(
+                version_id,
+                "safe_retry_write",
+                effect_type=ToolEffectType.WRITE,
+                allow_no_approval_execution=True,
+                reconciliation_mode=ReconciliationMode.NONE,
+                side_effect_retry_max_attempts=2,
+                side_effect_retry_initial_backoff_seconds=0,
+                side_effect_retry_max_backoff_seconds=0,
+            ),
+        ),
+    )
+    run = Run(uuid4(), av.id, "write")
+    run.queue()
+    state = RunState(run.id)
+    journal = ExecutionJournal()
+
+    first = await manager.execute(
+        run=run,
+        run_state=state,
+        agent_version=av,
+        recorder=journal,
+    )
+    assert first is None
+    assert run.status is RunStatus.QUEUED
+    assert run.queue_reason is QueueReason.RETRY
+    assert journal.external_actions[0].status is ExternalActionStatus.READY
+    assert journal.external_actions[0].current_attempt_id is None
+    assert journal.tool_calls[0].status is ToolCallStatus.READY
+    assert journal.tool_attempts[0].status is ToolExecutionAttemptStatus.FAILED
+    assert journal.tool_attempts[0].definite_not_executed is True
+
+    second = await manager.execute(
+        run=run,
+        run_state=state,
+        agent_version=av,
+        recorder=journal,
+    )
+    assert second == "done"
+    assert calls == 2
+    assert operation_ids[0] == operation_ids[1]
+    assert len(journal.tool_attempts) == 2
+    assert [a.attempt_number for a in journal.tool_attempts] == [1, 2]
+    assert journal.external_actions[0].status is ExternalActionStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_safe_side_effect_retry_exhaustion_fails_without_unknown() -> None:
+    from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode, ToolEffectType
+
+    version_id = uuid4()
+
+    async def always_no_effect(_invocation):
+        raise SideEffectTransientError("preflight transport unavailable")
+
+    registry = InMemoryToolRegistry(
+        [
+            SideEffectFunctionTool(
+                version_id=version_id,
+                name="retry_exhausted_write",
+                description="write",
+                input_schema={"type": "object"},
+                func=always_no_effect,
+            )
+        ]
+    )
+    manager = RunManager(
+        NativeRunner(
+            ScriptedFakeModel([ToolStep("retry_exhausted_write", {})]),
+            registry,
+        ),
+        ToolCoordinator(registry),
+    )
+    av = AgentVersion(
+        uuid4(),
+        uuid4(),
+        1,
+        "retry exhausted",
+        (
+            ToolBinding(
+                version_id,
+                "retry_exhausted_write",
+                effect_type=ToolEffectType.WRITE,
+                allow_no_approval_execution=True,
+                reconciliation_mode=ReconciliationMode.NONE,
+                side_effect_retry_max_attempts=1,
+                side_effect_retry_initial_backoff_seconds=0,
+                side_effect_retry_max_backoff_seconds=0,
+            ),
+        ),
+    )
+    run = Run(uuid4(), av.id, "write")
+    run.queue()
+    state = RunState(run.id)
+    journal = ExecutionJournal()
+
+    with pytest.raises(RunExecutionFailedError, match="SIDE_EFFECT_RETRY_EXHAUSTED"):
+        await manager.execute(
+            run=run,
+            run_state=state,
+            agent_version=av,
+            recorder=journal,
+        )
+
+    assert run.status is RunStatus.FAILED
+    assert journal.external_actions[0].status is ExternalActionStatus.FAILED
+    assert journal.tool_calls[0].status is ToolCallStatus.FAILED
+    assert journal.tool_attempts[0].status is ToolExecutionAttemptStatus.FAILED
+    assert journal.tool_attempts[0].definite_not_executed is True

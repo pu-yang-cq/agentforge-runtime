@@ -125,6 +125,19 @@ class ExecutionRecorder(Protocol):
         expected_generation: int,
     ) -> None: ...
 
+    async def record_side_effect_transient_failure(
+        self,
+        call: ToolCall,
+        action: ExternalAction,
+        attempt: ToolExecutionAttempt,
+        run: Run,
+        *,
+        max_attempts: int,
+        initial_backoff_seconds: int,
+        max_backoff_seconds: int,
+        expected_generation: int,
+    ) -> bool: ...
+
     async def record_recovered_read_started(
         self,
         call: ToolCall,

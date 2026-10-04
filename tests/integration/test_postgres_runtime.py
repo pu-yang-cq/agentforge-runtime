@@ -32,6 +32,7 @@ from agentforge.application.errors import (
     BusinessProgressionBlockedError,
     IdempotencyConflictError,
     RunExecutionFailedError,
+    SideEffectTransientError,
     StaleExecutorError,
     ToolAdapterError,
     ToolTransientError,
@@ -2835,4 +2836,342 @@ async def test_side_effect_definite_nonexecution_persists_failed_truth() -> None
     assert attempt.definite_not_executed is True
     assert attempt.error_class == "CREDENTIAL"
     assert attempt.outcome_reason == "SIDE_EFFECT_DEFINITE_NOT_EXECUTED"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_side_effect_safe_retry_reuses_action_and_operation_id_across_claims() -> None:
+    from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode
+    from agentforge.infrastructure.db.models import ExternalActionRow
+
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+
+    side_tool_id = uuid4()
+    side_version_id = uuid4()
+    async with sessions() as session, session.begin():
+        session.add(ToolDefinitionRow(id=side_tool_id, name="safe_retry_db", description="write"))
+        await session.flush()
+        session.add(
+            ToolVersionRow(
+                id=side_version_id,
+                tool_id=side_tool_id,
+                version_number=1,
+                input_schema={"type": "object"},
+                effect_type=ToolEffectType.WRITE,
+                implementation_ref="tests:safe_retry_db",
+                allow_no_approval_execution=True,
+                reconciliation_mode=ReconciliationMode.NONE,
+                side_effect_retry_max_attempts=2,
+                side_effect_retry_initial_backoff_seconds=0,
+                side_effect_retry_max_backoff_seconds=0,
+            )
+        )
+        await session.flush()
+        session.add(
+            AgentVersionToolRow(
+                agent_version_id=DEMO_AGENT_VERSION_ID,
+                tool_version_id=side_version_id,
+                tool_alias="safe_retry_db",
+            )
+        )
+
+    operation_ids = []
+    calls = 0
+
+    async def flaky(invocation):
+        nonlocal calls
+        calls += 1
+        operation_ids.append(invocation.operation_id)
+        if calls == 1:
+            raise SideEffectTransientError("request was not sent")
+        return {"resource": "R-safe"}
+
+    registry = InMemoryToolRegistry(
+        [
+            FunctionTool(
+                version_id=DEMO_TOOL_VERSION_ID,
+                name="echo_read",
+                description="read",
+                input_schema={"type": "object"},
+                func=lambda text: {"echo": text},
+            ),
+            SideEffectFunctionTool(
+                version_id=side_version_id,
+                name="safe_retry_db",
+                description="write",
+                input_schema={"type": "object"},
+                func=flaky,
+            ),
+        ]
+    )
+    store = PostgresRuntimeStore(sessions)
+    created = await store.create_run(
+        agent_version_id=DEMO_AGENT_VERSION_ID,
+        input_text="safe retry db",
+        idempotency_key="integration-d2-safe-retry",
+        principal_scope="test-user",
+    )
+
+    claimed1 = await store.claim_next_run(worker_id="d2-a", lease_seconds=30)
+    assert claimed1 is not None
+    manager1 = RunManager(
+        NativeRunner(ScriptedFakeModel([ToolStep("safe_retry_db", {"v": 1})]), registry),
+        ToolCoordinator(registry),
+    )
+    recorder1 = PostgresExecutionRecorder(
+        sessions,
+        run_id=created.id,
+        generation=claimed1.execution_generation,
+    )
+    assert (
+        await manager1.execute(
+            run=claimed1,
+            run_state=await store.load_run_state(created.id),
+            agent_version=await store.load_agent_version(DEMO_AGENT_VERSION_ID),
+            recorder=recorder1,
+        )
+        is None
+    )
+    after_first = await store.get_run(created.id)
+    assert after_first is not None
+    assert after_first.status is RunStatus.QUEUED
+    assert after_first.queue_reason is QueueReason.RETRY
+
+    async with sessions() as session:
+        action1 = (
+            await session.execute(
+                select(ExternalActionRow).where(ExternalActionRow.run_id == created.id)
+            )
+        ).scalar_one()
+        original_action_id = action1.id
+        original_operation_id = action1.operation_id
+        assert action1.status is ExternalActionStatus.READY
+        attempts1 = (
+            (
+                await session.execute(
+                    select(ToolExecutionAttemptRow)
+                    .where(ToolExecutionAttemptRow.external_action_id == action1.id)
+                    .order_by(ToolExecutionAttemptRow.attempt_number)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert [a.attempt_number for a in attempts1] == [1]
+        assert attempts1[0].status is ToolExecutionAttemptStatus.FAILED
+        assert attempts1[0].definite_not_executed is True
+
+    claimed2 = await store.claim_next_run(worker_id="d2-b", lease_seconds=30)
+    assert claimed2 is not None
+    assert claimed2.execution_generation == 2
+    manager2 = RunManager(
+        NativeRunner(ScriptedFakeModel([FinalStep("safe retry done")]), registry),
+        ToolCoordinator(registry),
+    )
+    recorder2 = PostgresExecutionRecorder(
+        sessions,
+        run_id=created.id,
+        generation=claimed2.execution_generation,
+    )
+    assert (
+        await manager2.execute(
+            run=claimed2,
+            run_state=await store.load_run_state(created.id),
+            agent_version=await store.load_agent_version(DEMO_AGENT_VERSION_ID),
+            recorder=recorder2,
+        )
+        == "safe retry done"
+    )
+
+    assert calls == 2
+    assert operation_ids == [original_operation_id, original_operation_id]
+    async with sessions() as session:
+        action2 = (
+            await session.execute(
+                select(ExternalActionRow).where(ExternalActionRow.run_id == created.id)
+            )
+        ).scalar_one()
+        attempts2 = (
+            (
+                await session.execute(
+                    select(ToolExecutionAttemptRow)
+                    .where(ToolExecutionAttemptRow.external_action_id == action2.id)
+                    .order_by(ToolExecutionAttemptRow.attempt_number)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert action2.id == original_action_id
+    assert action2.operation_id == original_operation_id
+    assert action2.status is ExternalActionStatus.SUCCEEDED
+    assert [a.attempt_number for a in attempts2] == [1, 2]
+    assert attempts2[1].status is ToolExecutionAttemptStatus.SUCCEEDED
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_orphaned_side_effect_attempt_becomes_unknown_before_recovery_progression() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode
+    from agentforge.infrastructure.db.models import ExternalActionRow, RunRow
+
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+
+    side_tool_id = uuid4()
+    side_version_id = uuid4()
+    async with sessions() as session, session.begin():
+        session.add(ToolDefinitionRow(id=side_tool_id, name="orphan_write", description="write"))
+        await session.flush()
+        session.add(
+            ToolVersionRow(
+                id=side_version_id,
+                tool_id=side_tool_id,
+                version_number=1,
+                input_schema={"type": "object"},
+                effect_type=ToolEffectType.EXTERNAL_SIDE_EFFECT,
+                implementation_ref="tests:orphan_write",
+                allow_no_approval_execution=True,
+                reconciliation_mode=ReconciliationMode.AUTHORITATIVE,
+            )
+        )
+        await session.flush()
+        session.add(
+            AgentVersionToolRow(
+                agent_version_id=DEMO_AGENT_VERSION_ID,
+                tool_version_id=side_version_id,
+                tool_alias="orphan_write",
+            )
+        )
+
+    registry = InMemoryToolRegistry(
+        [
+            FunctionTool(
+                version_id=DEMO_TOOL_VERSION_ID,
+                name="echo_read",
+                description="read",
+                input_schema={"type": "object"},
+                func=lambda text: {"echo": text},
+            ),
+            SideEffectFunctionTool(
+                version_id=side_version_id,
+                name="orphan_write",
+                description="write",
+                input_schema={"type": "object"},
+                func=lambda invocation: {"must": "not be called"},
+            ),
+        ]
+    )
+    store = PostgresRuntimeStore(sessions)
+    created = await store.create_run(
+        agent_version_id=DEMO_AGENT_VERSION_ID,
+        input_text="orphan action",
+        idempotency_key="integration-d2-orphan",
+        principal_scope="test-user",
+    )
+    claimed1 = await store.claim_next_run(worker_id="orphan-a", lease_seconds=30)
+    assert claimed1 is not None
+    recorder1 = PostgresExecutionRecorder(
+        sessions,
+        run_id=created.id,
+        generation=claimed1.execution_generation,
+    )
+    _, invocation = await recorder1.begin_model_invocation(
+        run_id=created.id,
+        invocation_id=uuid4(),
+        expected_generation=claimed1.execution_generation,
+    )
+    invocation.complete("TOOL_PROPOSAL")
+    proposal = ToolProposal.create(
+        run_id=created.id,
+        model_invocation_id=invocation.id,
+        tool_name="orphan_write",
+        arguments={"v": "same"},
+    )
+    prepared = ToolCoordinator(registry).prepare_side_effect(
+        proposal=proposal,
+        agent_version=await store.load_agent_version(DEMO_AGENT_VERSION_ID),
+    )
+    await recorder1.record_model_side_effect_prepared(
+        invocation,
+        proposal,
+        prepared.call,
+        prepared.snapshot,
+        prepared.action,
+        expected_generation=claimed1.execution_generation,
+    )
+    attempt = await recorder1.record_side_effect_attempt_started(
+        prepared.call,
+        prepared.action,
+        expected_generation=claimed1.execution_generation,
+    )
+
+    async with sessions() as session, session.begin():
+        row = await session.get(RunRow, created.id)
+        assert row is not None
+        row.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+
+    claimed2 = await store.claim_next_run(worker_id="orphan-b", lease_seconds=30)
+    assert claimed2 is not None
+    assert claimed2.execution_generation == 2
+
+    async with sessions() as session:
+        action = (
+            await session.execute(
+                select(ExternalActionRow).where(ExternalActionRow.run_id == created.id)
+            )
+        ).scalar_one()
+        call = await session.get(ToolCallRow, action.tool_call_id)
+        durable_attempt = await session.get(ToolExecutionAttemptRow, attempt.id)
+        event_types = (
+            (
+                await session.execute(
+                    select(DomainEventRow.event_type)
+                    .where(DomainEventRow.run_id == created.id)
+                    .order_by(DomainEventRow.sequence)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert action.status is ExternalActionStatus.UNKNOWN
+    assert action.current_attempt_id is None
+    assert call is not None and call.status is ToolCallStatus.UNRESOLVED
+    assert durable_attempt is not None
+    assert durable_attempt.status is ToolExecutionAttemptStatus.UNKNOWN
+    assert durable_attempt.outcome_reason == "LEASE_LOST_RESULT_NOT_DURABLE"
+    assert durable_attempt.definite_not_executed is False
+    assert EventType.ACTION_UNKNOWN.value in event_types
+
+    # The new owner sees UNKNOWN before any model reasoning or replacement attempt.
+    recorder2 = PostgresExecutionRecorder(
+        sessions,
+        run_id=created.id,
+        generation=claimed2.execution_generation,
+    )
+    manager2 = RunManager(
+        NativeRunner(ScriptedFakeModel([FinalStep("must not reason")]), registry),
+        ToolCoordinator(registry),
+    )
+    state_before = await store.load_run_state(created.id)
+    assert (
+        await manager2.execute(
+            run=claimed2,
+            run_state=state_before,
+            agent_version=await store.load_agent_version(DEMO_AGENT_VERSION_ID),
+            recorder=recorder2,
+        )
+        is None
+    )
+    state_after = await store.load_run_state(created.id)
+    assert state_after.model_invocations_used == state_before.model_invocations_used
+    assert state_after.tool_attempts_used == state_before.tool_attempts_used
     await engine.dispose()

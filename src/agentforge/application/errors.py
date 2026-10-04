@@ -36,6 +36,17 @@ class ToolTransientError(ToolAdapterError):
         )
 
 
+class SideEffectTransientError(ToolAdapterError):
+    """Explicit retry signal only when the adapter proves no external effect occurred."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(
+            message,
+            error_class="TRANSIENT",
+            definite_not_executed=True,
+        )
+
+
 class BusinessProgressionBlockedError(RuntimeError):
     """Current durable limits prohibit starting or committing new business work."""
 

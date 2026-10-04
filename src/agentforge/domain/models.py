@@ -50,6 +50,9 @@ class ToolBinding:
     credential_ref: str | None = None
     idempotency_supported: bool = False
     reconciliation_mode: ReconciliationMode = ReconciliationMode.NONE
+    side_effect_retry_max_attempts: int = 1
+    side_effect_retry_initial_backoff_seconds: int = 1
+    side_effect_retry_max_backoff_seconds: int = 30
 
     def __post_init__(self) -> None:
         if self.read_retry_max_attempts <= 0:
@@ -66,6 +69,15 @@ class ToolBinding:
             raise ValueError("destructive tool cannot allow Stage-3.2 execution")
         if self.effect_type is ToolEffectType.READ and self.allow_no_approval_execution:
             raise ValueError("READ tool cannot be marked for side-effect execution")
+        if self.side_effect_retry_max_attempts <= 0:
+            raise ValueError("side_effect_retry_max_attempts must be positive")
+        if self.side_effect_retry_initial_backoff_seconds < 0:
+            raise ValueError("side-effect retry initial backoff cannot be negative")
+        if (
+            self.side_effect_retry_max_backoff_seconds
+            < self.side_effect_retry_initial_backoff_seconds
+        ):
+            raise ValueError("side-effect retry max backoff cannot be below initial backoff")
 
     @property
     def stage32_side_effect_executable(self) -> bool:
@@ -84,6 +96,14 @@ class ToolBinding:
             raise ValueError("failed_attempt_number must be positive")
         delay: int = self.read_retry_initial_backoff_seconds * (2 ** (failed_attempt_number - 1))
         return min(delay, self.read_retry_max_backoff_seconds)
+
+    def side_effect_retry_delay_seconds(self, failed_attempt_number: int) -> int:
+        if failed_attempt_number <= 0:
+            raise ValueError("failed_attempt_number must be positive")
+        delay: int = self.side_effect_retry_initial_backoff_seconds * (
+            2 ** (failed_attempt_number - 1)
+        )
+        return min(delay, self.side_effect_retry_max_backoff_seconds)
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,6 +302,12 @@ class ToolCall:
         if self.status is not ToolCallStatus.EXECUTING:
             raise ValueError("tool call can only become UNRESOLVED from EXECUTING")
         self.status = ToolCallStatus.UNRESOLVED
+        self.error = reason
+
+    def abort_after_definite_not_executed(self, reason: str) -> None:
+        if self.status is not ToolCallStatus.EXECUTING:
+            raise ValueError("tool call can only abort an executing proven-no-effect attempt")
+        self.status = ToolCallStatus.NOT_EXECUTED
         self.error = reason
 
     def retry_after_failure(self, reason: str) -> None:

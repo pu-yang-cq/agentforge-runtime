@@ -89,6 +89,18 @@ class ToolVersionRow(Base):
             "effect_type <> 'READ' OR NOT allow_no_approval_execution",
             name="ck_tool_versions_read_not_side_effect_executable",
         ),
+        CheckConstraint(
+            "side_effect_retry_max_attempts > 0",
+            name="ck_tool_versions_positive_side_effect_retry_attempts",
+        ),
+        CheckConstraint(
+            "side_effect_retry_initial_backoff_seconds >= 0",
+            name="ck_tool_versions_nonnegative_side_effect_retry_initial_backoff",
+        ),
+        CheckConstraint(
+            "side_effect_retry_max_backoff_seconds >= side_effect_retry_initial_backoff_seconds",
+            name="ck_tool_versions_side_effect_retry_backoff_order",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
@@ -122,6 +134,13 @@ class ToolVersionRow(Base):
         Integer, nullable=False, default=1
     )
     read_retry_max_backoff_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
+    side_effect_retry_max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    side_effect_retry_initial_backoff_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1
+    )
+    side_effect_retry_max_backoff_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=30
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
     )

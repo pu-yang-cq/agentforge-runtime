@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 from agentforge.application.errors import (
     BusinessProgressionBlockedError,
     RunExecutionFailedError,
+    SideEffectTransientError,
     ToolAdapterError,
     ToolTransientError,
 )
@@ -492,6 +493,120 @@ class ExecutionJournal(ExecutionRecorder):
             },
         )
         self._append_event(run, EventType.RUN_FAILED, {"reason": run.failure_reason})
+
+    async def record_side_effect_transient_failure(
+        self,
+        call: ToolCall,
+        action: ExternalAction,
+        attempt: ToolExecutionAttempt,
+        run: Run,
+        *,
+        max_attempts: int,
+        initial_backoff_seconds: int,
+        max_backoff_seconds: int,
+        expected_generation: int,
+    ) -> bool:
+        if call.status is not ToolCallStatus.EXECUTING:
+            raise ValueError("side-effect retry requires EXECUTING ToolCall")
+        if action.status is not ExternalActionStatus.EXECUTING:
+            raise ValueError("side-effect retry requires EXECUTING ExternalAction")
+        if action.current_attempt_id != attempt.id:
+            raise ValueError("side-effect retry attempt is not current")
+        if max_attempts <= 0:
+            raise ValueError("max_attempts must be positive")
+        if initial_backoff_seconds < 0 or max_backoff_seconds < initial_backoff_seconds:
+            raise ValueError("invalid side-effect retry backoff")
+        durable_attempt = self._started_tool_attempt(call.id)
+        if durable_attempt.id != attempt.id:
+            raise RuntimeError("side-effect retry durable attempt mismatch")
+        error = "retryable side-effect failure with proven non-execution"
+        durable_attempt.fail(
+            error,
+            error_class="TRANSIENT",
+            definite_not_executed=True,
+            outcome_reason="SIDE_EFFECT_TRANSIENT_DEFINITE_NOT_EXECUTED",
+        )
+        assert self.run_state is not None
+        delay_seconds = min(
+            initial_backoff_seconds * (2 ** (attempt.attempt_number - 1)),
+            max_backoff_seconds,
+        )
+        due_at = utcnow() + timedelta(seconds=delay_seconds)
+        retry_allowed = (
+            attempt.attempt_number < max_attempts
+            and self.run_state.tool_attempts_used < run.max_tool_attempts
+            and due_at < run.deadline_at
+        )
+        if retry_allowed:
+            call.retry_ready(error)
+            action.retry_ready_after_definite_not_executed()
+            run.yield_to_queue(QueueReason.RETRY)
+            run.available_at = due_at
+            self._append_event(
+                run,
+                EventType.TOOL_FAILED,
+                {
+                    "tool_call_id": str(call.id),
+                    "attempt_id": str(attempt.id),
+                    "attempt_number": attempt.attempt_number,
+                    "error_class": "TRANSIENT",
+                    "definite_not_executed": True,
+                },
+            )
+            self._append_event(
+                run,
+                EventType.ACTION_RETRY_READY,
+                {
+                    "external_action_id": str(action.id),
+                    "operation_id": str(action.operation_id),
+                    "attempt_id": str(attempt.id),
+                },
+            )
+            self._append_event(
+                run,
+                EventType.TOOL_RETRY_SCHEDULED,
+                {
+                    "tool_call_id": str(call.id),
+                    "attempt_number": attempt.attempt_number,
+                    "delay_seconds": delay_seconds,
+                },
+            )
+            return True
+
+        if attempt.attempt_number >= max_attempts:
+            reason = "SIDE_EFFECT_RETRY_EXHAUSTED: versioned safe retry attempts exhausted"
+            call.fail(error)
+            action.fail_definite_not_executed()
+            run.fail(reason)
+            self._append_event(
+                run,
+                EventType.ACTION_FAILED,
+                {
+                    "external_action_id": str(action.id),
+                    "operation_id": str(action.operation_id),
+                    "reason": reason,
+                },
+            )
+        else:
+            reason = (
+                "BUDGET_EXCEEDED: max_tool_attempts exhausted"
+                if self.run_state.tool_attempts_used >= run.max_tool_attempts
+                else "DEADLINE_EXCEEDED: side-effect retry due time reaches run deadline"
+            )
+            call.abort_after_definite_not_executed(reason)
+            action.abort_after_definite_not_executed()
+            run.fail(reason)
+            self._append_event(
+                run,
+                EventType.ACTION_ABORTED,
+                {
+                    "external_action_id": str(action.id),
+                    "operation_id": str(action.operation_id),
+                    "reason": reason,
+                },
+            )
+        self._append_event(run, EventType.RUN_FAILED, {"reason": run.failure_reason})
+        return False
 
     async def record_recovered_read_started(
         self,
@@ -1060,6 +1175,20 @@ class RunManager:
 
         try:
             call = await self._tools.execute_side_effect(prepared, attempt)
+        except SideEffectTransientError as exc:
+            scheduled = await recorder.record_side_effect_transient_failure(
+                prepared.call,
+                prepared.action,
+                attempt,
+                run,
+                max_attempts=prepared.binding.side_effect_retry_max_attempts,
+                initial_backoff_seconds=prepared.binding.side_effect_retry_initial_backoff_seconds,
+                max_backoff_seconds=prepared.binding.side_effect_retry_max_backoff_seconds,
+                expected_generation=expected_generation,
+            )
+            if scheduled:
+                return None
+            raise RunExecutionFailedError(run.failure_reason or str(exc)) from exc
         except ToolAdapterError as exc:
             if exc.definite_not_executed:
                 reason = (

@@ -977,6 +977,230 @@ class PostgresExecutionRecorder(ExecutionRecorder):
         call.fail(error)
         action.fail_definite_not_executed()
 
+    async def record_side_effect_transient_failure(
+        self,
+        call: ToolCall,
+        action: ExternalAction,
+        attempt: ToolExecutionAttempt,
+        run: Run,
+        *,
+        max_attempts: int,
+        initial_backoff_seconds: int,
+        max_backoff_seconds: int,
+        expected_generation: int,
+    ) -> bool:
+        """Retry only after explicit proof that the physical effect did not occur."""
+        self._assert_generation(expected_generation)
+        if call.status is not ToolCallStatus.EXECUTING:
+            raise ValueError("side-effect retry requires EXECUTING ToolCall")
+        if action.status is not ExternalActionStatus.EXECUTING:
+            raise ValueError("side-effect retry requires EXECUTING ExternalAction")
+        if action.current_attempt_id != attempt.id:
+            raise ValueError("side-effect retry attempt is not current")
+        if run.status is not RunStatus.RUNNING:
+            raise ValueError("side-effect retry requires RUNNING Run")
+        if max_attempts <= 0:
+            raise ValueError("max_attempts must be positive")
+        if initial_backoff_seconds < 0 or max_backoff_seconds < initial_backoff_seconds:
+            raise ValueError("invalid side-effect retry backoff")
+
+        async with self._sessions() as session, session.begin():
+            run_row = await _lock_owned_run(
+                session,
+                run_id=run.id,
+                expected_generation=expected_generation,
+            )
+            action_row = (
+                await session.execute(
+                    select(ExternalActionRow)
+                    .where(
+                        ExternalActionRow.id == action.id,
+                        ExternalActionRow.run_id == run.id,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one()
+            call_row = (
+                await session.execute(
+                    select(ToolCallRow)
+                    .where(
+                        ToolCallRow.id == call.id,
+                        ToolCallRow.run_id == run.id,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one()
+            attempt_row = (
+                await session.execute(
+                    select(ToolExecutionAttemptRow)
+                    .where(
+                        ToolExecutionAttemptRow.id == attempt.id,
+                        ToolExecutionAttemptRow.tool_call_id == call.id,
+                        ToolExecutionAttemptRow.external_action_id == action.id,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one()
+            if (
+                action_row.status is not ExternalActionStatus.EXECUTING
+                or action_row.current_attempt_id != attempt.id
+                or call_row.status is not ToolCallStatus.EXECUTING
+                or attempt_row.status is not ToolExecutionAttemptStatus.STARTED
+            ):
+                raise RuntimeError("side-effect retry lost current-attempt authorization")
+
+            state = await _lock_run_state(session, run.id)
+            db_now = await _database_now(session)
+            delay_seconds = min(
+                initial_backoff_seconds * (2 ** (attempt_row.attempt_number - 1)),
+                max_backoff_seconds,
+            )
+            due_at = db_now + timedelta(seconds=delay_seconds)
+            error = "retryable side-effect failure with proven non-execution"
+
+            attempt_row.status = ToolExecutionAttemptStatus.FAILED
+            attempt_row.error = error
+            attempt_row.error_class = "TRANSIENT"
+            attempt_row.definite_not_executed = True
+            attempt_row.outcome_reason = "SIDE_EFFECT_TRANSIENT_DEFINITE_NOT_EXECUTED"
+            attempt_row.finished_at = db_now
+
+            retry_allowed = (
+                attempt_row.attempt_number < max_attempts
+                and state.tool_attempts_used < run_row.max_tool_attempts
+                and due_at < run_row.deadline_at
+            )
+            if retry_allowed:
+                call_row.status = ToolCallStatus.READY
+                call_row.error = error
+                action_row.status = ExternalActionStatus.READY
+                action_row.current_attempt_id = None
+                action_row.updated_at = db_now
+                run_row.status = RunStatus.QUEUED
+                run_row.queue_reason = QueueReason.RETRY
+                run_row.available_at = due_at
+                run_row.owner_worker_id = None
+                run_row.lease_expires_at = None
+                seqs = list(await _allocate_event_sequences(session, run.id, 3))
+                session.add_all(
+                    [
+                        DomainEventRow(
+                            id=uuid4(),
+                            run_id=run.id,
+                            sequence=seqs[0],
+                            event_type=EventType.TOOL_FAILED.value,
+                            payload={
+                                "tool_call_id": str(call.id),
+                                "attempt_id": str(attempt.id),
+                                "attempt_number": attempt.attempt_number,
+                                "error_class": "TRANSIENT",
+                                "definite_not_executed": True,
+                            },
+                        ),
+                        DomainEventRow(
+                            id=uuid4(),
+                            run_id=run.id,
+                            sequence=seqs[1],
+                            event_type=EventType.ACTION_RETRY_READY.value,
+                            payload={
+                                "external_action_id": str(action.id),
+                                "operation_id": str(action.operation_id),
+                                "attempt_id": str(attempt.id),
+                            },
+                        ),
+                        DomainEventRow(
+                            id=uuid4(),
+                            run_id=run.id,
+                            sequence=seqs[2],
+                            event_type=EventType.TOOL_RETRY_SCHEDULED.value,
+                            payload={
+                                "tool_call_id": str(call.id),
+                                "attempt_number": attempt.attempt_number,
+                                "delay_seconds": delay_seconds,
+                            },
+                        ),
+                    ]
+                )
+                attempt.fail(
+                    error,
+                    error_class="TRANSIENT",
+                    definite_not_executed=True,
+                    outcome_reason="SIDE_EFFECT_TRANSIENT_DEFINITE_NOT_EXECUTED",
+                )
+                call.retry_ready(error)
+                action.retry_ready_after_definite_not_executed()
+                run.status = RunStatus.QUEUED
+                run.queue_reason = QueueReason.RETRY
+                run.available_at = due_at
+                run.owner_worker_id = None
+                run.lease_expires_at = None
+                return True
+
+            if attempt_row.attempt_number >= max_attempts:
+                reason = "SIDE_EFFECT_RETRY_EXHAUSTED: versioned safe retry attempts exhausted"
+                call_row.status = ToolCallStatus.FAILED
+                call_row.error = error
+                action_row.status = ExternalActionStatus.FAILED
+                event_type = EventType.ACTION_FAILED
+            elif state.tool_attempts_used >= run_row.max_tool_attempts:
+                reason = "BUDGET_EXCEEDED: max_tool_attempts exhausted"
+                call_row.status = ToolCallStatus.NOT_EXECUTED
+                call_row.error = reason
+                action_row.status = ExternalActionStatus.ABORTED
+                event_type = EventType.ACTION_ABORTED
+            else:
+                reason = "DEADLINE_EXCEEDED: side-effect retry due time reaches run deadline"
+                call_row.status = ToolCallStatus.NOT_EXECUTED
+                call_row.error = reason
+                action_row.status = ExternalActionStatus.ABORTED
+                event_type = EventType.ACTION_ABORTED
+            action_row.current_attempt_id = None
+            action_row.updated_at = db_now
+            run_row.status = RunStatus.FAILED
+            run_row.failure_reason = reason
+            run_row.completed_at = db_now
+            run_row.owner_worker_id = None
+            run_row.lease_expires_at = None
+            seqs = list(await _allocate_event_sequences(session, run.id, 2))
+            session.add_all(
+                [
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[0],
+                        event_type=event_type.value,
+                        payload={
+                            "external_action_id": str(action.id),
+                            "operation_id": str(action.operation_id),
+                            "reason": reason,
+                        },
+                    ),
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[1],
+                        event_type=EventType.RUN_FAILED.value,
+                        payload={"reason": reason},
+                    ),
+                ]
+            )
+            attempt.fail(
+                error,
+                error_class="TRANSIENT",
+                definite_not_executed=True,
+                outcome_reason="SIDE_EFFECT_TRANSIENT_DEFINITE_NOT_EXECUTED",
+            )
+            if event_type is EventType.ACTION_FAILED:
+                call.fail(error)
+                action.fail_definite_not_executed()
+            else:
+                call.abort_after_definite_not_executed(reason)
+                action.abort_after_definite_not_executed()
+            run.status = RunStatus.FAILED
+            run.failure_reason = reason
+            run.completed_at = db_now
+            return False
+
     async def record_recovered_read_started(
         self,
         call: ToolCall,
