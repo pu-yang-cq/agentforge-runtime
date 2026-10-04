@@ -277,14 +277,9 @@ replace_once(
                 (
                     await session.execute(
                         select(ToolCallRow)
-                        .outerjoin(
-                            ExternalActionRow,
-                            ExternalActionRow.tool_call_id == ToolCallRow.id,
-                        )
                         .where(
                             ToolCallRow.run_id == run_id,
                             ToolCallRow.status == ToolCallStatus.READY,
-                            ExternalActionRow.id.is_(None),
                         )
                         .with_for_update()
                     )
