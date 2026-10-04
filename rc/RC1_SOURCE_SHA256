@@ -1,0 +1,7 @@
+Stage 3.1 V1.0-RC1 acceptance payload
+
+20a19cd990dbf121cecc308e446d322432ab41ad85d2255f57695e3f2cb5f05d  agentforge-stage3.1-v1.0-rc1-clean.tar.gz
+4498963f6b113f99107279836b52790a0b9468fda6a29df194b40fb0fd6d1f35  agentforge-stage3.1-v1.0-rc1.zip
+
+The GitHub Actions acceptance path reconstructs the clean source tarball from
+rc/rc1.part*.b64 and MUST verify the first digest before executing any source.
