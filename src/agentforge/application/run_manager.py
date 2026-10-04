@@ -1901,6 +1901,22 @@ class RunManager:
                         expected_generation=expected_generation,
                     )
                 except BusinessProgressionBlockedError as blocked:
+                    if blocked.code == "CANCEL_REQUESTED":
+                        # Permission rejection was only an in-memory candidate
+                        # business consequence. Cancellation won the Run-row
+                        # serialization race, so discard that candidate rather
+                        # than persist FAILED.
+                        run.status = RunStatus.RUNNING
+                        run.failure_reason = None
+                        run.completed_at = None
+                        run.request_cancel()
+                        await recorder.record_model_result_discarded_and_cancel_run(
+                            invocation,
+                            run,
+                            blocked.failure_reason,
+                            expected_generation=expected_generation,
+                        )
+                        return None
                     run.failure_reason = blocked.failure_reason
                     await recorder.record_model_result_discarded_and_fail_run(
                         invocation,
