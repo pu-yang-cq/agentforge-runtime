@@ -10,6 +10,16 @@ def replace_once(path: str, old: str, new: str) -> None:
     file.write_text(text.replace(old, new))
 
 
+def replace_last_once(path: str, old: str, new: str) -> None:
+    file = Path(path)
+    text = file.read_text()
+    count = text.count(old)
+    if count < 1:
+        raise SystemExit(f"{path}: expected at least one anchor: {old[:160]!r}")
+    index = text.rfind(old)
+    file.write_text(text[:index] + new + text[index + len(old):])
+
+
 def append_text(path: str, marker: str, block: str) -> None:
     file = Path(path)
     text = file.read_text()
@@ -459,7 +469,7 @@ replace_once(
 ''',
 )
 
-replace_once(
+replace_last_once(
     "src/agentforge/runtime/tools.py",
     '''        self._spec = ModelToolSpec(name, description, input_schema)
         self._func = func
