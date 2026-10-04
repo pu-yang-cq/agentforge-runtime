@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql import Select
@@ -13,6 +13,7 @@ from agentforge.application.ports import ExecutionRecorder
 from agentforge.domain.enums import (
     EventType,
     ModelInvocationStatus,
+    QueueReason,
     RunStatus,
     ToolCallStatus,
     ToolExecutionAttemptStatus,
@@ -303,6 +304,62 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                         "recovered_retry": True,
                     },
                 )
+            )
+
+    async def record_recovered_read_blocked_and_fail_run(
+        self,
+        call: ToolCall,
+        run: Run,
+        *,
+        expected_generation: int,
+    ) -> None:
+        self._assert_generation(expected_generation)
+        if call.status is not ToolCallStatus.FAILED:
+            raise ValueError("blocked recovered READ must be FAILED")
+        if run.status is not RunStatus.FAILED:
+            raise ValueError("blocked recovered READ requires FAILED run")
+        async with self._sessions() as session, session.begin():
+            row = await _lock_owned_run(
+                session,
+                run_id=run.id,
+                expected_generation=expected_generation,
+            )
+            await _assert_no_started_tool_attempts(session, run.id)
+            await _assert_no_started_model_invocations(session, run.id)
+            result = await session.execute(
+                update(ToolCallRow)
+                .where(
+                    ToolCallRow.id == call.id,
+                    ToolCallRow.run_id == run.id,
+                    ToolCallRow.status == ToolCallStatus.READY,
+                )
+                .values(status=ToolCallStatus.FAILED, error=call.error)
+            )
+            if cast(CursorResult[Any], result).rowcount != 1:
+                raise RuntimeError("blocked recovered READ is no longer READY")
+            row.status = RunStatus.FAILED
+            row.failure_reason = run.failure_reason
+            row.completed_at = func.clock_timestamp()
+            row.owner_worker_id = None
+            row.lease_expires_at = None
+            seqs = list(await _allocate_event_sequences(session, run.id, 2))
+            session.add_all(
+                [
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[0],
+                        event_type=EventType.TOOL_FAILED.value,
+                        payload={"tool_call_id": str(call.id), "error": call.error},
+                    ),
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[1],
+                        event_type=EventType.RUN_FAILED.value,
+                        payload={"reason": run.failure_reason},
+                    ),
+                ]
             )
 
     async def record_run_started(self, run: Run) -> None:
@@ -601,13 +658,14 @@ class PostgresExecutionRecorder(ExecutionRecorder):
         self._assert_generation(expected_generation)
         if invocation.status is not ModelInvocationStatus.COMPLETED:
             raise ValueError("model invocation must be COMPLETED before persistence")
-        if run.status is not RunStatus.COMPLETED:
-            raise ValueError("final decision persistence requires a COMPLETED run")
+        if run.status is not RunStatus.RUNNING:
+            raise ValueError("final decision persistence requires a RUNNING run")
         async with self._sessions() as session, session.begin():
             row = await _lock_owned_run(
                 session, run_id=run.id, expected_generation=expected_generation
             )
             await _assert_no_active_tool_calls(session, run.id)
+            await _assert_deadline_not_expired(session, row)
             result = await session.execute(
                 update(ModelInvocationRow)
                 .where(
@@ -624,7 +682,7 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                 raise RuntimeError("model invocation no longer STARTED")
             await _assert_no_started_model_invocations(session, run.id)
             row.status = RunStatus.COMPLETED
-            row.final_output = run.final_output
+            row.final_output = message.content
             row.completed_at = func.clock_timestamp()
             row.owner_worker_id = None
             row.lease_expires_at = None
@@ -658,6 +716,81 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                         sequence=seqs[1],
                         event_type=EventType.RUN_COMPLETED.value,
                         payload={},
+                    ),
+                ]
+            )
+
+    async def record_model_result_discarded_and_fail_run(
+        self,
+        invocation: ModelInvocation,
+        run: Run,
+        reason: str,
+        *,
+        expected_generation: int,
+    ) -> None:
+        self._assert_generation(expected_generation)
+        if invocation.status is not ModelInvocationStatus.COMPLETED:
+            raise ValueError("discarded model result must be COMPLETED")
+        if run.status is not RunStatus.FAILED:
+            raise ValueError("discarded model result requires FAILED run")
+        async with self._sessions() as session, session.begin():
+            row = await _lock_owned_run(
+                session,
+                run_id=run.id,
+                expected_generation=expected_generation,
+            )
+            await _assert_no_active_tool_calls(session, run.id)
+            await _assert_no_started_tool_attempts(session, run.id)
+            result = await session.execute(
+                update(ModelInvocationRow)
+                .where(
+                    ModelInvocationRow.id == invocation.id,
+                    ModelInvocationRow.run_id == run.id,
+                    ModelInvocationRow.status == ModelInvocationStatus.STARTED.value,
+                )
+                .values(
+                    status=invocation.status.value,
+                    outcome_type=invocation.outcome_type,
+                    completed_at=func.clock_timestamp(),
+                )
+            )
+            if cast(CursorResult[Any], result).rowcount != 1:
+                raise RuntimeError("model invocation no longer STARTED")
+            await _assert_no_started_model_invocations(session, run.id)
+            row.status = RunStatus.FAILED
+            row.failure_reason = run.failure_reason
+            row.completed_at = func.clock_timestamp()
+            row.owner_worker_id = None
+            row.lease_expires_at = None
+            seqs = list(await _allocate_event_sequences(session, run.id, 3))
+            session.add_all(
+                [
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[0],
+                        event_type=EventType.MODEL_COMPLETED.value,
+                        payload={
+                            "turn": invocation.turn,
+                            "outcome_type": invocation.outcome_type,
+                        },
+                    ),
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[1],
+                        event_type=EventType.MODEL_RESULT_DISCARDED.value,
+                        payload={
+                            "invocation_id": str(invocation.id),
+                            "reason": reason,
+                        },
+                    ),
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[2],
+                        event_type=EventType.RUN_FAILED.value,
+                        payload={"reason": run.failure_reason},
                     ),
                 ]
             )
@@ -857,6 +990,49 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                     sequence=seq,
                     event_type=EventType.RUN_FAILED.value,
                     payload={"reason": run.failure_reason},
+                )
+            )
+
+
+    async def record_run_yielded(
+        self,
+        run: Run,
+        *,
+        delay_seconds: int,
+        expected_generation: int,
+    ) -> None:
+        self._assert_generation(expected_generation)
+        if run.status is not RunStatus.QUEUED or run.queue_reason is not QueueReason.YIELD:
+            raise ValueError("durable yield requires QUEUED/YIELD run")
+        if delay_seconds < 0:
+            raise ValueError("delay_seconds cannot be negative")
+        async with self._sessions() as session, session.begin():
+            row = await _lock_owned_run(
+                session,
+                run_id=run.id,
+                expected_generation=expected_generation,
+            )
+            await _assert_no_active_tool_calls(session, run.id)
+            await _assert_no_started_tool_attempts(session, run.id)
+            await _assert_no_started_model_invocations(session, run.id)
+            state = await _lock_run_state(session, run.id)
+            await _assert_deadline_not_expired(session, row)
+            _assert_model_budget(row, state)
+            row.status = RunStatus.QUEUED
+            row.queue_reason = QueueReason.YIELD
+            row.available_at = func.clock_timestamp() + text(
+                f"INTERVAL '{int(delay_seconds)} seconds'"
+            )
+            row.owner_worker_id = None
+            row.lease_expires_at = None
+            seq = next(iter(await _allocate_event_sequences(session, run.id, 1)))
+            session.add(
+                DomainEventRow(
+                    id=uuid4(),
+                    run_id=run.id,
+                    sequence=seq,
+                    event_type=EventType.RUN_YIELDED.value,
+                    payload={"delay_seconds": delay_seconds},
                 )
             )
 
