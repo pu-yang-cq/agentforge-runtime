@@ -1,4 +1,4 @@
-exit_code=1
+exit_code=0
 Unable to find image 'ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim' locally
 0.12.20-python3.14-trixie-slim: Pulling from astral-sh/uv
 6b37362b3da7: Pulling fs layer
@@ -8,15 +8,15 @@ ad232412d02e: Pulling fs layer
 44b21d030312: Pulling fs layer
 ad232412d02e: Waiting
 44b21d030312: Waiting
-8def98961a31: Verifying Checksum
-8def98961a31: Download complete
 5c21337b2448: Verifying Checksum
 5c21337b2448: Download complete
-6b37362b3da7: Verifying Checksum
-6b37362b3da7: Download complete
+8def98961a31: Verifying Checksum
+8def98961a31: Download complete
 ad232412d02e: Verifying Checksum
 ad232412d02e: Download complete
+6b37362b3da7: Download complete
 44b21d030312: Verifying Checksum
+44b21d030312: Download complete
 6b37362b3da7: Pull complete
 5c21337b2448: Pull complete
 8def98961a31: Pull complete
@@ -26,25 +26,25 @@ Digest: sha256:6ee77524d145f48dcdede4d64411334bb426a0ad9835009215a69ff17e4d0e7e
 Status: Downloaded newer image for ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim
 Using CPython 3.14.7 interpreter at: /usr/local/bin/python3.14
 Creating virtual environment at: /tmp/agentforge-d3-canonical-venv
-Resolved 52 packages in 1ms
+Resolved 52 packages in 0.93ms
    Building agentforge @ file:///workspace
       Built agentforge @ file:///workspace
-Downloading pydantic-core (2.0MiB)
-Downloading mypy (14.0MiB)
-Downloading pygments (1.2MiB)
-Downloading ruff (9.9MiB)
-Downloading psycopg-binary (5.0MiB)
 Downloading sqlalchemy (3.2MiB)
+Downloading ruff (9.9MiB)
+Downloading pygments (1.2MiB)
+Downloading pydantic-core (2.0MiB)
 Downloading uvloop (4.2MiB)
- Downloaded pygments
+Downloading psycopg-binary (5.0MiB)
+Downloading mypy (14.0MiB)
  Downloaded pydantic-core
- Downloaded sqlalchemy
- Downloaded psycopg-binary
+ Downloaded pygments
  Downloaded uvloop
+ Downloaded psycopg-binary
+ Downloaded sqlalchemy
  Downloaded ruff
  Downloaded mypy
-Prepared 49 packages in 370ms
-Installed 49 packages in 46ms
+Prepared 49 packages in 393ms
+Installed 49 packages in 66ms
  + agentforge==0.1.0 (from file:///workspace)
  + alembic==1.20.0
  + annotated-doc==0.0.5
@@ -94,54 +94,5 @@ Installed 49 packages in 46ms
  + watchfiles==1.3.0
  + websockets==17.2
  + wrapt==2.5.0
-E501 Line too long (101 > 100)
-    --> tests/integration/test_postgres_runtime.py:3198:101
-     |
-3196 |     side_version_id = uuid4()
-3197 |     async with sessions() as session, session.begin():
-3198 |         session.add(ToolDefinitionRow(id=side_tool_id, name="reconcile_commit", description="write"))
-     |                                                                                                     ^
-3199 |         await session.flush()
-3200 |         session.add(
-     |
-
-E501 Line too long (101 > 100)
-    --> tests/integration/test_postgres_runtime.py:3337:101
-     |
-3335 |     side_version_id = uuid4()
-3336 |     async with sessions() as session, session.begin():
-3337 |         session.add(ToolDefinitionRow(id=side_tool_id, name="reconcile_budget", description="write"))
-     |                                                                                                     ^
-3338 |         await session.flush()
-3339 |         session.add(
-     |
-
-E501 Line too long (103 > 100)
-    --> tests/integration/test_postgres_runtime.py:3475:101
-     |
-3474 | @pytest.mark.asyncio
-3475 | async def test_orphaned_reconciliation_attempt_closes_failed_without_changing_business_truth() -> None:
-     |                                                                                                     ^^^
-3476 |     from datetime import UTC, datetime, timedelta
-     |
-
-E501 Line too long (101 > 100)
-    --> tests/integration/test_postgres_runtime.py:3489:101
-     |
-3487 |     side_version_id = uuid4()
-3488 |     async with sessions() as session, session.begin():
-3489 |         session.add(ToolDefinitionRow(id=side_tool_id, name="orphan_reconcile", description="write"))
-     |                                                                                                     ^
-3490 |         await session.flush()
-3491 |         session.add(
-     |
-
-E501 Line too long (106 > 100)
-    --> tests/unit/test_run_manager.py:1782:101
-     |
-1780 |     assert run.queue_reason is QueueReason.RETRY
-1781 |     assert len(journal.reconciliation_attempts) == 1
-1782 |     assert journal.reconciliation_attempts[0].business_result is ReconciliationBusinessResult.NOT_EXECUTED
-     |                                                                                                     ^^^^^^
-
-Found 5 errors.
+All checks passed!
+4 files reformatted, 50 files left unchanged
