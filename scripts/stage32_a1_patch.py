@@ -1043,8 +1043,8 @@ replace_once(
     ToolDefinitionRow,
 ''',
     '''    ToolCallRow,
-    ToolExecutionAttemptRow,
     ToolDefinitionRow,
+    ToolExecutionAttemptRow,
 ''',
 )
 
@@ -1143,7 +1143,6 @@ from uuid import uuid4
 
 from agentforge.domain.enums import ToolExecutionAttemptStatus
 from agentforge.domain.models import ToolExecutionAttempt
-
 
 ROOT = Path(__file__).resolve().parents[2]
 
