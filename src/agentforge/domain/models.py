@@ -12,6 +12,7 @@ from .enums import (
     QueueReason,
     RunStatus,
     ToolCallStatus,
+    ToolExecutionAttemptStatus,
 )
 
 
@@ -213,6 +214,51 @@ class ToolCall:
             raise ValueError("tool call can only fail from EXECUTING")
         self.status = ToolCallStatus.FAILED
         self.error = error
+
+
+@dataclass(slots=True)
+class ToolExecutionAttempt:
+    id: UUID
+    run_id: UUID
+    tool_call_id: UUID
+    attempt_number: int
+    execution_generation: int
+    status: ToolExecutionAttemptStatus = ToolExecutionAttemptStatus.STARTED
+    result: Any = None
+    error: str | None = None
+    outcome_reason: str | None = None
+    definite_not_executed: bool | None = None
+    started_at: datetime = field(default_factory=utcnow)
+    finished_at: datetime | None = None
+
+    def succeed(self, result: Any) -> None:
+        if self.status is not ToolExecutionAttemptStatus.STARTED:
+            raise ValueError("tool attempt can only succeed from STARTED")
+        self.status = ToolExecutionAttemptStatus.SUCCEEDED
+        self.result = result
+        self.finished_at = utcnow()
+
+    def fail(
+        self,
+        error: str,
+        *,
+        definite_not_executed: bool | None = None,
+        outcome_reason: str | None = None,
+    ) -> None:
+        if self.status is not ToolExecutionAttemptStatus.STARTED:
+            raise ValueError("tool attempt can only fail from STARTED")
+        self.status = ToolExecutionAttemptStatus.FAILED
+        self.error = error
+        self.definite_not_executed = definite_not_executed
+        self.outcome_reason = outcome_reason
+        self.finished_at = utcnow()
+
+    def mark_unknown(self, reason: str) -> None:
+        if self.status is not ToolExecutionAttemptStatus.STARTED:
+            raise ValueError("tool attempt can only become UNKNOWN from STARTED")
+        self.status = ToolExecutionAttemptStatus.UNKNOWN
+        self.outcome_reason = reason
+        self.finished_at = utcnow()
 
 
 @dataclass(frozen=True, slots=True)

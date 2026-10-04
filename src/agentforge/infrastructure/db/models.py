@@ -4,6 +4,7 @@ from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     Enum,
@@ -24,6 +25,7 @@ from agentforge.domain.enums import (
     RunStatus,
     ToolCallStatus,
     ToolEffectType,
+    ToolExecutionAttemptStatus,
 )
 
 
@@ -260,6 +262,47 @@ class ToolCallRow(Base):
     )
     result: Mapped[object | None] = mapped_column(JSONB)
     error: Mapped[str | None] = mapped_column(Text)
+
+
+class ToolExecutionAttemptRow(Base):
+    __tablename__ = "tool_execution_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "tool_call_id",
+            "attempt_number",
+            name="uq_tool_execution_attempts_call_number",
+        ),
+        Index(
+            "uq_tool_execution_attempts_one_started_per_call",
+            "tool_call_id",
+            unique=True,
+            postgresql_where=text("status = 'STARTED'"),
+        ),
+        Index("ix_tool_execution_attempts_run_id", "run_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    run_id: Mapped[UUID] = mapped_column(ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False)
+    tool_call_id: Mapped[UUID] = mapped_column(
+        ForeignKey("tool_calls.id", ondelete="RESTRICT"), nullable=False
+    )
+    external_action_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    execution_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[ToolExecutionAttemptStatus] = mapped_column(
+        Enum(ToolExecutionAttemptStatus, name="tool_execution_attempt_status"),
+        nullable=False,
+    )
+    result: Mapped[object | None] = mapped_column(JSONB)
+    error: Mapped[str | None] = mapped_column(Text)
+    error_class: Mapped[str | None] = mapped_column(String(64))
+    outcome_reason: Mapped[str | None] = mapped_column(String(120))
+    definite_not_executed: Mapped[bool | None] = mapped_column(Boolean)
+    adapter_metadata: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class DomainEventRow(Base):

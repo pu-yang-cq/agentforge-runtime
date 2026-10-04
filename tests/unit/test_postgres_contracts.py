@@ -58,6 +58,7 @@ def test_core_schema_contains_versioned_tool_bindings_and_durable_facts() -> Non
         "model_invocations",
         "tool_proposals",
         "tool_calls",
+        "tool_execution_attempts",
         "domain_events",
     }
     assert expected.issubset(Base.metadata.tables)
@@ -109,6 +110,28 @@ def test_core_schema_enforces_one_started_model_invocation_per_run() -> None:
     assert [column.name for column in active.columns] == ["run_id"]
     where = str(active.dialect_options["postgresql"]["where"]).upper()
     assert "STATUS = 'STARTED'" in where
+
+
+def test_tool_execution_attempt_schema_enforces_physical_attempt_invariants() -> None:
+    table = Base.metadata.tables["tool_execution_attempts"]
+    assert {
+        "run_id",
+        "tool_call_id",
+        "attempt_number",
+        "execution_generation",
+        "status",
+        "finished_at",
+    }.issubset(table.c.keys())
+    indexes = {index.name: index for index in table.indexes}
+    started = indexes["uq_tool_execution_attempts_one_started_per_call"]
+    assert started.unique is True
+    assert [column.name for column in started.columns] == ["tool_call_id"]
+    where = str(started.dialect_options["postgresql"]["where"]).upper()
+    assert "STATUS = 'STARTED'" in where
+    unique_names = {
+        constraint.name for constraint in table.constraints if constraint.name is not None
+    }
+    assert "uq_tool_execution_attempts_call_number" in unique_names
 
 
 def test_run_schema_enforces_terminal_row_shape() -> None:

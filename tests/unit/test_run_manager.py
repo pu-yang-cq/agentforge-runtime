@@ -4,7 +4,12 @@ import pytest
 
 from agentforge.application.errors import RunExecutionFailedError
 from agentforge.application.run_manager import ExecutionJournal, RunManager
-from agentforge.domain.enums import EventType, RunStatus, ToolCallStatus
+from agentforge.domain.enums import (
+    EventType,
+    RunStatus,
+    ToolCallStatus,
+    ToolExecutionAttemptStatus,
+)
 from agentforge.domain.models import (
     AgentVersion,
     DomainEvent,
@@ -12,6 +17,7 @@ from agentforge.domain.models import (
     RunState,
     ToolBinding,
     ToolCall,
+    ToolExecutionAttempt,
     ToolProposal,
 )
 from agentforge.runtime.fake_model import FinalStep, ScriptedFakeModel, ToolStep
@@ -56,6 +62,9 @@ async def test_core_read_tool_flow_completes() -> None:
     assert len(journal.proposals) == 1
     assert journal.tool_calls[0].tool_version_id == version_id
     assert journal.tool_calls[0].status is ToolCallStatus.SUCCEEDED
+    assert len(journal.tool_attempts) == 1
+    assert journal.tool_attempts[0].attempt_number == 1
+    assert journal.tool_attempts[0].status is ToolExecutionAttemptStatus.SUCCEEDED
     assert [e.type for e in journal.events] == [
         EventType.RUN_STARTED,
         EventType.MODEL_STARTED,
@@ -220,6 +229,15 @@ async def test_recovered_read_tool_is_retried_before_new_model_reasoning() -> No
     recovered_call.ready()
     journal.proposals.append(proposal)
     journal.tool_calls.append(recovered_call)
+    previous_attempt = ToolExecutionAttempt(
+        uuid4(),
+        run.id,
+        recovered_call.id,
+        1,
+        1,
+    )
+    previous_attempt.mark_unknown("LEASE_LOST_RESULT_NOT_DURABLE")
+    journal.tool_attempts.append(previous_attempt)
     journal.events.append(
         DomainEvent(
             run.id,
@@ -239,6 +257,14 @@ async def test_recovered_read_tool_is_retried_before_new_model_reasoning() -> No
     assert result == "done after deterministic recovery"
     assert invocations == ["same-durable-intent"]
     assert recovered_call.status is ToolCallStatus.SUCCEEDED
+    recovered_attempts = [
+        attempt for attempt in journal.tool_attempts if attempt.tool_call_id == recovered_call.id
+    ]
+    assert [attempt.attempt_number for attempt in recovered_attempts] == [1, 2]
+    assert [attempt.status for attempt in recovered_attempts] == [
+        ToolExecutionAttemptStatus.UNKNOWN,
+        ToolExecutionAttemptStatus.SUCCEEDED,
+    ]
     assert state.tool_call_count == 1  # same logical ToolCall, not a new model-created one
     assert state.turn_count == 2
     assert len(model.requests) == 1

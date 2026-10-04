@@ -37,6 +37,9 @@ def test_alembic_offline_upgrade_compiles_core_schema_and_model_lifecycle() -> N
     assert "CK_RUNS_COMPLETED_SHAPE" in ddl
     assert "CK_RUNS_FAILED_SHAPE" in ddl
     assert "CK_RUNS_NONTERMINAL_HAS_NO_COMPLETED_AT" in ddl
+    assert "0006_TOOL_ATTEMPTS" in ddl
+    assert "CREATE TABLE TOOL_EXECUTION_ATTEMPTS" in ddl
+    assert "UQ_TOOL_EXECUTION_ATTEMPTS_ONE_STARTED_PER_CALL" in ddl
 
 
 def test_run_terminal_shape_migration_is_present() -> None:

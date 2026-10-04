@@ -38,7 +38,13 @@ from agentforge.demo import (
     build_demo_model,
     build_demo_registry,
 )
-from agentforge.domain.enums import EventType, RunStatus, ToolCallStatus, ToolEffectType
+from agentforge.domain.enums import (
+    EventType,
+    RunStatus,
+    ToolCallStatus,
+    ToolEffectType,
+    ToolExecutionAttemptStatus,
+)
 from agentforge.domain.models import ToolProposal
 from agentforge.infrastructure.db.execution_recorder import (
     PostgresExecutionRecorder,
@@ -52,6 +58,7 @@ from agentforge.infrastructure.db.models import (
     RunMessageRow,
     ToolCallRow,
     ToolDefinitionRow,
+    ToolExecutionAttemptRow,
     ToolVersionRow,
 )
 from agentforge.infrastructure.db.runtime_store import PostgresRuntimeStore
@@ -407,6 +414,22 @@ async def test_takeover_prepares_orphaned_read_for_deterministic_retry() -> None
         assert call_row.status is ToolCallStatus.READY
         assert call_row.error is not None
         assert "deterministic READ retry" in call_row.error
+        attempts = (
+            (
+                await session.execute(
+                    select(ToolExecutionAttemptRow)
+                    .where(ToolExecutionAttemptRow.tool_call_id == prepared.call.id)
+                    .order_by(ToolExecutionAttemptRow.attempt_number)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(attempts) == 1
+        assert attempts[0].attempt_number == 1
+        assert attempts[0].execution_generation == 1
+        assert attempts[0].status is ToolExecutionAttemptStatus.UNKNOWN
+        assert attempts[0].outcome_reason == "LEASE_LOST_RESULT_NOT_DURABLE"
         event_types = (
             (
                 await session.execute(
@@ -667,6 +690,17 @@ async def test_recovered_read_is_retried_before_model_and_reuses_same_tool_call(
             .scalars()
             .all()
         )
+        attempts = (
+            (
+                await session.execute(
+                    select(ToolExecutionAttemptRow)
+                    .where(ToolExecutionAttemptRow.tool_call_id == original_call_id)
+                    .order_by(ToolExecutionAttemptRow.attempt_number)
+                )
+            )
+            .scalars()
+            .all()
+        )
         event_types = (
             (
                 await session.execute(
@@ -682,6 +716,12 @@ async def test_recovered_read_is_retried_before_model_and_reuses_same_tool_call(
     assert len(calls) == 1
     assert calls[0].id == original_call_id
     assert calls[0].status is ToolCallStatus.SUCCEEDED
+    assert [attempt.attempt_number for attempt in attempts] == [1, 2]
+    assert [attempt.execution_generation for attempt in attempts] == [1, 2]
+    assert [attempt.status for attempt in attempts] == [
+        ToolExecutionAttemptStatus.UNKNOWN,
+        ToolExecutionAttemptStatus.SUCCEEDED,
+    ]
     assert sum(1 for message in messages if message.role == "TOOL") == 1
     assert EventType.TOOL_RETRY_READY.value in event_types
     assert event_types.count(EventType.TOOL_STARTED.value) == 2

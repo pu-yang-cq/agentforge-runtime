@@ -6,7 +6,13 @@ from uuid import UUID, uuid4
 
 from agentforge.application.errors import RunExecutionFailedError
 from agentforge.application.ports import ExecutionRecorder
-from agentforge.domain.enums import EventType, MessageRole, RunStatus, ToolCallStatus
+from agentforge.domain.enums import (
+    EventType,
+    MessageRole,
+    RunStatus,
+    ToolCallStatus,
+    ToolExecutionAttemptStatus,
+)
 from agentforge.domain.model_contract import ModelMessage
 from agentforge.domain.models import (
     AgentVersion,
@@ -16,6 +22,7 @@ from agentforge.domain.models import (
     RunMessage,
     RunState,
     ToolCall,
+    ToolExecutionAttempt,
     ToolProposal,
 )
 from agentforge.runtime.native_runner import FinalDecision, NativeRunner, ToolDecision
@@ -31,6 +38,7 @@ class ExecutionJournal(ExecutionRecorder):
     model_invocations: list[ModelInvocation] = field(default_factory=list)
     proposals: list[ToolProposal] = field(default_factory=list)
     tool_calls: list[ToolCall] = field(default_factory=list)
+    tool_attempts: list[ToolExecutionAttempt] = field(default_factory=list)
     run_state: RunState | None = None
 
     def seed(self, run: Run, run_state: RunState) -> None:
@@ -82,6 +90,39 @@ class ExecutionJournal(ExecutionRecorder):
                 f"cannot terminalize run {run_id} with active ToolCall {active[0].id}"
             )
 
+    def _started_tool_attempt(self, tool_call_id: UUID) -> ToolExecutionAttempt:
+        attempts = [
+            attempt
+            for attempt in self.tool_attempts
+            if attempt.tool_call_id == tool_call_id
+            and attempt.status is ToolExecutionAttemptStatus.STARTED
+        ]
+        if len(attempts) != 1:
+            raise RuntimeError(
+                f"expected one STARTED ToolExecutionAttempt for {tool_call_id}, "
+                f"found {len(attempts)}"
+            )
+        return attempts[0]
+
+    def _next_tool_attempt_number(self, tool_call_id: UUID) -> int:
+        numbers = [
+            attempt.attempt_number
+            for attempt in self.tool_attempts
+            if attempt.tool_call_id == tool_call_id
+        ]
+        return max(numbers, default=0) + 1
+
+    def _assert_no_started_tool_attempts(self, run_id: UUID) -> None:
+        started = [
+            attempt
+            for attempt in self.tool_attempts
+            if attempt.run_id == run_id and attempt.status is ToolExecutionAttemptStatus.STARTED
+        ]
+        if started:
+            raise RuntimeError(
+                f"cannot progress run {run_id} with STARTED ToolExecutionAttempt {started[0].id}"
+            )
+
     def _assert_no_started_model_invocations(self, run_id: UUID) -> None:
         started = [
             invocation
@@ -115,6 +156,15 @@ class ExecutionJournal(ExecutionRecorder):
         if call.status is not ToolCallStatus.EXECUTING:
             raise ValueError("recovered READ call must be EXECUTING before persistence")
         self._assert_no_started_model_invocations(call.run_id)
+        self._assert_no_started_tool_attempts(call.run_id)
+        attempt = ToolExecutionAttempt(
+            uuid4(),
+            call.run_id,
+            call.id,
+            self._next_tool_attempt_number(call.id),
+            expected_generation,
+        )
+        self.tool_attempts.append(attempt)
         self.events.append(
             DomainEvent(
                 call.run_id,
@@ -123,6 +173,8 @@ class ExecutionJournal(ExecutionRecorder):
                 {
                     "tool_call_id": str(call.id),
                     "tool_name": call.tool_name,
+                    "attempt_id": str(attempt.id),
+                    "attempt_number": attempt.attempt_number,
                     "recovered_retry": True,
                 },
             )
@@ -141,6 +193,7 @@ class ExecutionJournal(ExecutionRecorder):
         if self.run_state is None or self.run_state.run_id != run_id:
             raise RuntimeError("journal run state is not seeded")
         self._assert_no_active_tool_calls(run_id)
+        self._assert_no_started_tool_attempts(run_id)
         self._assert_no_started_model_invocations(run_id)
         self.run_state.turn_count += 1
         self.run_state.state_version += 1
@@ -192,12 +245,25 @@ class ExecutionJournal(ExecutionRecorder):
         self.run_state.tool_call_count += 1
         self.run_state.state_version += 1
         self.tool_calls.append(call)
+        attempt = ToolExecutionAttempt(
+            uuid4(),
+            call.run_id,
+            call.id,
+            self._next_tool_attempt_number(call.id),
+            expected_generation,
+        )
+        self.tool_attempts.append(attempt)
         self.events.append(
             DomainEvent(
                 call.run_id,
                 len(self.events) + 1,
                 EventType.TOOL_STARTED,
-                {"tool_call_id": str(call.id), "tool_name": call.tool_name},
+                {
+                    "tool_call_id": str(call.id),
+                    "tool_name": call.tool_name,
+                    "attempt_id": str(attempt.id),
+                    "attempt_number": attempt.attempt_number,
+                },
             )
         )
         return self.run_state
@@ -313,6 +379,8 @@ class ExecutionJournal(ExecutionRecorder):
     ) -> None:
         if call.status is not ToolCallStatus.SUCCEEDED:
             raise ValueError("tool success persistence requires a SUCCEEDED ToolCall")
+        attempt = self._started_tool_attempt(call.id)
+        attempt.succeed(call.result)
         self.messages.append(
             RunMessage(
                 message.run_id,
@@ -327,7 +395,12 @@ class ExecutionJournal(ExecutionRecorder):
                 call.run_id,
                 len(self.events) + 1,
                 EventType.TOOL_SUCCEEDED,
-                {"tool_call_id": str(call.id), "tool_name": call.tool_name},
+                {
+                    "tool_call_id": str(call.id),
+                    "tool_name": call.tool_name,
+                    "attempt_id": str(attempt.id),
+                    "attempt_number": attempt.attempt_number,
+                },
             )
         )
 
@@ -342,7 +415,10 @@ class ExecutionJournal(ExecutionRecorder):
             raise ValueError("tool failure persistence requires a FAILED run")
         if call.status is not ToolCallStatus.FAILED:
             raise ValueError("tool failure persistence requires a FAILED ToolCall")
+        attempt = self._started_tool_attempt(call.id)
+        attempt.fail(call.error or "tool failed")
         self._assert_no_active_tool_calls(run.id)
+        self._assert_no_started_tool_attempts(run.id)
         self._assert_no_started_model_invocations(run.id)
         self.events.append(
             DomainEvent(
@@ -358,6 +434,7 @@ class ExecutionJournal(ExecutionRecorder):
         if run.status is not RunStatus.FAILED:
             raise ValueError("run failure persistence requires a FAILED run")
         self._assert_no_active_tool_calls(run.id)
+        self._assert_no_started_tool_attempts(run.id)
         self._assert_no_started_model_invocations(run.id)
         self._append_event(run, EventType.RUN_FAILED, {"reason": run.failure_reason})
 

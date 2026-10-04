@@ -30,6 +30,13 @@ class ToolCallStatus(StrEnum):
     NOT_EXECUTED = "NOT_EXECUTED"
 
 
+class ToolExecutionAttemptStatus(StrEnum):
+    STARTED = "STARTED"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    UNKNOWN = "UNKNOWN"
+
+
 class ModelInvocationStatus(StrEnum):
     STARTED = "STARTED"
     COMPLETED = "COMPLETED"

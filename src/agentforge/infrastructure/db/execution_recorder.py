@@ -15,6 +15,7 @@ from agentforge.domain.enums import (
     ModelInvocationStatus,
     RunStatus,
     ToolCallStatus,
+    ToolExecutionAttemptStatus,
 )
 from agentforge.domain.models import (
     ModelInvocation,
@@ -37,6 +38,7 @@ from agentforge.infrastructure.db.models import (
     RunRow,
     RunStateRow,
     ToolCallRow,
+    ToolExecutionAttemptRow,
     ToolProposalRow,
 )
 from agentforge.infrastructure.db.runtime_store import _allocate_event_sequences
@@ -100,6 +102,48 @@ async def _assert_no_active_tool_calls(session: AsyncSession, run_id: UUID) -> N
     )
     if active_id is not None:
         raise RuntimeError(f"cannot terminalize run {run_id} with active ToolCall {active_id}")
+
+
+async def _assert_no_started_tool_attempts(session: AsyncSession, run_id: UUID) -> None:
+    started_id = await session.scalar(
+        select(ToolExecutionAttemptRow.id)
+        .where(
+            ToolExecutionAttemptRow.run_id == run_id,
+            ToolExecutionAttemptRow.status == ToolExecutionAttemptStatus.STARTED,
+        )
+        .limit(1)
+    )
+    if started_id is not None:
+        raise RuntimeError(
+            f"cannot progress run {run_id} with STARTED ToolExecutionAttempt {started_id}"
+        )
+
+
+async def _lock_started_tool_attempt(
+    session: AsyncSession, tool_call_id: UUID
+) -> ToolExecutionAttemptRow:
+    row = (
+        await session.execute(
+            select(ToolExecutionAttemptRow)
+            .where(
+                ToolExecutionAttemptRow.tool_call_id == tool_call_id,
+                ToolExecutionAttemptRow.status == ToolExecutionAttemptStatus.STARTED,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise RuntimeError(f"tool call {tool_call_id} has no STARTED ToolExecutionAttempt")
+    return row
+
+
+async def _next_tool_attempt_number(session: AsyncSession, tool_call_id: UUID) -> int:
+    current = await session.scalar(
+        select(func.max(ToolExecutionAttemptRow.attempt_number)).where(
+            ToolExecutionAttemptRow.tool_call_id == tool_call_id
+        )
+    )
+    return int(current or 0) + 1
 
 
 async def _assert_no_started_model_invocations(session: AsyncSession, run_id: UUID) -> None:
@@ -184,6 +228,7 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                 session, run_id=call.run_id, expected_generation=expected_generation
             )
             await _assert_no_started_model_invocations(session, call.run_id)
+            await _assert_no_started_tool_attempts(session, call.run_id)
             result = await session.execute(
                 update(ToolCallRow)
                 .where(
@@ -196,6 +241,17 @@ class PostgresExecutionRecorder(ExecutionRecorder):
             )
             if cast(CursorResult[Any], result).rowcount != 1:
                 raise RuntimeError("recovered READ ToolCall is no longer READY")
+            attempt_number = await _next_tool_attempt_number(session, call.id)
+            attempt = ToolExecutionAttemptRow(
+                id=uuid4(),
+                run_id=call.run_id,
+                tool_call_id=call.id,
+                external_action_id=None,
+                attempt_number=attempt_number,
+                execution_generation=expected_generation,
+                status=ToolExecutionAttemptStatus.STARTED,
+            )
+            session.add(attempt)
             seq = next(iter(await _allocate_event_sequences(session, call.run_id, 1)))
             session.add(
                 DomainEventRow(
@@ -206,6 +262,8 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                     payload={
                         "tool_call_id": str(call.id),
                         "tool_name": call.tool_name,
+                        "attempt_id": str(attempt.id),
+                        "attempt_number": attempt_number,
                         "recovered_retry": True,
                     },
                 )
@@ -230,6 +288,7 @@ class PostgresExecutionRecorder(ExecutionRecorder):
         async with self._sessions() as session, session.begin():
             await _lock_owned_run(session, run_id=run_id, expected_generation=expected_generation)
             await _assert_no_active_tool_calls(session, run_id)
+            await _assert_no_started_tool_attempts(session, run_id)
             await _assert_no_started_model_invocations(session, run_id)
             state = await _lock_run_state(session, run_id)
             state.turn_count += 1
@@ -324,6 +383,17 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                     status=call.status,
                 )
             )
+            await session.flush()
+            attempt = ToolExecutionAttemptRow(
+                id=uuid4(),
+                run_id=call.run_id,
+                tool_call_id=call.id,
+                external_action_id=None,
+                attempt_number=1,
+                execution_generation=expected_generation,
+                status=ToolExecutionAttemptStatus.STARTED,
+            )
+            session.add(attempt)
             seqs = list(await _allocate_event_sequences(session, invocation.run_id, 3))
             session.add_all(
                 [
@@ -352,7 +422,12 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                         run_id=call.run_id,
                         sequence=seqs[2],
                         event_type=EventType.TOOL_STARTED.value,
-                        payload={"tool_call_id": str(call.id), "tool_name": call.tool_name},
+                        payload={
+                            "tool_call_id": str(call.id),
+                            "tool_name": call.tool_name,
+                            "attempt_id": str(attempt.id),
+                            "attempt_number": attempt.attempt_number,
+                        },
                     ),
                 ]
             )
@@ -624,6 +699,10 @@ class PostgresExecutionRecorder(ExecutionRecorder):
             )
             if cast(CursorResult[Any], result).rowcount != 1:
                 raise RuntimeError("tool call no longer EXECUTING")
+            attempt = await _lock_started_tool_attempt(session, call.id)
+            attempt.status = ToolExecutionAttemptStatus.SUCCEEDED
+            attempt.result = call.result
+            attempt.finished_at = func.clock_timestamp()
             message_seq = await _allocate_message_sequence(session, call.run_id)
             session.add(
                 RunMessageRow(
@@ -642,7 +721,12 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                     run_id=call.run_id,
                     sequence=event_seq,
                     event_type=EventType.TOOL_SUCCEEDED.value,
-                    payload={"tool_call_id": str(call.id), "tool_name": call.tool_name},
+                    payload={
+                        "tool_call_id": str(call.id),
+                        "tool_name": call.tool_name,
+                        "attempt_id": str(attempt.id),
+                        "attempt_number": attempt.attempt_number,
+                    },
                 )
             )
 
@@ -672,7 +756,13 @@ class PostgresExecutionRecorder(ExecutionRecorder):
             )
             if cast(CursorResult[Any], result).rowcount != 1:
                 raise RuntimeError("tool call no longer EXECUTING")
+            attempt = await _lock_started_tool_attempt(session, call.id)
+            attempt.status = ToolExecutionAttemptStatus.FAILED
+            attempt.error = call.error
+            attempt.finished_at = func.clock_timestamp()
             await _assert_no_active_tool_calls(session, run.id)
+            await session.flush()
+            await _assert_no_started_tool_attempts(session, run.id)
             await _assert_no_started_model_invocations(session, run.id)
             row.status = RunStatus.FAILED
             row.failure_reason = run.failure_reason
@@ -708,6 +798,7 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                 session, run_id=run.id, expected_generation=expected_generation
             )
             await _assert_no_active_tool_calls(session, run.id)
+            await _assert_no_started_tool_attempts(session, run.id)
             await _assert_no_started_model_invocations(session, run.id)
             row.status = RunStatus.FAILED
             row.failure_reason = run.failure_reason

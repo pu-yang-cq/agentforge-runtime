@@ -19,6 +19,7 @@ from agentforge.domain.enums import (
     RunStatus,
     ToolCallStatus,
     ToolEffectType,
+    ToolExecutionAttemptStatus,
 )
 from agentforge.domain.models import AgentVersion, Run, RunState
 from agentforge.infrastructure.db.mappers import (
@@ -37,6 +38,7 @@ from agentforge.infrastructure.db.models import (
     RunRow,
     RunStateRow,
     ToolCallRow,
+    ToolExecutionAttemptRow,
     ToolVersionRow,
 )
 
@@ -134,6 +136,20 @@ async def _prepare_orphaned_read_calls_for_retry(session: AsyncSession, run_id: 
             raise RuntimeError(
                 "cannot apply Wave-1 recovery semantics to a non-READ executing tool call"
             )
+        attempt = (
+            await session.execute(
+                select(ToolExecutionAttemptRow)
+                .where(
+                    ToolExecutionAttemptRow.tool_call_id == call.id,
+                    ToolExecutionAttemptRow.status == ToolExecutionAttemptStatus.STARTED,
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if attempt is not None:
+            attempt.status = ToolExecutionAttemptStatus.UNKNOWN
+            attempt.outcome_reason = "LEASE_LOST_RESULT_NOT_DURABLE"
+            attempt.finished_at = func.clock_timestamp()
         call.status = ToolCallStatus.READY
         call.error = "previous executor lease expired; deterministic READ retry required"
         recovered.append(call.id)
