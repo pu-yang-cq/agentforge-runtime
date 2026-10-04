@@ -472,6 +472,10 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                     arguments=proposal.arguments,
                 )
             )
+            # ToolProposal is the durable parent intent for ToolCall. Because
+            # these rows intentionally have no ORM relationship objects, flush
+            # the parent explicitly while remaining inside this transaction.
+            await session.flush()
             state.tool_call_count += 1
             state.tool_attempts_used += 1
             state.state_version += 1
