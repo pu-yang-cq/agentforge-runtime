@@ -81,7 +81,10 @@ class Run:
         if self.status is not RunStatus.QUEUED:
             raise ValueError(f"cannot start run from {self.status}")
         self.status = RunStatus.RUNNING
-        self.started_at = utcnow()
+        self.queue_reason = None
+        self.available_at = None
+        if self.started_at is None:
+            self.started_at = utcnow()
 
     def complete(self, output: str) -> None:
         if self.status is not RunStatus.RUNNING:
