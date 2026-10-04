@@ -1,3 +1,4 @@
+from datetime import timedelta
 from uuid import uuid4
 
 import pytest
@@ -6,6 +7,7 @@ from agentforge.application.errors import RunExecutionFailedError
 from agentforge.application.run_manager import ExecutionJournal, RunManager
 from agentforge.domain.enums import (
     EventType,
+    QueueReason,
     RunStatus,
     ToolCallStatus,
     ToolExecutionAttemptStatus,
@@ -19,6 +21,7 @@ from agentforge.domain.models import (
     ToolCall,
     ToolExecutionAttempt,
     ToolProposal,
+    utcnow,
 )
 from agentforge.runtime.fake_model import FinalStep, ScriptedFakeModel, ToolStep
 from agentforge.runtime.native_runner import NativeRunner
@@ -377,7 +380,7 @@ async def test_persistence_commands_reject_inconsistent_terminal_objects() -> No
     from agentforge.domain.enums import MessageRole
     from agentforge.domain.models import ModelInvocation, RunMessage
 
-    run = Run(uuid4(), uuid4(), "shape guard", status=RunStatus.RUNNING)
+    run = Run(uuid4(), uuid4(), "shape guard", status=RunStatus.CREATED)
     journal = ExecutionJournal()
     journal.seed(run, RunState(run.id))
     invocation = ModelInvocation(uuid4(), run.id, 1)
@@ -385,7 +388,7 @@ async def test_persistence_commands_reject_inconsistent_terminal_objects() -> No
     invocation.complete("FINAL")
     message = RunMessage(run.id, 0, MessageRole.ASSISTANT, "done", invocation.id)
 
-    with pytest.raises(ValueError, match="COMPLETED run"):
+    with pytest.raises(ValueError, match="RUNNING run"):
         await journal.record_model_final_decision(invocation, run, message, expected_generation=0)
 
 
@@ -425,3 +428,210 @@ async def test_non_json_read_result_durably_fails_run_instead_of_retry_loop() ->
     assert EventType.TOOL_FAILED in [event.type for event in journal.events]
     assert EventType.RUN_FAILED in [event.type for event in journal.events]
     assert all(message.role.value != "TOOL" for message in journal.messages)
+
+
+
+@pytest.mark.asyncio
+async def test_durable_model_budget_stops_before_extra_invocation() -> None:
+    version_id = uuid4()
+    registry = InMemoryToolRegistry(
+        [
+            FunctionTool(
+                version_id=version_id,
+                name="read_once",
+                description="read once",
+                input_schema={"type": "object"},
+                func=lambda: {"ok": True},
+            )
+        ]
+    )
+    model = ScriptedFakeModel(
+        [
+            ToolStep("read_once", {}),
+            FinalStep("must never be requested"),
+        ]
+    )
+    manager = RunManager(NativeRunner(model, registry), ToolCoordinator(registry))
+    av = AgentVersion(
+        uuid4(),
+        uuid4(),
+        1,
+        "budget",
+        (ToolBinding(version_id, "read_once"),),
+    )
+    run = Run(
+        uuid4(),
+        av.id,
+        "budget",
+        max_model_invocations=1,
+        max_tool_attempts=4,
+    )
+    run.queue()
+    state = RunState(run.id)
+    journal = ExecutionJournal()
+
+    with pytest.raises(RunExecutionFailedError, match="BUDGET_EXCEEDED"):
+        await manager.execute(
+            run=run,
+            run_state=state,
+            agent_version=av,
+            recorder=journal,
+        )
+
+    assert run.status is RunStatus.FAILED
+    assert state.model_invocations_used == 1
+    assert state.tool_attempts_used == 1
+    assert len(journal.model_invocations) == 1
+    assert len(model.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_exhausted_tool_budget_discards_model_result_before_tool_call() -> None:
+    version_id = uuid4()
+    registry = InMemoryToolRegistry(
+        [
+            FunctionTool(
+                version_id=version_id,
+                name="blocked_read",
+                description="blocked by durable budget",
+                input_schema={"type": "object"},
+                func=lambda: {"should": "not execute"},
+            )
+        ]
+    )
+    model = ScriptedFakeModel([ToolStep("blocked_read", {})])
+    manager = RunManager(NativeRunner(model, registry), ToolCoordinator(registry))
+    av = AgentVersion(
+        uuid4(),
+        uuid4(),
+        1,
+        "budget",
+        (ToolBinding(version_id, "blocked_read"),),
+    )
+    run = Run(
+        uuid4(),
+        av.id,
+        "tool budget",
+        max_model_invocations=4,
+        max_tool_attempts=1,
+    )
+    run.queue()
+    state = RunState(run.id, tool_attempts_used=1)
+    journal = ExecutionJournal()
+
+    with pytest.raises(RunExecutionFailedError, match="BUDGET_EXCEEDED"):
+        await manager.execute(
+            run=run,
+            run_state=state,
+            agent_version=av,
+            recorder=journal,
+        )
+
+    assert run.status is RunStatus.FAILED
+    assert state.model_invocations_used == 1
+    assert state.tool_attempts_used == 1
+    assert journal.proposals == []
+    assert journal.tool_calls == []
+    assert EventType.MODEL_RESULT_DISCARDED in [event.type for event in journal.events]
+
+
+@pytest.mark.asyncio
+async def test_model_result_after_deadline_is_discarded_for_progression() -> None:
+    run_holder: dict[str, Run] = {}
+
+    class DeadlineCrossingModel:
+        async def invoke(self, request):
+            run_holder["run"].deadline_at = utcnow() - timedelta(seconds=1)
+            return ScriptedFakeModel([FinalStep("too late")]).invoke(request)
+
+    registry = InMemoryToolRegistry([])
+    model = DeadlineCrossingModel()
+
+    class AwaitingDeadlineCrossingModel:
+        async def invoke(self, request):
+            response = await model.invoke(request)
+            return response
+
+    manager = RunManager(
+        NativeRunner(AwaitingDeadlineCrossingModel(), registry),
+        ToolCoordinator(registry),
+    )
+    av = AgentVersion(uuid4(), uuid4(), 1, "deadline")
+    run = Run(uuid4(), av.id, "deadline")
+    run_holder["run"] = run
+    run.queue()
+    journal = ExecutionJournal()
+
+    with pytest.raises(RunExecutionFailedError, match="DEADLINE_EXCEEDED"):
+        await manager.execute(
+            run=run,
+            run_state=RunState(run.id),
+            agent_version=av,
+            recorder=journal,
+        )
+
+    assert run.status is RunStatus.FAILED
+    assert all(message.role.value != "ASSISTANT" for message in journal.messages)
+    assert EventType.MODEL_RESULT_DISCARDED in [event.type for event in journal.events]
+
+
+@pytest.mark.asyncio
+async def test_cooperative_yield_requeues_and_resumes_without_failure() -> None:
+    version_id = uuid4()
+    registry = InMemoryToolRegistry(
+        [
+            FunctionTool(
+                version_id=version_id,
+                name="yielding_read",
+                description="yield after this read",
+                input_schema={"type": "object"},
+                func=lambda: {"ok": True},
+            )
+        ]
+    )
+    model = ScriptedFakeModel(
+        [
+            ToolStep("yielding_read", {}),
+            FinalStep("completed after yield"),
+        ]
+    )
+    manager = RunManager(
+        NativeRunner(model, registry),
+        ToolCoordinator(registry),
+        max_progression_steps_per_claim=1,
+    )
+    av = AgentVersion(
+        uuid4(),
+        uuid4(),
+        1,
+        "yield",
+        (ToolBinding(version_id, "yielding_read"),),
+    )
+    run = Run(uuid4(), av.id, "yield")
+    run.queue()
+    state = RunState(run.id)
+    journal = ExecutionJournal()
+
+    first = await manager.execute(
+        run=run,
+        run_state=state,
+        agent_version=av,
+        recorder=journal,
+    )
+
+    assert first is None
+    assert run.status is RunStatus.QUEUED
+    assert run.queue_reason is QueueReason.YIELD
+    assert EventType.RUN_YIELDED in [event.type for event in journal.events]
+
+    second = await manager.execute(
+        run=run,
+        run_state=state,
+        agent_version=av,
+        recorder=journal,
+    )
+
+    assert second == "completed after yield"
+    assert run.status is RunStatus.COMPLETED
+    assert state.model_invocations_used == 2
+    assert state.tool_attempts_used == 1
