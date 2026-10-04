@@ -1,1 +1,1 @@
-trigger Stage 3.2-D3 reconciliation rerun 4 Ruff-clean
+trigger Stage 3.2-D3 reconciliation rerun 5 canonical-green
