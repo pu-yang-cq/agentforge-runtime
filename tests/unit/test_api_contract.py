@@ -31,6 +31,14 @@ class FakeRuntimeStore:
     async def get_run(self, run_id):
         return self.runs.get(run_id)
 
+    async def cancel_run(self, run_id):
+        run = self.runs.get(run_id)
+        if run is None:
+            raise KeyError(run_id)
+        run.request_cancel()
+        run.cancel()
+        return run
+
     async def claim_next_run(self, *, worker_id: str, lease_seconds: int):
         raise NotImplementedError
 
@@ -73,3 +81,18 @@ def test_create_run_requires_idempotency_key() -> None:
         json={"agent_version_id": str(store.agent_version_id), "input": "hello"},
     )
     assert response.status_code == 422
+
+
+def test_cancel_run_api_contract() -> None:
+    store = FakeRuntimeStore()
+    client = TestClient(create_app(store))
+    created = client.post(
+        "/v1/runs",
+        json={"agent_version_id": str(store.agent_version_id), "input": "cancel me"},
+        headers={"Idempotency-Key": "run-cancel-0001"},
+    ).json()
+
+    response = client.post(f"/v1/runs/{created['id']}/cancel")
+    assert response.status_code == 200
+    assert response.json()["status"] == "CANCELLED"
+    assert response.json()["cancel_requested"] is True

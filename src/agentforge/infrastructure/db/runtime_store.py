@@ -396,6 +396,149 @@ class PostgresRuntimeStore(RuntimeStore):
             row = await session.get(RunRow, run_id)
             return None if row is None else run_from_row(row)
 
+    async def cancel_run(self, run_id: UUID) -> Run:
+        async with self._sessions() as session, session.begin():
+            row = (
+                await session.execute(select(RunRow).where(RunRow.id == run_id).with_for_update())
+            ).scalar_one_or_none()
+            if row is None:
+                raise KeyError(f"run not found: {run_id}")
+            if row.status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}:
+                return run_from_row(row)
+
+            row.cancel_requested = True
+            events: list[tuple[EventType, dict[str, object]]] = [
+                (EventType.RUN_CANCEL_REQUESTED, {})
+            ]
+
+            action = (
+                await session.execute(
+                    select(ExternalActionRow)
+                    .where(ExternalActionRow.run_id == run_id)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+
+            # Cancel before Action Commit is a local DB stabilization, never rollback.
+            if action is not None and action.status is ExternalActionStatus.READY:
+                call = (
+                    await session.execute(
+                        select(ToolCallRow)
+                        .where(
+                            ToolCallRow.id == action.tool_call_id,
+                            ToolCallRow.run_id == run_id,
+                        )
+                        .with_for_update()
+                    )
+                ).scalar_one()
+                started = await session.scalar(
+                    select(ToolExecutionAttemptRow.id)
+                    .where(
+                        ToolExecutionAttemptRow.external_action_id == action.id,
+                        ToolExecutionAttemptRow.status == ToolExecutionAttemptStatus.STARTED,
+                    )
+                    .limit(1)
+                )
+                if started is not None or action.current_attempt_id is not None:
+                    raise RuntimeError("READY ExternalAction unexpectedly has active attempt")
+                if call.status is not ToolCallStatus.READY:
+                    raise RuntimeError("READY ExternalAction does not project to READY ToolCall")
+                action.status = ExternalActionStatus.ABORTED
+                action.updated_at = func.clock_timestamp()
+                call.status = ToolCallStatus.NOT_EXECUTED
+                call.error = "CANCEL_REQUESTED: action aborted before Action Commit"
+                events.append(
+                    (
+                        EventType.ACTION_ABORTED,
+                        {
+                            "external_action_id": str(action.id),
+                            "operation_id": str(action.operation_id),
+                            "reason": "CANCEL_REQUESTED_BEFORE_ACTION_COMMIT",
+                        },
+                    )
+                )
+
+            # Stabilize any recovered/prepared non-side-effect READY call too.
+            ready_calls = (
+                (
+                    await session.execute(
+                        select(ToolCallRow)
+                        .where(
+                            ToolCallRow.run_id == run_id,
+                            ToolCallRow.status == ToolCallStatus.READY,
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for call in ready_calls:
+                call.status = ToolCallStatus.NOT_EXECUTED
+                call.error = "CANCEL_REQUESTED: READY business work discarded"
+
+            active_model = await session.scalar(
+                select(ModelInvocationRow.id)
+                .where(
+                    ModelInvocationRow.run_id == run_id,
+                    ModelInvocationRow.status == ModelInvocationStatus.STARTED.value,
+                )
+                .limit(1)
+            )
+            active_tool = await session.scalar(
+                select(ToolExecutionAttemptRow.id)
+                .where(
+                    ToolExecutionAttemptRow.run_id == run_id,
+                    ToolExecutionAttemptRow.status == ToolExecutionAttemptStatus.STARTED,
+                )
+                .limit(1)
+            )
+            active_reconciliation = await session.scalar(
+                select(ReconciliationAttemptRow.id)
+                .where(
+                    ReconciliationAttemptRow.run_id == run_id,
+                    ReconciliationAttemptRow.status == ReconciliationAttemptStatus.STARTED,
+                )
+                .limit(1)
+            )
+
+            stable_action = action is None or action.status in {
+                ExternalActionStatus.SUCCEEDED,
+                ExternalActionStatus.FAILED,
+                ExternalActionStatus.ABORTED,
+                ExternalActionStatus.MANUAL_REVIEW,
+            }
+            if (
+                active_model is None
+                and active_tool is None
+                and active_reconciliation is None
+                and stable_action
+            ):
+                row.status = RunStatus.CANCELLED
+                row.queue_reason = None
+                row.available_at = None
+                row.final_output = None
+                row.failure_reason = None
+                row.completed_at = func.clock_timestamp()
+                row.owner_worker_id = None
+                row.lease_expires_at = None
+                events.append((EventType.RUN_CANCELLED, {}))
+
+            seqs = list(await _allocate_event_sequences(session, run_id, len(events)))
+            for seq, (event_type, payload) in zip(seqs, events, strict=True):
+                session.add(
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run_id,
+                        sequence=seq,
+                        event_type=event_type.value,
+                        payload=payload,
+                    )
+                )
+            await session.flush()
+            await session.refresh(row)
+            return run_from_row(row)
+
     async def claim_next_run(self, *, worker_id: str, lease_seconds: int) -> Run | None:
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")

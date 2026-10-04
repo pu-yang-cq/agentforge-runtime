@@ -1294,6 +1294,32 @@ class ExecutionJournal(ExecutionRecorder):
         )
         self._append_event(run, EventType.RUN_FAILED, {"reason": run.failure_reason})
 
+    async def record_model_result_discarded_and_cancel_run(
+        self,
+        invocation: ModelInvocation,
+        run: Run,
+        reason: str,
+        *,
+        expected_generation: int,
+    ) -> None:
+        self._persist_completed_invocation(invocation)
+        run.cancel()
+        self._append_event(
+            run,
+            EventType.MODEL_RESULT_DISCARDED,
+            {"invocation_id": str(invocation.id), "reason": reason},
+        )
+        self._append_event(run, EventType.RUN_CANCELLED, {})
+
+    async def record_run_cancelled(
+        self,
+        run: Run,
+        *,
+        expected_generation: int,
+    ) -> None:
+        run.cancel()
+        self._append_event(run, EventType.RUN_CANCELLED, {})
+
     async def record_model_failed_and_fail_run(
         self,
         invocation: ModelInvocation,
@@ -1795,6 +1821,13 @@ class RunManager:
                     expected_generation=expected_generation,
                 )
             except BusinessProgressionBlockedError as exc:
+                if exc.code == "CANCEL_REQUESTED":
+                    run.request_cancel()
+                    await recorder.record_run_cancelled(
+                        run,
+                        expected_generation=expected_generation,
+                    )
+                    return None
                 run.fail(exc.failure_reason)
                 await recorder.record_run_failed(
                     run,
@@ -1828,6 +1861,15 @@ class RunManager:
                         expected_generation=expected_generation,
                     )
                 except BusinessProgressionBlockedError as exc:
+                    if exc.code == "CANCEL_REQUESTED":
+                        run.request_cancel()
+                        await recorder.record_model_result_discarded_and_cancel_run(
+                            invocation,
+                            run,
+                            exc.failure_reason,
+                            expected_generation=expected_generation,
+                        )
+                        return None
                     run.fail(exc.failure_reason)
                     await recorder.record_model_result_discarded_and_fail_run(
                         invocation,
@@ -1881,6 +1923,15 @@ class RunManager:
                         expected_generation=expected_generation,
                     )
                 except BusinessProgressionBlockedError as exc:
+                    if exc.code == "CANCEL_REQUESTED":
+                        run.request_cancel()
+                        await recorder.record_model_result_discarded_and_cancel_run(
+                            invocation,
+                            run,
+                            exc.failure_reason,
+                            expected_generation=expected_generation,
+                        )
+                        return None
                     run.fail(exc.failure_reason)
                     await recorder.record_model_result_discarded_and_fail_run(
                         invocation,
@@ -1910,6 +1961,15 @@ class RunManager:
                     expected_generation=expected_generation,
                 )
             except BusinessProgressionBlockedError as exc:
+                if exc.code == "CANCEL_REQUESTED":
+                    run.request_cancel()
+                    await recorder.record_model_result_discarded_and_cancel_run(
+                        invocation,
+                        run,
+                        exc.failure_reason,
+                        expected_generation=expected_generation,
+                    )
+                    return None
                 run.fail(exc.failure_reason)
                 await recorder.record_model_result_discarded_and_fail_run(
                     invocation,

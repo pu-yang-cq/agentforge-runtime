@@ -287,6 +287,22 @@ class ExecutionRecorder(Protocol):
         expected_generation: int,
     ) -> None: ...
 
+    async def record_model_result_discarded_and_cancel_run(
+        self,
+        invocation: ModelInvocation,
+        run: Run,
+        reason: str,
+        *,
+        expected_generation: int,
+    ) -> None: ...
+
+    async def record_run_cancelled(
+        self,
+        run: Run,
+        *,
+        expected_generation: int,
+    ) -> None: ...
+
     async def record_model_failed_and_fail_run(
         self,
         invocation: ModelInvocation,
@@ -348,6 +364,8 @@ class RuntimeStore(Protocol):
     ) -> Run: ...
 
     async def get_run(self, run_id: UUID) -> Run | None: ...
+
+    async def cancel_run(self, run_id: UUID) -> Run: ...
 
     async def claim_next_run(self, *, worker_id: str, lease_seconds: int) -> Run | None: ...
 

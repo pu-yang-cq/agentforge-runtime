@@ -143,6 +143,7 @@ class Run:
     queue_reason: QueueReason | None = None
     final_output: str | None = None
     failure_reason: str | None = None
+    cancel_requested: bool = False
     execution_generation: int = 0
     owner_worker_id: str | None = None
     lease_expires_at: datetime | None = None
@@ -199,6 +200,24 @@ class Run:
         self.available_at = None
         self.owner_worker_id = None
         self.lease_expires_at = None
+
+    def request_cancel(self) -> None:
+        if self.status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}:
+            return
+        self.cancel_requested = True
+
+    def cancel(self) -> None:
+        if self.status in {RunStatus.COMPLETED, RunStatus.FAILED}:
+            raise ValueError(f"cannot cancel terminal run from {self.status}")
+        self.cancel_requested = True
+        self.status = RunStatus.CANCELLED
+        self.queue_reason = None
+        self.available_at = None
+        self.final_output = None
+        self.failure_reason = None
+        self.owner_worker_id = None
+        self.lease_expires_at = None
+        self.completed_at = utcnow()
 
 
 @dataclass(slots=True)

@@ -117,6 +117,14 @@ async def _assert_deadline_not_expired(session: AsyncSession, run: RunRow) -> No
         )
 
 
+def _assert_business_progression_allowed(run: RunRow) -> None:
+    if run.cancel_requested:
+        raise BusinessProgressionBlockedError(
+            "CANCEL_REQUESTED",
+            "run cancellation owns business progression",
+        )
+
+
 def _assert_model_budget(run: RunRow, state: RunStateRow) -> None:
     if state.model_invocations_used >= run.max_model_invocations:
         raise BusinessProgressionBlockedError(
@@ -494,11 +502,17 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                 raise RuntimeError("cannot enter manual review with STARTED reconciliation")
             action_row.status = ExternalActionStatus.MANUAL_REVIEW
             action_row.updated_at = func.clock_timestamp()
-            run_row.status = RunStatus.WAITING_ACTION_RESOLUTION
+            run_row.status = (
+                RunStatus.CANCELLED
+                if run_row.cancel_requested
+                else RunStatus.WAITING_ACTION_RESOLUTION
+            )
             run_row.queue_reason = None
             run_row.available_at = None
             run_row.owner_worker_id = None
             run_row.lease_expires_at = None
+            if run_row.status is RunStatus.CANCELLED:
+                run_row.completed_at = func.clock_timestamp()
             seq = next(iter(await _allocate_event_sequences(session, run.id, 1)))
             session.add(
                 DomainEventRow(
@@ -515,7 +529,10 @@ class PostgresExecutionRecorder(ExecutionRecorder):
             )
             await session.flush()
         action.manual_review()
-        run.wait_for_action_resolution()
+        if run.cancel_requested:
+            run.cancel()
+        else:
+            run.wait_for_action_resolution()
 
     async def record_reconciliation_started(
         self,
@@ -1077,11 +1094,17 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                 )
                 action_row.status = ExternalActionStatus.MANUAL_REVIEW
                 action_row.updated_at = db_now
-                run_row.status = RunStatus.WAITING_ACTION_RESOLUTION
+                run_row.status = (
+                    RunStatus.CANCELLED
+                    if run_row.cancel_requested
+                    else RunStatus.WAITING_ACTION_RESOLUTION
+                )
                 run_row.queue_reason = None
                 run_row.available_at = None
                 run_row.owner_worker_id = None
                 run_row.lease_expires_at = None
+                if run_row.status is RunStatus.CANCELLED:
+                    run_row.completed_at = db_now
                 session.add(
                     DomainEventRow(
                         id=uuid4(),
@@ -1157,7 +1180,10 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                 run.lease_expires_at = None
         else:
             action.manual_review()
-            run.wait_for_action_resolution()
+            if run.cancel_requested:
+                run.cancel()
+            else:
+                run.wait_for_action_resolution()
         return returned_message
 
     async def record_side_effect_attempt_started(
@@ -1184,6 +1210,7 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                 run_id=call.run_id,
                 expected_generation=expected_generation,
             )
+            _assert_business_progression_allowed(run_row)
             action_row = (
                 await session.execute(
                     select(ExternalActionRow)
@@ -2000,6 +2027,7 @@ class PostgresExecutionRecorder(ExecutionRecorder):
             run_row = await _lock_owned_run(
                 session, run_id=call.run_id, expected_generation=expected_generation
             )
+            _assert_business_progression_allowed(run_row)
             state = await _lock_run_state(session, call.run_id)
             await _assert_deadline_not_expired(session, run_row)
             _assert_tool_budget(run_row, state)
@@ -2123,6 +2151,7 @@ class PostgresExecutionRecorder(ExecutionRecorder):
             run_row = await _lock_owned_run(
                 session, run_id=run_id, expected_generation=expected_generation
             )
+            _assert_business_progression_allowed(run_row)
             await _assert_no_active_tool_calls(session, run_id)
             await _assert_no_unresolved_actions(session, run_id)
             await _assert_no_started_tool_attempts(session, run_id)
@@ -2184,6 +2213,7 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                 run_id=invocation.run_id,
                 expected_generation=expected_generation,
             )
+            _assert_business_progression_allowed(run_row)
             await _assert_no_active_tool_calls(session, call.run_id)
             state = await _lock_run_state(session, call.run_id)
             await _assert_deadline_not_expired(session, run_row)
@@ -2318,6 +2348,7 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                 run_id=call.run_id,
                 expected_generation=expected_generation,
             )
+            _assert_business_progression_allowed(run_row)
             await _assert_no_active_tool_calls(session, call.run_id)
             await _assert_no_started_tool_attempts(session, call.run_id)
             state = await _lock_run_state(session, call.run_id)
@@ -2463,6 +2494,7 @@ class PostgresExecutionRecorder(ExecutionRecorder):
             row = await _lock_owned_run(
                 session, run_id=run.id, expected_generation=expected_generation
             )
+            _assert_business_progression_allowed(row)
             await _assert_no_active_tool_calls(session, run.id)
             await _assert_deadline_not_expired(session, row)
             result = await session.execute(
@@ -2571,6 +2603,7 @@ class PostgresExecutionRecorder(ExecutionRecorder):
             row = await _lock_owned_run(
                 session, run_id=run.id, expected_generation=expected_generation
             )
+            _assert_business_progression_allowed(row)
             await _assert_no_active_tool_calls(session, run.id)
             await _assert_deadline_not_expired(session, row)
             result = await session.execute(
@@ -2701,6 +2734,144 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                     ),
                 ]
             )
+
+    async def record_model_result_discarded_and_cancel_run(
+        self,
+        invocation: ModelInvocation,
+        run: Run,
+        reason: str,
+        *,
+        expected_generation: int,
+    ) -> None:
+        self._assert_generation(expected_generation)
+        async with self._sessions() as session, session.begin():
+            row = await _lock_owned_run(
+                session,
+                run_id=run.id,
+                expected_generation=expected_generation,
+            )
+            if not row.cancel_requested:
+                raise RuntimeError("cancel-discard requires durable cancel_requested")
+            result = await session.execute(
+                update(ModelInvocationRow)
+                .where(
+                    ModelInvocationRow.id == invocation.id,
+                    ModelInvocationRow.run_id == run.id,
+                    ModelInvocationRow.status == ModelInvocationStatus.STARTED.value,
+                )
+                .values(
+                    status=invocation.status.value,
+                    outcome_type=invocation.outcome_type,
+                    completed_at=func.clock_timestamp(),
+                )
+            )
+            if cast(CursorResult[Any], result).rowcount != 1:
+                raise RuntimeError("model invocation no longer STARTED")
+            row.status = RunStatus.CANCELLED
+            row.queue_reason = None
+            row.available_at = None
+            row.final_output = None
+            row.failure_reason = None
+            row.completed_at = func.clock_timestamp()
+            row.owner_worker_id = None
+            row.lease_expires_at = None
+            seqs = list(await _allocate_event_sequences(session, run.id, 3))
+            session.add_all(
+                [
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[0],
+                        event_type=EventType.MODEL_COMPLETED.value,
+                        payload={
+                            "turn": invocation.turn,
+                            "outcome_type": invocation.outcome_type,
+                        },
+                    ),
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[1],
+                        event_type=EventType.MODEL_RESULT_DISCARDED.value,
+                        payload={
+                            "invocation_id": str(invocation.id),
+                            "reason": reason,
+                        },
+                    ),
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[2],
+                        event_type=EventType.RUN_CANCELLED.value,
+                        payload={},
+                    ),
+                ]
+            )
+        run.cancel()
+
+    async def record_run_cancelled(
+        self,
+        run: Run,
+        *,
+        expected_generation: int,
+    ) -> None:
+        self._assert_generation(expected_generation)
+        async with self._sessions() as session, session.begin():
+            row = await _lock_owned_run(
+                session,
+                run_id=run.id,
+                expected_generation=expected_generation,
+            )
+            if not row.cancel_requested:
+                raise RuntimeError("run cancellation finalization requires cancel_requested")
+            unresolved = await session.scalar(
+                select(ExternalActionRow.id)
+                .where(
+                    ExternalActionRow.run_id == run.id,
+                    ExternalActionRow.status.in_(
+                        [
+                            ExternalActionStatus.READY,
+                            ExternalActionStatus.EXECUTING,
+                            ExternalActionStatus.UNKNOWN,
+                            ExternalActionStatus.RECONCILING,
+                        ]
+                    ),
+                )
+                .limit(1)
+            )
+            if unresolved is not None:
+                raise RuntimeError("cannot terminalize cancellation with unresolved active action")
+            await _assert_no_started_tool_attempts(session, run.id)
+            await _assert_no_started_model_invocations(session, run.id)
+            started_reconciliation = await session.scalar(
+                select(ReconciliationAttemptRow.id)
+                .where(
+                    ReconciliationAttemptRow.run_id == run.id,
+                    ReconciliationAttemptRow.status == ReconciliationAttemptStatus.STARTED,
+                )
+                .limit(1)
+            )
+            if started_reconciliation is not None:
+                raise RuntimeError("cannot terminalize cancellation with STARTED reconciliation")
+            row.status = RunStatus.CANCELLED
+            row.queue_reason = None
+            row.available_at = None
+            row.final_output = None
+            row.failure_reason = None
+            row.completed_at = func.clock_timestamp()
+            row.owner_worker_id = None
+            row.lease_expires_at = None
+            seq = next(iter(await _allocate_event_sequences(session, run.id, 1)))
+            session.add(
+                DomainEventRow(
+                    id=uuid4(),
+                    run_id=run.id,
+                    sequence=seq,
+                    event_type=EventType.RUN_CANCELLED.value,
+                    payload={},
+                )
+            )
+        run.cancel()
 
     async def record_model_failed_and_fail_run(
         self,

@@ -24,6 +24,7 @@ def run_from_row(row: RunRow) -> Run:
         queue_reason=row.queue_reason,
         final_output=row.final_output,
         failure_reason=row.failure_reason,
+        cancel_requested=row.cancel_requested,
         execution_generation=row.execution_generation,
         owner_worker_id=row.owner_worker_id,
         lease_expires_at=row.lease_expires_at,

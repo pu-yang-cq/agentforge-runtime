@@ -18,6 +18,7 @@ def _run_view(run: Run) -> RunView:
         status=run.status,
         final_output=run.final_output,
         failure_reason=run.failure_reason,
+        cancel_requested=run.cancel_requested,
         created_at=run.created_at,
         started_at=run.started_at,
         completed_at=run.completed_at,
@@ -49,6 +50,14 @@ def create_app(store: RuntimeStore) -> FastAPI:
             raise HTTPException(status_code=404, detail="agent version not found") from exc
         except IdempotencyConflictError as exc:
             raise HTTPException(status_code=409, detail="idempotency conflict") from exc
+        return _run_view(run)
+
+    @app.post("/v1/runs/{run_id}/cancel", response_model=RunView)
+    async def cancel_run(run_id: UUID) -> RunView:
+        try:
+            run = await store.cancel_run(run_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="run not found") from exc
         return _run_view(run)
 
     @app.get("/v1/runs/{run_id}", response_model=RunView)

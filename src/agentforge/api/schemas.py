@@ -17,6 +17,7 @@ class RunView(BaseModel):
     status: RunStatus
     final_output: str | None = None
     failure_reason: str | None = None
+    cancel_requested: bool = False
     created_at: datetime
     started_at: datetime | None = None
     completed_at: datetime | None = None

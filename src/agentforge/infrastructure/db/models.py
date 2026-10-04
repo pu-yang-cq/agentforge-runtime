@@ -225,7 +225,8 @@ class RunRow(Base):
             name="ck_runs_failed_shape",
         ),
         CheckConstraint(
-            "status NOT IN ('CREATED', 'QUEUED', 'RUNNING') OR completed_at IS NULL",
+            "status NOT IN ('CREATED', 'QUEUED', 'RUNNING', 'WAITING_ACTION_RESOLUTION') "
+            "OR completed_at IS NULL",
             name="ck_runs_nonterminal_has_no_completed_at",
         ),
         CheckConstraint(
@@ -252,6 +253,9 @@ class RunRow(Base):
     available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     final_output: Mapped[str | None] = mapped_column(Text)
     failure_reason: Mapped[str | None] = mapped_column(Text)
+    cancel_requested: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     execution_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     owner_worker_id: Mapped[str | None] = mapped_column(String(200))
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

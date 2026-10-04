@@ -3633,3 +3633,188 @@ async def test_orphaned_reconciliation_attempt_closes_failed_and_preserves_truth
     assert durable_action.status is ExternalActionStatus.RECONCILING
     assert durable_action.current_attempt_id is None
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cancel_queued_run_terminalizes_without_business_work() -> None:
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+    store = PostgresRuntimeStore(sessions)
+
+    created = await store.create_run(
+        agent_version_id=DEMO_AGENT_VERSION_ID,
+        input_text="cancel before claim",
+        idempotency_key="integration-e1-cancel-queued",
+        principal_scope="test-user",
+    )
+    cancelled = await store.cancel_run(created.id)
+    assert cancelled.status is RunStatus.CANCELLED
+    assert cancelled.cancel_requested is True
+    assert cancelled.completed_at is not None
+    assert await store.claim_next_run(worker_id="must-not-claim", lease_seconds=30) is None
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cancel_ready_side_effect_aborts_before_action_commit() -> None:
+    from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode
+    from agentforge.infrastructure.db.models import ExternalActionRow
+
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+
+    side_tool_id = uuid4()
+    side_version_id = uuid4()
+    async with sessions() as session, session.begin():
+        session.add(
+            ToolDefinitionRow(id=side_tool_id, name="cancel_ready_write", description="write")
+        )
+        await session.flush()
+        session.add(
+            ToolVersionRow(
+                id=side_version_id,
+                tool_id=side_tool_id,
+                version_number=1,
+                input_schema={"type": "object"},
+                effect_type=ToolEffectType.WRITE,
+                implementation_ref="tests:cancel_ready_write",
+                allow_no_approval_execution=True,
+                reconciliation_mode=ReconciliationMode.NONE,
+            )
+        )
+        await session.flush()
+        session.add(
+            AgentVersionToolRow(
+                agent_version_id=DEMO_AGENT_VERSION_ID,
+                tool_version_id=side_version_id,
+                tool_alias="cancel_ready_write",
+            )
+        )
+
+    registry = InMemoryToolRegistry(
+        [
+            FunctionTool(
+                version_id=DEMO_TOOL_VERSION_ID,
+                name="echo_read",
+                description="read",
+                input_schema={"type": "object"},
+                func=lambda text: {"echo": text},
+            ),
+            SideEffectFunctionTool(
+                version_id=side_version_id,
+                name="cancel_ready_write",
+                description="write",
+                input_schema={"type": "object"},
+                func=lambda invocation: {"must": "not execute"},
+            ),
+        ]
+    )
+    store = PostgresRuntimeStore(sessions)
+    created = await store.create_run(
+        agent_version_id=DEMO_AGENT_VERSION_ID,
+        input_text="cancel ready action",
+        idempotency_key="integration-e1-cancel-ready",
+        principal_scope="test-user",
+    )
+    claimed = await store.claim_next_run(worker_id="e1-ready", lease_seconds=30)
+    assert claimed is not None
+    recorder = PostgresExecutionRecorder(
+        sessions,
+        run_id=created.id,
+        generation=claimed.execution_generation,
+    )
+    _, invocation = await recorder.begin_model_invocation(
+        run_id=created.id,
+        invocation_id=uuid4(),
+        expected_generation=claimed.execution_generation,
+    )
+    invocation.complete("TOOL_PROPOSAL")
+    proposal = ToolProposal.create(
+        run_id=created.id,
+        model_invocation_id=invocation.id,
+        tool_name="cancel_ready_write",
+        arguments={"v": 1},
+    )
+    prepared = ToolCoordinator(registry).prepare_side_effect(
+        proposal=proposal,
+        agent_version=await store.load_agent_version(DEMO_AGENT_VERSION_ID),
+    )
+    await recorder.record_model_side_effect_prepared(
+        invocation,
+        proposal,
+        prepared.call,
+        prepared.snapshot,
+        prepared.action,
+        expected_generation=claimed.execution_generation,
+    )
+
+    cancelled = await store.cancel_run(created.id)
+    assert cancelled.status is RunStatus.CANCELLED
+    assert cancelled.cancel_requested is True
+
+    async with sessions() as session:
+        action = (
+            await session.execute(
+                select(ExternalActionRow).where(ExternalActionRow.run_id == created.id)
+            )
+        ).scalar_one()
+        call = await session.get(ToolCallRow, action.tool_call_id)
+        started_attempts = await session.scalar(
+            select(func.count())
+            .select_from(ToolExecutionAttemptRow)
+            .where(
+                ToolExecutionAttemptRow.external_action_id == action.id,
+                ToolExecutionAttemptRow.status == ToolExecutionAttemptStatus.STARTED,
+            )
+        )
+    assert action.status is ExternalActionStatus.ABORTED
+    assert action.current_attempt_id is None
+    assert call is not None and call.status is ToolCallStatus.NOT_EXECUTED
+    assert started_attempts == 0
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cancel_requested_fences_new_model_business_progression() -> None:
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+    store = PostgresRuntimeStore(sessions)
+
+    created = await store.create_run(
+        agent_version_id=DEMO_AGENT_VERSION_ID,
+        input_text="cancel fence",
+        idempotency_key="integration-e1-cancel-fence",
+        principal_scope="test-user",
+    )
+    claimed = await store.claim_next_run(worker_id="e1-fence", lease_seconds=30)
+    assert claimed is not None
+
+    # Keep an invocation STARTED so cancel_requested is durable but cannot yet
+    # terminalize. A second business progression start must fail closed.
+    recorder = PostgresExecutionRecorder(
+        sessions,
+        run_id=created.id,
+        generation=claimed.execution_generation,
+    )
+    await recorder.begin_model_invocation(
+        run_id=created.id,
+        invocation_id=uuid4(),
+        expected_generation=claimed.execution_generation,
+    )
+    requested = await store.cancel_run(created.id)
+    assert requested.status is RunStatus.RUNNING
+    assert requested.cancel_requested is True
+
+    with pytest.raises(BusinessProgressionBlockedError, match="CANCEL_REQUESTED"):
+        await recorder.begin_model_invocation(
+            run_id=created.id,
+            invocation_id=uuid4(),
+            expected_generation=claimed.execution_generation,
+        )
+    await engine.dispose()
