@@ -84,6 +84,112 @@ jobs:
               "        assert len(revision) <= 32, (migration.name, revision, len(revision))\n"
           )
 
+          integration = root / "tests/integration/test_postgres_runtime.py"
+          integration_text = integration.read_text()
+          old_seed = """async def seed_demo(session_factory) -> None:
+    async with session_factory() as session, session.begin():
+        session.add_all(
+            [
+                AgentRow(
+                    id=DEMO_AGENT_ID,
+                    name="wave1-demo-agent",
+                    description="test agent",
+                ),
+                ToolDefinitionRow(
+                    id=DEMO_TOOL_ID,
+                    name="echo_read",
+                    description="read tool",
+                ),
+                ToolVersionRow(
+                    id=DEMO_TOOL_VERSION_ID,
+                    tool_id=DEMO_TOOL_ID,
+                    version_number=1,
+                    input_schema={"type": "object"},
+                    effect_type=ToolEffectType.READ,
+                    implementation_ref="agentforge.demo:echo_read",
+                ),
+                AgentVersionRow(
+                    id=DEMO_AGENT_VERSION_ID,
+                    agent_id=DEMO_AGENT_ID,
+                    version_number=1,
+                    instructions="Call echo_read once, then finish.",
+                ),
+                AgentVersionToolRow(
+                    agent_version_id=DEMO_AGENT_VERSION_ID,
+                    tool_version_id=DEMO_TOOL_VERSION_ID,
+                    tool_alias="echo_read",
+                ),
+            ]
+        )
+"""
+          new_seed = """async def seed_demo(session_factory) -> None:
+    async with session_factory() as session, session.begin():
+        session.add_all(
+            [
+                AgentRow(
+                    id=DEMO_AGENT_ID,
+                    name="wave1-demo-agent",
+                    description="test agent",
+                ),
+                ToolDefinitionRow(
+                    id=DEMO_TOOL_ID,
+                    name="echo_read",
+                    description="read tool",
+                ),
+            ]
+        )
+        await session.flush()
+
+        session.add_all(
+            [
+                ToolVersionRow(
+                    id=DEMO_TOOL_VERSION_ID,
+                    tool_id=DEMO_TOOL_ID,
+                    version_number=1,
+                    input_schema={"type": "object"},
+                    effect_type=ToolEffectType.READ,
+                    implementation_ref="agentforge.demo:echo_read",
+                ),
+                AgentVersionRow(
+                    id=DEMO_AGENT_VERSION_ID,
+                    agent_id=DEMO_AGENT_ID,
+                    version_number=1,
+                    instructions="Call echo_read once, then finish.",
+                ),
+            ]
+        )
+        await session.flush()
+
+        session.add(
+            AgentVersionToolRow(
+                agent_version_id=DEMO_AGENT_VERSION_ID,
+                tool_version_id=DEMO_TOOL_VERSION_ID,
+                tool_alias="echo_read",
+            )
+        )
+"""
+          if integration_text.count(old_seed) != 1:
+              raise SystemExit("seed_demo fixture shape changed; refusing blind replacement")
+          integration.write_text(integration_text.replace(old_seed, new_seed))
+
+          migration_contract = root / "tests/unit/test_migration_contract.py"
+          contract_text = migration_contract.read_text()
+          contract_replacements = [
+              ("0004_ACTIVE_PROGRESSION_INVARIANTS", "0004_ACTIVE_PROGRESSION"),
+              (
+                  'down_revision: str | None = "0004_active_progression_invariants"',
+                  'down_revision: str | None = "0004_active_progression"',
+              ),
+          ]
+          for old_contract, new_contract in contract_replacements:
+              count = contract_text.count(old_contract)
+              if count != 1:
+                  raise SystemExit(
+                      f"migration contract expected one {old_contract!r}, found {count}"
+                  )
+              contract_text = contract_text.replace(old_contract, new_contract)
+          migration_contract.write_text(contract_text)
+
           readme = root / "README.md"
           readme.write_text(readme.read_text().replace("V1.0-RC3", "V1.0-RC4"))
 
@@ -102,8 +208,13 @@ jobs:
               "- rename only the revision identifier to 0004_active_progression;\n"
               "- update migration 0005 down_revision accordingly;\n"
               "- add a regression test requiring every Alembic revision id to fit "
-              "the default 32-character version column.\n\n"
-              "No migration operation, table/index/check definition, runtime state "
+              "the default 32-character version column;\n"
+              "- make the integration seed fixture flush parent config rows before "
+              "the association row so PostgreSQL FK ordering is explicit;\n"
+              "- update migration-contract expectations to the shortened revision id.\n\n"
+              "The fixture/contract changes are test-only corrections revealed after "
+              "the online migration began passing. No migration operation, "
+              "table/index/check definition, runtime state "
               "transition, SQL predicate, transaction boundary, lease/fencing rule, "
               "recovery rule, tool/model semantic, or dependency was changed.\n\n"
               "Stage 3.1 remains NOT ACCEPTED until the immutable RC4 payload passes "
@@ -170,7 +281,7 @@ jobs:
             echo
             echo "$digest  agentforge-stage3.1-v1.0-rc4-clean.tar.gz"
             echo
-            echo "Derived from RC3 only by the PostgreSQL-confirmed Alembic revision-width repair."
+            echo "Derived from RC3 by the PostgreSQL-confirmed revision-width repair and test-harness corrections revealed by the same target gate."
             echo "No dependency change; reviewed uv.lock remains unchanged."
           } > rc/RC4_SOURCE_SHA256
           git config user.name "agentforge-stage31-bot"
