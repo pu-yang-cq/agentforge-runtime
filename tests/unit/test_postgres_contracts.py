@@ -59,6 +59,8 @@ def test_core_schema_contains_versioned_tool_bindings_and_durable_facts() -> Non
         "tool_proposals",
         "tool_calls",
         "tool_execution_attempts",
+        "action_snapshots",
+        "external_actions",
         "domain_events",
     }
     assert expected.issubset(Base.metadata.tables)
@@ -154,6 +156,55 @@ def test_tool_execution_attempt_schema_enforces_physical_attempt_invariants() ->
         constraint.name for constraint in table.constraints if constraint.name is not None
     }
     assert "uq_tool_execution_attempts_call_number" in unique_names
+
+
+def test_external_action_schema_enforces_intent_invariants() -> None:
+    snapshots = Base.metadata.tables["action_snapshots"]
+    assert {
+        "format_version",
+        "operation_id",
+        "tool_version_id",
+        "effect_type",
+        "credential_ref",
+        "arguments",
+        "canonical_json",
+        "digest",
+    }.issubset(snapshots.c.keys())
+
+    actions = Base.metadata.tables["external_actions"]
+    assert {
+        "run_id",
+        "tool_call_id",
+        "action_snapshot_id",
+        "operation_id",
+        "status",
+        "current_attempt_id",
+    }.issubset(actions.c.keys())
+
+    indexes = {index.name: index for index in actions.indexes}
+    active = indexes["uq_external_actions_one_nonterminal_per_run"]
+    assert active.unique is True
+    assert [column.name for column in active.columns] == ["run_id"]
+    where = str(active.dialect_options["postgresql"]["where"]).upper()
+    assert "READY" in where
+    assert "EXECUTING" in where
+    assert "UNKNOWN" in where
+    assert "RECONCILING" in where
+    assert "MANUAL_REVIEW" in where
+
+    action_uniques = {
+        constraint.name for constraint in actions.constraints if constraint.name is not None
+    }
+    assert {
+        "uq_external_actions_operation_id",
+        "uq_external_actions_tool_call_id",
+        "uq_external_actions_snapshot_id",
+        "ck_external_actions_current_attempt_shape",
+    }.issubset(action_uniques)
+
+    attempts = Base.metadata.tables["tool_execution_attempts"]
+    assert len(attempts.c.external_action_id.foreign_keys) == 1
+    assert len(actions.c.current_attempt_id.foreign_keys) == 1
 
 
 def test_run_schema_enforces_terminal_row_shape() -> None:

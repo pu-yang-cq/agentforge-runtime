@@ -21,6 +21,7 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from agentforge.domain.enums import (
+    ExternalActionStatus,
     QueueReason,
     RunStatus,
     ToolCallStatus,
@@ -306,6 +307,80 @@ class ToolCallRow(Base):
     error: Mapped[str | None] = mapped_column(Text)
 
 
+class ActionSnapshotRow(Base):
+    __tablename__ = "action_snapshots"
+    __table_args__ = (
+        CheckConstraint("format_version = 1", name="ck_action_snapshots_format_v1"),
+        UniqueConstraint("operation_id", name="uq_action_snapshots_operation_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    format_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    operation_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    tool_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("tool_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    effect_type: Mapped[ToolEffectType] = mapped_column(
+        Enum(ToolEffectType, name="tool_effect_type", create_type=False), nullable=False
+    )
+    credential_ref: Mapped[str | None] = mapped_column(String(300))
+    arguments: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    canonical_json: Mapped[str] = mapped_column(Text, nullable=False)
+    digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+
+
+class ExternalActionRow(Base):
+    __tablename__ = "external_actions"
+    __table_args__ = (
+        UniqueConstraint("operation_id", name="uq_external_actions_operation_id"),
+        UniqueConstraint("tool_call_id", name="uq_external_actions_tool_call_id"),
+        UniqueConstraint("action_snapshot_id", name="uq_external_actions_snapshot_id"),
+        CheckConstraint(
+            "(status = 'EXECUTING' AND current_attempt_id IS NOT NULL) OR "
+            "(status <> 'EXECUTING' AND current_attempt_id IS NULL)",
+            name="ck_external_actions_current_attempt_shape",
+        ),
+        Index(
+            "uq_external_actions_one_nonterminal_per_run",
+            "run_id",
+            unique=True,
+            postgresql_where=text(
+                "status IN ('READY', 'EXECUTING', 'UNKNOWN', 'RECONCILING', 'MANUAL_REVIEW')"
+            ),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    run_id: Mapped[UUID] = mapped_column(ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False)
+    tool_call_id: Mapped[UUID] = mapped_column(
+        ForeignKey("tool_calls.id", ondelete="RESTRICT"), nullable=False
+    )
+    action_snapshot_id: Mapped[UUID] = mapped_column(
+        ForeignKey("action_snapshots.id", ondelete="RESTRICT"), nullable=False
+    )
+    operation_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    status: Mapped[ExternalActionStatus] = mapped_column(
+        Enum(ExternalActionStatus, name="external_action_status"), nullable=False
+    )
+    current_attempt_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            "tool_execution_attempts.id",
+            ondelete="RESTRICT",
+            use_alter=True,
+            name="fk_external_actions_current_attempt",
+        )
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+
+
 class ToolExecutionAttemptRow(Base):
     __tablename__ = "tool_execution_attempts"
     __table_args__ = (
@@ -328,7 +403,14 @@ class ToolExecutionAttemptRow(Base):
     tool_call_id: Mapped[UUID] = mapped_column(
         ForeignKey("tool_calls.id", ondelete="RESTRICT"), nullable=False
     )
-    external_action_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    external_action_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            "external_actions.id",
+            ondelete="RESTRICT",
+            use_alter=True,
+            name="fk_tool_execution_attempts_external_action",
+        )
+    )
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
     execution_generation: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[ToolExecutionAttemptStatus] = mapped_column(

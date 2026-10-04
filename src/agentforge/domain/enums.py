@@ -22,6 +22,20 @@ class QueueReason(StrEnum):
 
 class ToolEffectType(StrEnum):
     READ = "READ"
+    WRITE = "WRITE"
+    EXTERNAL_SIDE_EFFECT = "EXTERNAL_SIDE_EFFECT"
+    DESTRUCTIVE = "DESTRUCTIVE"
+
+
+class ExternalActionStatus(StrEnum):
+    READY = "READY"
+    EXECUTING = "EXECUTING"
+    UNKNOWN = "UNKNOWN"
+    RECONCILING = "RECONCILING"
+    MANUAL_REVIEW = "MANUAL_REVIEW"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    ABORTED = "ABORTED"
 
 
 class ToolCallStatus(StrEnum):

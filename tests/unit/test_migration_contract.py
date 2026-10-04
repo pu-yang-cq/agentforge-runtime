@@ -49,6 +49,11 @@ def test_alembic_offline_upgrade_compiles_core_schema_and_model_lifecycle() -> N
     assert "0008_READ_RETRY_POLICY" in ddl
     assert "READ_RETRY_MAX_ATTEMPTS" in ddl
     assert "CK_TOOL_VERSIONS_POSITIVE_READ_RETRY_ATTEMPTS" in ddl
+    assert "0009_EXTERNAL_ACTION_INTENT" in ddl
+    assert "CREATE TABLE ACTION_SNAPSHOTS" in ddl
+    assert "CREATE TABLE EXTERNAL_ACTIONS" in ddl
+    assert "UQ_EXTERNAL_ACTIONS_ONE_NONTERMINAL_PER_RUN" in ddl
+    assert "FK_TOOL_EXECUTION_ATTEMPTS_EXTERNAL_ACTION" in ddl
 
 
 def test_run_terminal_shape_migration_is_present() -> None:
