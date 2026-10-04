@@ -30,3 +30,7 @@ jobs:
           grep -n -A35 -B10 -E 'class (ToolDefinitionRow|ToolVersionRow|AgentVersionRow|AgentVersionToolRow)' /tmp/agentforge-diagnostic/src/agentforge/infrastructure/db/models.py
           echo '===== migration contract ====='
           nl -ba /tmp/agentforge-diagnostic/tests/unit/test_migration_contract.py | sed -n '1,110p'
+          echo '===== runtime_store create_run ====='
+          grep -n -A190 -B20 -E 'async def create_run|def _append_event|async def _append_event|RunRow\(' /tmp/agentforge-diagnostic/src/agentforge/infrastructure/db/runtime_store.py | head -n 420
+          echo '===== Run/Counter/Event ORM rows ====='
+          grep -n -A120 -B10 -E 'class (RunRow|RunStateRow|RunCounterRow|DomainEventRow)' /tmp/agentforge-diagnostic/src/agentforge/infrastructure/db/models.py | head -n 420
