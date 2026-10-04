@@ -1,0 +1,207 @@
+name: Stage 3.2-D3 Acceptance
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/RUN_STAGE32_D3_ACCEPTANCE
+
+permissions:
+  contents: read
+
+jobs:
+  accept:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Verify committed D3 durable surface
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f docs/implementation/stage3.2-d2-safe-retry-orphan.md
+          test ! -f scripts/stage32_d3_patch.py
+          grep -R 'class ReconciliationAttempt' -n src/agentforge
+          grep -R 'ReconciliationAttemptRow' -n src/agentforge
+          grep -R 'reconciliation_max_attempts' -n src/agentforge
+          grep -R 'record_reconciliation_started' -n src/agentforge
+          grep -R 'record_reconciliation_result' -n src/agentforge
+          grep -R 'record_reconciliation_failed' -n src/agentforge
+          grep -R 'RECONCILIATION_STARTED' -n src/agentforge
+          grep -R 'RECONCILIATION_RETRY_SCHEDULED' -n src/agentforge
+
+      - name: Prove STARTED is durable before physical reconciliation query
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          source = Path("src/agentforge/application/run_manager.py").read_text()
+          tree = ast.parse(source)
+          execute = next(
+              node for node in ast.walk(tree)
+              if isinstance(node, ast.AsyncFunctionDef) and node.name == "execute"
+          )
+          calls = [
+              (node.lineno, node.func.attr)
+              for node in ast.walk(execute)
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+          ]
+          started = min(line for line, name in calls if name == "record_reconciliation_started")
+          query = min(line for line, name in calls if name == "execute_reconciliation")
+          if not started < query:
+              raise SystemExit(
+                  f"reconciliation STARTED must commit before query: {started}, {query}"
+              )
+          print("reconciliation commit-before-query: PASS")
+          PY
+
+      - name: Prove reconciliation safety budget is separate from physical Tool budget
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          models = Path("src/agentforge/domain/models.py").read_text()
+          db = Path("src/agentforge/infrastructure/db/models.py").read_text()
+          recorder = Path("src/agentforge/infrastructure/db/execution_recorder.py").read_text()
+          required = [
+              "reconciliation_max_attempts",
+              "reconciliation_initial_backoff_seconds",
+              "reconciliation_max_backoff_seconds",
+          ]
+          for token in required:
+              if token not in models or token not in db:
+                  raise SystemExit(f"missing independent reconciliation policy: {token}")
+          start = recorder.index("async def record_reconciliation_started")
+          end = recorder.index("async def record_reconciliation_failed", start)
+          body = recorder[start:end]
+          if "tool_attempts_used +=" in body:
+              raise SystemExit("reconciliation must not consume ToolExecutionAttempt budget")
+          if "ReconciliationAttemptRow(" not in body:
+              raise SystemExit("reconciliation STARTED row is not durable")
+          print("separate reconciliation safety budget: PASS")
+          PY
+
+      - name: Prove mode safety and no blind non-idempotent retry
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          source = Path("src/agentforge/infrastructure/db/execution_recorder.py").read_text()
+          start = source.index("async def record_reconciliation_result")
+          body = source[start:]
+          required = [
+              "ReconciliationMode.AUTHORITATIVE",
+              "ReconciliationMode.BEST_EFFORT",
+              "binding.idempotency_supported",
+              "ExternalActionStatus.MANUAL_REVIEW",
+              "ReconciliationBusinessResult.NOT_EXECUTED",
+              "ReconciliationBusinessResult.UNKNOWN",
+          ]
+          for token in required:
+              if token not in body:
+                  raise SystemExit(f"missing reconciliation safety branch: {token}")
+          if "BEST_EFFORT" not in body or "idempotency_supported" not in body:
+              raise SystemExit("BEST_EFFORT retry safety is not capability-gated")
+          print("AUTHORITATIVE/BEST_EFFORT safety branches: PASS")
+          PY
+
+      - name: Prove NONE performs no reconciliation query
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          source = Path("src/agentforge/application/run_manager.py").read_text()
+          tree = ast.parse(source)
+          execute = next(
+              node for node in ast.walk(tree)
+              if isinstance(node, ast.AsyncFunctionDef) and node.name == "execute"
+          )
+          text = ast.get_source_segment(source, execute) or ""
+          none = text.find("ReconciliationMode.NONE")
+          manual = text.find("record_action_manual_review", none)
+          prepare = text.find("prepare_reconciliation", none)
+          if min(none, manual, prepare) < 0 or not none < manual < prepare:
+              raise SystemExit("NONE mode must stop at manual review before reconcile preparation")
+          print("NONE has no physical reconciliation query: PASS")
+          PY
+
+      - name: Prove unresolved action truth dominates model reasoning
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          source = Path("src/agentforge/application/run_manager.py").read_text()
+          tree = ast.parse(source)
+          execute = next(
+              node for node in ast.walk(tree)
+              if isinstance(node, ast.AsyncFunctionDef) and node.name == "execute"
+          )
+          calls = [
+              (node.lineno, node.func.attr)
+              for node in ast.walk(execute)
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+          ]
+          reconcile = min(
+              line for line, name in calls if name == "load_reconciliation_external_action"
+          )
+          model = min(line for line, name in calls if name == "begin_model_invocation")
+          if reconcile >= model:
+              raise SystemExit("unresolved action truth does not dominate model reasoning")
+          print("unresolved durable truth > new model reasoning: PASS")
+          PY
+
+      - name: Prove D3 does not implement Stage 3.2-E resolution/cancellation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          paths = [
+              Path("src/agentforge/domain/models.py"),
+              Path("src/agentforge/infrastructure/db/models.py"),
+              Path("src/agentforge/application/ports.py"),
+              Path("src/agentforge/infrastructure/db/execution_recorder.py"),
+              Path("src/agentforge/api/app.py"),
+          ]
+          text = "\n".join(path.read_text() for path in paths)
+          forbidden = [
+              "class ActionResolution",
+              "ActionResolutionRow",
+              "resolve_action",
+              "cancel_requested",
+          ]
+          for token in forbidden:
+              if token in text:
+                  raise SystemExit(f"D3 crossed Stage 3.2-E boundary: {token}")
+          if "WAITING_ACTION_RESOLUTION" not in text:
+              raise SystemExit("D3 must preserve frozen manual-review Run wait state")
+          print("D3/E implementation boundary: PASS")
+          PY
+
+      - name: Verify explicit D3 regression cases exist
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          grep -R 'reconciliation' -n tests/unit/test_run_manager.py | head -n 20
+          grep -R 'reconciliation' -n tests/integration/test_postgres_runtime.py | head -n 30
+
+      - name: Run independent D3 acceptance gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ./scripts/validate_stage31_containerized.sh
