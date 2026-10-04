@@ -271,6 +271,7 @@ the takeover recovery transaction performs:
 BEGIN
   lock Run
   lock ExternalAction
+  lock ToolCall
   lock old Attempt
 
   verify old Attempt is current
@@ -434,7 +435,7 @@ Canonical V1 accepts only:
 - null;
 - boolean;
 - string;
-- signed integer within the application-supported integer range;
+- signed integer in the interoperable safe range `[-9007199254740991, 9007199254740991]`;
 - array of allowed values;
 - object with string keys and allowed values.
 
@@ -672,7 +673,8 @@ expiry, takeover, or another terminal condition.
 
 Provider completion does not automatically authorize its business consequence.
 
-Every model-result transaction must:
+Every model-result transaction must distinguish **stale execution authority**
+from **current-authority business cancellation/deadline**.
 
 ```text
 BEGIN
@@ -680,34 +682,54 @@ BEGIN
   load referenced ModelInvocation
 
   verify result belongs to the durable invocation
-  persist invocation outcome/evidence
 
-  re-check:
-    current generation / permitted result ownership
-    Run terminal state
-    cancel_requested
-    DB deadline
-    conflicting durable progression
+  first verify execution authority:
+    expected generation is still current
+    lease is still valid by DB time
+    invocation is still the current STARTED invocation
 
-  if progression still permitted:
-      atomically create normal consequence
-      (assistant message or ToolProposal/ToolCall/action preparation)
-
-  else:
-      mark/store result disposition as discarded for progression
-      append MODEL_RESULT_DISCARDED event
-      create no new RunMessage business response
+  if execution authority is stale:
+      reject the stale executor result under the frozen Stage 3.1 rule
+      do not finalize authoritative ModelInvocation lifecycle from that executor
+      create no RunMessage
       create no ToolProposal
       create no ToolCall
       create no ExternalAction
-      enqueue no new progression
+      enqueue no progression
+      COMMIT/RETURN according to the existing stale-result command contract
+
+  otherwise:
+      persist ModelInvocation outcome/evidence
+
+      re-check:
+        Run terminal state
+        cancel_requested
+        DB deadline
+        conflicting durable progression
+
+      if business progression still permitted:
+          atomically create normal consequence
+          (assistant message or ToolProposal/ToolCall/action preparation)
+
+      else:
+          mark/store result disposition as discarded for progression
+          append MODEL_RESULT_DISCARDED event
+          create no new RunMessage business response
+          create no ToolProposal
+          create no ToolCall
+          create no ExternalAction
+          enqueue no new progression
 COMMIT
 ```
 
-A late model result may remain observable as ModelInvocation evidence but cannot
-break cancellation/deadline/fencing.
+Thus:
 
-Stage 3.1 stale-executor behavior remains preserved.
+- stale generation/expired-lease results preserve Stage 3.1 stale-executor
+  rejection semantics;
+- a result from the still-authorized invocation may be durably recorded after
+  cancel/deadline, but its business consequence is discarded.
+
+Stage 3.2 does not weaken the frozen Stage 3.1 model fencing rule.
 
 ---
 
@@ -807,6 +829,25 @@ Otherwise -> MANUAL_REVIEW.
 
 UNKNOWN -> MANUAL_REVIEW without reconcile request.
 
+### Reconciliation result transaction
+
+Every reconciliation result that can change ExternalAction business truth
+locks in this order:
+
+```text
+Run
+-> ExternalAction
+-> ReconciliationAttempt
+```
+
+The referenced ReconciliationAttempt must still be the applicable attempt and
+the ExternalAction must still be in the matching unresolved reconciliation
+state.
+
+If manual resolution or another final action transition committed first, the
+delayed reconciliation result is recorded only as late/conflicting evidence
+and cannot overwrite business truth or enqueue progression.
+
 ---
 
 ## 24. Reconciliation safety budget
@@ -887,7 +928,8 @@ BEGIN
   set cancel_requested = true
 
   if ExternalAction = READY and no attempt crossed Action Commit:
-      lock action
+      lock ExternalAction
+      lock ToolCall
       action -> ABORTED
       ToolCall -> NOT_EXECUTED
 
@@ -909,11 +951,11 @@ After cancel commit:
 
 ## 28. Late-result winner rule
 
-Every Tool attempt result transaction locks:
+Every Tool attempt result transaction follows the global lock order:
 
 1. Run;
-2. logical ToolCall;
-3. ExternalAction when side-effecting;
+2. ExternalAction when side-effecting;
+3. logical ToolCall;
 4. referenced ToolExecutionAttempt.
 
 A result may change business state only if:
@@ -946,7 +988,7 @@ ActionResolution:
 - resolver placeholder identity;
 - created_at.
 
-Resolution transaction locks Run then ExternalAction.
+Resolution transaction locks Run, then ExternalAction, then ToolCall.
 
 Only MANUAL_REVIEW may be manually resolved.
 
