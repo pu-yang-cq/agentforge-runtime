@@ -58,8 +58,7 @@ jobs:
               "    for node in tree.body:\n"
               "        if isinstance(node, ast.Assign):\n"
               "            is_revision = any(\n"
-              "                isinstance(target, ast.Name) and target.id == 'revision'\n"
-              "                for target in node.targets\n"
+              '                isinstance(target, ast.Name) and target.id == "revision" for target in node.targets\n'
               "            )\n"
               "            if (\n"
               "                is_revision\n"
@@ -70,15 +69,15 @@ jobs:
               "        if (\n"
               "            isinstance(node, ast.AnnAssign)\n"
               "            and isinstance(node.target, ast.Name)\n"
-              "            and node.target.id == 'revision'\n"
+              '            and node.target.id == "revision"\n'
               "            and isinstance(node.value, ast.Constant)\n"
               "            and isinstance(node.value.value, str)\n"
               "        ):\n"
               "            return node.value.value\n"
-              "    raise AssertionError(f'no revision id found in {path}')\n\n\n"
+              '    raise AssertionError(f"no revision id found in {path}")\n\n\n'
               "def test_alembic_revision_ids_fit_default_version_column() -> None:\n"
-              "    root = Path(__file__).resolve().parents[2] / 'migrations' / 'versions'\n"
-              "    migrations = sorted(root.glob('*.py'))\n"
+              '    root = Path(__file__).resolve().parents[2] / "migrations" / "versions"\n'
+              '    migrations = sorted(root.glob("*.py"))\n'
               "    assert migrations\n"
               "    for migration in migrations:\n"
               "        revision = _revision_from(migration)\n"
