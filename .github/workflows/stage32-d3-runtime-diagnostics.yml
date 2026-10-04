@@ -1,0 +1,82 @@
+name: Stage 3.2-D3 Runtime Diagnostics
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/RUN_STAGE32_D3_RUNTIME_DIAG
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:18.6-bookworm
+        env:
+          POSTGRES_DB: agentforge
+          POSTGRES_USER: agentforge
+          POSTGRES_PASSWORD: agentforge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agentforge -d agentforge"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    env:
+      AGENTFORGE_DATABASE_URL: postgresql+psycopg://agentforge:agentforge@127.0.0.1:5432/agentforge
+      AGENTFORGE_TEST_DATABASE_URL: postgresql+psycopg://agentforge:agentforge@127.0.0.1:5432/agentforge
+      AGENTFORGE_REQUIRE_POSTGRES_INTEGRATION: "1"
+      UV_PROJECT_ENVIRONMENT: /tmp/d3-runtime-venv
+      UV_CACHE_DIR: /tmp/d3-runtime-cache
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: stage32-d3-debug
+
+      - name: Sync locked environment
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python_minor="$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+          echo "runner python=$python_minor"
+          docker run --rm -v "$PWD:/workspace" -w /workspace \
+            -e UV_PROJECT_ENVIRONMENT=/tmp/venv -e UV_CACHE_DIR=/tmp/cache \
+            ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim \
+            sh -lc "uv sync --locked --all-groups >/dev/null"
+
+      - name: Alembic online upgrade
+        continue-on-error: true
+        shell: bash
+        run: |
+          docker run --rm --network host -v "$PWD:/workspace" -w /workspace \
+            -e AGENTFORGE_DATABASE_URL="$AGENTFORGE_DATABASE_URL" \
+            -e AGENTFORGE_TEST_DATABASE_URL="$AGENTFORGE_TEST_DATABASE_URL" \
+            -e UV_PROJECT_ENVIRONMENT=/tmp/venv -e UV_CACHE_DIR=/tmp/cache \
+            ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim \
+            sh -lc "uv sync --locked --all-groups >/dev/null && uv run --locked alembic upgrade head"
+
+      - name: Unit tests only
+        continue-on-error: true
+        shell: bash
+        run: |
+          docker run --rm --network host -v "$PWD:/workspace" -w /workspace \
+            -e UV_PROJECT_ENVIRONMENT=/tmp/venv -e UV_CACHE_DIR=/tmp/cache \
+            ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim \
+            sh -lc "uv sync --locked --all-groups >/dev/null && uv run --locked pytest -q tests/unit -p no:cacheprovider"
+
+      - name: PostgreSQL integration tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          docker run --rm --network host -v "$PWD:/workspace" -w /workspace \
+            -e AGENTFORGE_DATABASE_URL="$AGENTFORGE_DATABASE_URL" \
+            -e AGENTFORGE_TEST_DATABASE_URL="$AGENTFORGE_TEST_DATABASE_URL" \
+            -e AGENTFORGE_REQUIRE_POSTGRES_INTEGRATION=1 \
+            -e UV_PROJECT_ENVIRONMENT=/tmp/venv -e UV_CACHE_DIR=/tmp/cache \
+            ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim \
+            sh -lc "uv sync --locked --all-groups >/dev/null && uv run --locked pytest -q tests/integration/test_postgres_runtime.py -p no:cacheprovider"
