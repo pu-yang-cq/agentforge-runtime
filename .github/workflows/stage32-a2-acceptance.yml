@@ -1,0 +1,31 @@
+name: Stage 3.2-A2 Acceptance
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/RUN_STAGE32_A2_ACCEPTANCE
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Verify Stage 3.2-A2 migration head
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f migrations/versions/0007_run_limits.py
+          grep -F 'revision: str = "0007_run_limits"' migrations/versions/0007_run_limits.py
+          grep -F 'down_revision: str | None = "0006_tool_attempts"' migrations/versions/0007_run_limits.py
+
+      - name: Run Stage 3.2-A2 target acceptance
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ./scripts/validate_stage31_containerized.sh
