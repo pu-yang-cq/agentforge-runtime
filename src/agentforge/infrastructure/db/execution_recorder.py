@@ -8,7 +8,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql import Select
 
-from agentforge.application.errors import StaleExecutorError
+from agentforge.application.errors import BusinessProgressionBlockedError, StaleExecutorError
 from agentforge.application.ports import ExecutionRecorder
 from agentforge.domain.enums import (
     EventType,
@@ -79,6 +79,37 @@ async def _lock_run_state(session: AsyncSession, run_id: UUID) -> RunStateRow:
             select(RunStateRow).where(RunStateRow.run_id == run_id).with_for_update()
         )
     ).scalar_one()
+
+
+async def _database_now(session: AsyncSession):
+    return await session.scalar(select(func.clock_timestamp()))
+
+
+async def _assert_deadline_not_expired(session: AsyncSession, run: RunRow) -> None:
+    db_now = await _database_now(session)
+    if db_now is None:
+        raise RuntimeError("database clock_timestamp() returned no value")
+    if db_now >= run.deadline_at:
+        raise BusinessProgressionBlockedError(
+            "DEADLINE_EXCEEDED",
+            "run deadline has expired",
+        )
+
+
+def _assert_model_budget(run: RunRow, state: RunStateRow) -> None:
+    if state.model_invocations_used >= run.max_model_invocations:
+        raise BusinessProgressionBlockedError(
+            "BUDGET_EXCEEDED",
+            "max_model_invocations exhausted",
+        )
+
+
+def _assert_tool_budget(run: RunRow, state: RunStateRow) -> None:
+    if state.tool_attempts_used >= run.max_tool_attempts:
+        raise BusinessProgressionBlockedError(
+            "BUDGET_EXCEEDED",
+            "max_tool_attempts exhausted",
+        )
 
 
 async def _allocate_message_sequence(session: AsyncSession, run_id: UUID) -> int:
@@ -224,9 +255,12 @@ class PostgresExecutionRecorder(ExecutionRecorder):
         if call.status is not ToolCallStatus.EXECUTING:
             raise ValueError("recovered READ call must be EXECUTING before persistence")
         async with self._sessions() as session, session.begin():
-            await _lock_owned_run(
+            run_row = await _lock_owned_run(
                 session, run_id=call.run_id, expected_generation=expected_generation
             )
+            state = await _lock_run_state(session, call.run_id)
+            await _assert_deadline_not_expired(session, run_row)
+            _assert_tool_budget(run_row, state)
             await _assert_no_started_model_invocations(session, call.run_id)
             await _assert_no_started_tool_attempts(session, call.run_id)
             result = await session.execute(
@@ -241,6 +275,8 @@ class PostgresExecutionRecorder(ExecutionRecorder):
             )
             if cast(CursorResult[Any], result).rowcount != 1:
                 raise RuntimeError("recovered READ ToolCall is no longer READY")
+            state.tool_attempts_used += 1
+            state.state_version += 1
             attempt_number = await _next_tool_attempt_number(session, call.id)
             attempt = ToolExecutionAttemptRow(
                 id=uuid4(),
@@ -286,12 +322,17 @@ class PostgresExecutionRecorder(ExecutionRecorder):
         """
         self._assert_generation(expected_generation)
         async with self._sessions() as session, session.begin():
-            await _lock_owned_run(session, run_id=run_id, expected_generation=expected_generation)
+            run_row = await _lock_owned_run(
+                session, run_id=run_id, expected_generation=expected_generation
+            )
             await _assert_no_active_tool_calls(session, run_id)
             await _assert_no_started_tool_attempts(session, run_id)
             await _assert_no_started_model_invocations(session, run_id)
             state = await _lock_run_state(session, run_id)
+            await _assert_deadline_not_expired(session, run_row)
+            _assert_model_budget(run_row, state)
             state.turn_count += 1
+            state.model_invocations_used += 1
             state.state_version += 1
             invocation = ModelInvocation(invocation_id, run_id, state.turn_count)
             session.add(
@@ -339,12 +380,15 @@ class PostgresExecutionRecorder(ExecutionRecorder):
             raise ValueError("accepted tool call must bind a tool version")
 
         async with self._sessions() as session, session.begin():
-            await _lock_owned_run(
+            run_row = await _lock_owned_run(
                 session,
                 run_id=invocation.run_id,
                 expected_generation=expected_generation,
             )
             await _assert_no_active_tool_calls(session, call.run_id)
+            state = await _lock_run_state(session, call.run_id)
+            await _assert_deadline_not_expired(session, run_row)
+            _assert_tool_budget(run_row, state)
             result = await session.execute(
                 update(ModelInvocationRow)
                 .where(
@@ -369,8 +413,8 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                     arguments=proposal.arguments,
                 )
             )
-            state = await _lock_run_state(session, call.run_id)
             state.tool_call_count += 1
+            state.tool_attempts_used += 1
             state.state_version += 1
             session.add(
                 ToolCallRow(
