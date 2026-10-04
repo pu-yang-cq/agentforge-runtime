@@ -1373,7 +1373,6 @@ async def test_model_and_tool_start_reserve_usage_atomically() -> None:
     await engine.dispose()
 
 
-
 @pytest.mark.asyncio
 async def test_stale_executor_precedes_deadline_for_model_result() -> None:
     from agentforge.domain.enums import MessageRole
@@ -1512,10 +1511,14 @@ async def test_expired_deadline_blocks_recovered_read_without_new_attempt_or_usa
     )
     recovered = await recorder_b.load_recoverable_read_call(run.id)
     assert recovered is not None
-    recovered = ToolCoordinator(build_demo_registry()).prepare_recovered_read(
-        call=recovered,
-        agent_version=agent_version,
-    ).call
+    recovered = (
+        ToolCoordinator(build_demo_registry())
+        .prepare_recovered_read(
+            call=recovered,
+            agent_version=agent_version,
+        )
+        .call
+    )
 
     with pytest.raises(BusinessProgressionBlockedError, match="DEADLINE_EXCEEDED"):
         await recorder_b.record_recovered_read_started(

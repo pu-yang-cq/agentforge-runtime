@@ -631,7 +631,6 @@ async def test_cooperative_yield_requeues_and_resumes_without_failure() -> None:
     assert state.tool_attempts_used == 1
 
 
-
 @pytest.mark.asyncio
 async def test_denied_tool_result_after_deadline_is_discarded_not_persisted() -> None:
     run_holder: dict[str, Run] = {}
