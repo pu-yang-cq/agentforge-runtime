@@ -1567,6 +1567,8 @@ class RunManager:
             )
             if scheduled:
                 return None
+            if run.cancel_requested:
+                return None
             raise RunExecutionFailedError(run.failure_reason or str(exc)) from exc
         except ToolAdapterError as exc:
             if exc.definite_not_executed:
@@ -1583,6 +1585,8 @@ class RunManager:
                     error_class=exc.error_class,
                     expected_generation=expected_generation,
                 )
+                if run.cancel_requested:
+                    return None
                 raise RunExecutionFailedError(run.failure_reason) from exc
             await recorder.record_side_effect_unknown(
                 prepared.call,
@@ -1764,12 +1768,20 @@ class RunManager:
                 )
                 if scheduled:
                     return None
+                if run.cancel_requested:
+                    return None
                 raise RunExecutionFailedError(run.failure_reason or str(exc)) from exc
             except Exception as exc:
                 run.fail(f"recovered READ tool {recoverable_call.tool_name} failed: {exc}")
                 await recorder.record_tool_failed_and_fail_run(
                     recoverable_call, run, expected_generation=expected_generation
                 )
+                if run.cancel_requested:
+                    run.status = RunStatus.RUNNING
+                    run.failure_reason = None
+                    run.completed_at = None
+                    run.cancel()
+                    return None
                 raise RunExecutionFailedError(run.failure_reason) from exc
 
             recovered_message = RunMessage(
@@ -1842,6 +1854,12 @@ class RunManager:
                 await recorder.record_model_failed_and_fail_run(
                     invocation, run, expected_generation=expected_generation
                 )
+                if run.cancel_requested:
+                    run.status = RunStatus.RUNNING
+                    run.failure_reason = None
+                    run.completed_at = None
+                    run.cancel()
+                    return None
                 raise RunExecutionFailedError(run.failure_reason) from exc
 
             if isinstance(decision, FinalDecision):
@@ -2007,12 +2025,20 @@ class RunManager:
                 )
                 if scheduled:
                     return None
+                if run.cancel_requested:
+                    return None
                 raise RunExecutionFailedError(run.failure_reason or str(exc)) from exc
             except Exception as exc:
                 run.fail(f"tool {proposal.tool_name} failed: {exc}")
                 await recorder.record_tool_failed_and_fail_run(
                     call, run, expected_generation=expected_generation
                 )
+                if run.cancel_requested:
+                    run.status = RunStatus.RUNNING
+                    run.failure_reason = None
+                    run.completed_at = None
+                    run.cancel()
+                    return None
                 raise RunExecutionFailedError(run.failure_reason) from exc
 
             message = RunMessage(
