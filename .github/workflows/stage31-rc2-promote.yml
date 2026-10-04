@@ -37,7 +37,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          docker run --rm -v /tmp/agentforge-rc2:/workspace -w /workspace ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim sh -lc "set -eu; export UV_CACHE_DIR=/tmp/uv-cache; uv sync --locked --all-groups; uv run --locked ruff check .; uv run --locked ruff format --check .; PYTHONPATH=src uv run --locked pytest -q tests/unit; python -m compileall -q src apps tests; rm -rf .venv .ruff_cache .pytest_cache"
+          docker run --rm -v /tmp/agentforge-rc2:/workspace -w /workspace ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim sh -lc "set -eu; export UV_CACHE_DIR=/tmp/uv-cache; uv sync --locked --all-groups; uv run --locked ruff check .; uv run --locked ruff format --check .; PYTHONPATH=src uv run --locked pytest -q tests/unit; python -m compileall -q src apps tests; find . -type f -name '*.pyc' -delete; find . -type d -name '__pycache__' -empty -delete; rm -rf .venv .ruff_cache .pytest_cache"
 
       - name: Build and verify deterministic RC2 source
         shell: bash
