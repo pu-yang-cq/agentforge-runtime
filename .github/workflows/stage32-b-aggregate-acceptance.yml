@@ -69,14 +69,31 @@ jobs:
           if "tool_attempts_used +=" in source:
               raise SystemExit("B2 preparation reserves tool-attempt budget")
 
-          manager = Path("src/agentforge/application/run_manager.py").read_text()
-          marker = "if isinstance(prepared, PreparedExternalAction):"
-          start = manager.index(marker)
-          stop = manager.index("call = prepared.call", start + len(marker))
-          branch = manager[start:stop]
-          if "execute_prepared" in branch or ".invoke(" in branch:
+          manager_path = Path("src/agentforge/application/run_manager.py")
+          manager_source = manager_path.read_text()
+          manager_tree = ast.parse(manager_source)
+          side_effect_branch = None
+          for node in ast.walk(manager_tree):
+              if not isinstance(node, ast.If):
+                  continue
+              test_source = ast.get_source_segment(manager_source, node.test) or ""
+              if "PreparedExternalAction" in test_source:
+                  side_effect_branch = node
+                  break
+          if side_effect_branch is None:
+              raise SystemExit("PreparedExternalAction branch not found")
+
+          branch_source = ast.get_source_segment(manager_source, side_effect_branch) or ""
+          if "execute_prepared" in branch_source or ".invoke(" in branch_source:
               raise SystemExit("RunManager side-effect preparation crosses external-I/O boundary")
-          if "return None" not in branch:
+          if not any(
+              isinstance(node, ast.Return)
+              and (
+                  node.value is None
+                  or (isinstance(node.value, ast.Constant) and node.value.value is None)
+              )
+              for node in ast.walk(side_effect_branch)
+          ):
               raise SystemExit("B2 side-effect path does not STOP after durable intent")
 
           print("Intent Before Effect structural proof: PASS")
