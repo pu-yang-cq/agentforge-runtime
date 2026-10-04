@@ -1,0 +1,233 @@
+name: Stage 3.1 RC3 Promotion
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/PROMOTE_RC3
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: true
+
+      - name: Reconstruct exact RC2
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/agentforge-rc3
+          mkdir -p /tmp/agentforge-rc3
+          cat rc/rc2.part*.b64 | base64 -d > /tmp/agentforge-rc2.tar.gz
+          echo "81a5efecdd1e9a7f23918ce444b9e4fe74a03f984192961f337b4fe6ea4ed6ce  /tmp/agentforge-rc2.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/agentforge-rc2.tar.gz -C /tmp/agentforge-rc3
+          cp uv.lock /tmp/agentforge-rc3/uv.lock
+
+      - name: Apply reviewed package-boundary and typing fix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          touch /tmp/agentforge-rc3/apps/__init__.py
+          touch /tmp/agentforge-rc3/apps/api/__init__.py
+          touch /tmp/agentforge-rc3/apps/worker/__init__.py
+          python - <<'PY'
+          from pathlib import Path
+
+          root = Path("/tmp/agentforge-rc3")
+
+          execution = root / "src/agentforge/infrastructure/db/execution_recorder.py"
+          text = execution.read_text()
+
+          replacements = [
+              ("from typing import Any\n", "from typing import Any, cast\n", 1),
+              (
+                  "from sqlalchemy import func, select, update\n",
+                  "from sqlalchemy import func, select, update\n"
+                  "from sqlalchemy.engine import CursorResult\n",
+                  1,
+              ),
+              (
+                  "from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker\n",
+                  "from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker\n"
+                  "from sqlalchemy.sql import Select\n",
+                  1,
+              ),
+              (
+                  "def build_owned_run_stmt(*, run_id: UUID, expected_generation: int) -> Any:",
+                  "def build_owned_run_stmt(\n"
+                  "    *, run_id: UUID, expected_generation: int\n"
+                  ") -> Select[tuple[RunRow]]:",
+                  1,
+              ),
+          ]
+          for old, new, expected in replacements:
+              actual = text.count(old)
+              if actual != expected:
+                  raise SystemExit(
+                      f"execution_recorder replacement mismatch for {old!r}: "
+                      f"expected {expected}, got {actual}"
+                  )
+              text = text.replace(old, new)
+
+          old = "if result.rowcount != 1:"
+          count = text.count(old)
+          if count != 7:
+              raise SystemExit(
+                  f"expected 7 guarded rowcount checks in execution_recorder, got {count}"
+              )
+          text = text.replace(
+              old, "if cast(CursorResult[Any], result).rowcount != 1:"
+          )
+          execution.write_text(text)
+
+          runtime = root / "src/agentforge/infrastructure/db/runtime_store.py"
+          text = runtime.read_text()
+          replacements = [
+              ("from typing import Any\n", "from typing import Any, cast\n", 1),
+              (
+                  "from sqlalchemy.dialects.postgresql import insert as pg_insert\n",
+                  "from sqlalchemy.dialects.postgresql import insert as pg_insert\n"
+                  "from sqlalchemy.engine import CursorResult\n",
+                  1,
+              ),
+              (
+                  "return result.rowcount == 1",
+                  "return cast(CursorResult[Any], result).rowcount == 1",
+                  1,
+              ),
+          ]
+          for old, new, expected in replacements:
+              actual = text.count(old)
+              if actual != expected:
+                  raise SystemExit(
+                      f"runtime_store replacement mismatch for {old!r}: "
+                      f"expected {expected}, got {actual}"
+                  )
+              text = text.replace(old, new)
+          runtime.write_text(text)
+
+          test = root / "tests/unit/test_package_layout.py"
+          test.write_text(
+              "from pathlib import Path\n\n\n"
+              "def test_composition_roots_are_python_packages() -> None:\n"
+              "    root = Path(__file__).resolve().parents[2]\n"
+              "    for relative in (\n"
+              '        "apps/__init__.py",\n'
+              '        "apps/api/__init__.py",\n'
+              '        "apps/worker/__init__.py",\n'
+              "    ):\n"
+              "        assert (root / relative).is_file(), relative\n"
+          )
+
+          readme = root / "README.md"
+          readme.write_text(readme.read_text().replace("V1.0-RC2", "V1.0-RC3"))
+
+          review = root / "docs/reviews/stage3.1-v1.0-rc3-review.md"
+          review.write_text(
+              "# Stage 3.1 V1.0-RC3 Review\n\n"
+              "## Trigger\n\n"
+              "Real target acceptance run 37183390583 reached Python 3.14 and "
+              "failed at mypy because apps/api/main.py and apps/worker/main.py "
+              "were both mapped to top-level module main.\n\n"
+              "## Root cause\n\n"
+              "The composition-root directories were not Python packages. "
+              "After adding package markers, target mypy exposed SQLAlchemy "
+              "result typing that needed explicit narrowing.\n\n"
+              "## Fix scope\n\n"
+              "- add apps package markers;\n"
+              "- narrow SQLAlchemy Select and CursorResult types;\n"
+              "- add a package-layout regression test.\n\n"
+              "No runtime state transition, SQL predicate, transaction boundary, "
+              "lease/fencing rule, recovery rule, migration operation, tool "
+              "execution semantic, or dependency was changed.\n\n"
+              "## Evidence\n\n"
+              "Target probe run 37180341817: Ruff passed, format passed, "
+              "mypy reported no issues in 27 source files.\n\n"
+              "Stage 3.1 remains NOT ACCEPTED until RC3 passes the full "
+              "Python 3.14 + PostgreSQL 18 acceptance workflow.\n"
+          )
+          PY
+
+      - name: Verify RC3 before packaging
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd /tmp/agentforge-rc3
+          test -f apps/__init__.py
+          test -f apps/api/__init__.py
+          test -f apps/worker/__init__.py
+          docker run --rm \
+            -v /tmp/agentforge-rc3:/workspace \
+            -w /workspace \
+            ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim \
+            sh -lc "set -eu; \
+              export UV_CACHE_DIR=/tmp/uv-cache; \
+              uv sync --locked --all-groups; \
+              uv run --locked ruff check src apps tests migrations; \
+              uv run --locked ruff format --check src apps tests migrations; \
+              uv run --locked mypy --cache-dir /tmp/mypy-cache; \
+              PYTHONPATH=src uv run --locked pytest -q tests/unit; \
+              python -m compileall -q src apps tests"
+          find . -type f -name '*.pyc' -delete
+          find . -type d -name '__pycache__' -empty -delete
+          rm -rf .venv .ruff_cache .pytest_cache .mypy_cache
+
+      - name: Build deterministic RC3 source twice
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -f /tmp/agentforge-rc3/uv.lock
+          build() {
+            out="$1"
+            (cd /tmp/agentforge-rc3 && \
+              tar --sort=name \
+                  --mtime='UTC 1970-01-01' \
+                  --owner=0 --group=0 --numeric-owner \
+                  --mode='u+rwX,go+rX,go-w' \
+                  --exclude='./uv.lock' \
+                  --exclude='./.pytest_cache' \
+                  --exclude='./.mypy_cache' \
+                  --exclude='./.ruff_cache' \
+                  --exclude='./.venv' \
+                  --exclude='*/__pycache__/*' \
+                  --exclude='*.pyc' \
+                  -cf - .) | gzip -n > "$out"
+          }
+          build /tmp/agentforge-rc3-a.tar.gz
+          build /tmp/agentforge-rc3-b.tar.gz
+          cmp /tmp/agentforge-rc3-a.tar.gz /tmp/agentforge-rc3-b.tar.gz
+          sha256sum /tmp/agentforge-rc3-a.tar.gz | tee /tmp/agentforge-rc3.sha256
+
+      - name: Commit exact RC3 acceptance payload
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          digest="$(awk '{print $1}' /tmp/agentforge-rc3.sha256)"
+          rm -f rc/rc3.part*.b64
+          base64 -w0 /tmp/agentforge-rc3-a.tar.gz > /tmp/rc3.b64
+          split -b 20000 -d -a 3 /tmp/rc3.b64 /tmp/rc3.part
+          i=0
+          for part in /tmp/rc3.part*; do
+            printf -v n '%03d' "$i"
+            cp "$part" "rc/rc3.part${n}.b64"
+            i=$((i + 1))
+          done
+          {
+            echo "Stage 3.1 V1.0-RC3 acceptance payload"
+            echo
+            echo "$digest  agentforge-stage3.1-v1.0-rc3-clean.tar.gz"
+            echo
+            echo "Derived from RC2 only by the target-validated mypy/package fix."
+            echo "No dependency change; reviewed uv.lock remains unchanged."
+          } > rc/RC3_SOURCE_SHA256
+          git config user.name "agentforge-stage31-bot"
+          git config user.email "agentforge-stage31-bot@users.noreply.github.com"
+          git add rc/rc3.part*.b64 rc/RC3_SOURCE_SHA256
+          git commit -m "fix(rc): promote Stage 3.1 V1.0-RC3 typing repair"
+          git push origin HEAD:main
