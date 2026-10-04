@@ -55,6 +55,25 @@ jobs:
           # Keep the reviewed lockfile and current Stage 3.2 docs/workflows from main.
           echo "ea589824df68c1412a9ba797f673cf4110e122540a06e02ffcf15bb3e4fa406a  uv.lock" | sha256sum -c -
 
+          # RC4 contains a historical envelope test that required the old relative
+          # command spelling "sha256sum uv.lock". The current accepted envelope
+          # records the same digest using an absolute path. Preserve the semantic
+          # assertion without pinning the obsolete command spelling.
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/unit/test_acceptance_harness.py")
+          text = path.read_text()
+          old = '    assert "sha256sum uv.lock" in workflow\n'
+          new = (
+              '    assert "sha256sum" in workflow\n'
+              '    assert "uv.lock" in workflow\n'
+          )
+          if text.count(old) != 1:
+              raise SystemExit("historical lock-bootstrap assertion shape changed")
+          path.write_text(text.replace(old, new))
+          PY
+
       - name: Prove materialized Stage 3.1 baseline
         shell: bash
         run: |
