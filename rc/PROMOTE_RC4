@@ -11,3 +11,5 @@ Retry after emitting the regression test in exact Ruff format.
 Retry after explicit FK-ordered integration seeding and revision-contract update.
 
 Retry after YAML-safe fixture transformation.
+
+Retry after explicit create_run RunRow flush before FK children.
