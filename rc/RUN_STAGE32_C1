@@ -1,4 +1,4 @@
 Stage 3.2-C1 fenced Action Commit Boundary
-patcher: 9e722f9d6f887345b52cc4446fbfd78aa4269bb1
-workflow: 95209ada944514c78513f864e81a180cdf59d75d
+patcher-fix: 2ed982fe35f65ca58f9d2bdae2c3a798d7d64ad6
+reason: candidate Ruff import/annotation repair
 B aggregate freeze: 217be42a7b6e87c6558d6bca5ce0dfacd103fcf2
