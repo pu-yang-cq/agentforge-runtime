@@ -4,37 +4,39 @@ Production-Grade Agent Runtime & Governance Platform.
 
 ## Current release gate
 
-**Stage 3.1 Core Runtime — V1.0-RC1**
+**Stage 3.1 Core Runtime — V1.0 ACCEPTED / FROZEN**
 
-Stage 3.1 is code-frozen and is **not accepted yet**. Stage 3.2 remains locked until the
-real Python 3.14 + PostgreSQL 18 target acceptance passes.
+Stage 3.1 passed the independent Python 3.14 + PostgreSQL 18 target acceptance.
+Stage 3.2 Durable Runtime is now **UNLOCKED**.
 
-Local RC1 evidence before remote acceptance:
+Accepted immutable source:
 
-- 49 local/unit/contract tests passed
-- 1 integration module intentionally skipped without PostgreSQL 18
-- offline Alembic migration chain passed
-- local/static blockers: 0
+- Release candidate: `V1.0-RC4`
+- RC4 SHA-256:
+  `696a889a86fc35ea127f6fde803818269427df978d2268345ea614af56d847b7`
+- Reviewed `uv.lock` SHA-256:
+  `ea589824df68c1412a9ba797f673cf4110e122540a06e02ffcf15bb3e4fa406a`
+- Official acceptance run: `37185024586`
+- Accepted envelope commit:
+  `7a03504daa3a1e2d66d96b5f3c59ed15b7965c41`
+- Frozen branch: `stage3.1-v1.0-frozen`
 
-## Immutable RC1 acceptance payload
+Official target evidence:
 
-The source under acceptance is stored as four base64 parts in `rc/`.
-GitHub Actions reconstructs the tarball and verifies:
+- CPython 3.14.7
+- PostgreSQL 18
+- Ruff lint: PASS
+- Ruff format check: PASS
+- mypy strict: PASS
+- Alembic online migration `0001 -> 0005`: PASS
+- mandatory PostgreSQL integration/concurrency/recovery suite: PASS
+- full suite: **68 passed**
+- target gate: **PASSED**
 
-`20a19cd990dbf121cecc308e446d322432ab41ad85d2255f57695e3f2cb5f05d`
+See `docs/acceptance/stage3.1-v1.0-accepted.md` for the final acceptance record.
 
-before executing it. See `rc/RC1_SOURCE_SHA256`.
+## Freeze rule
 
-## Acceptance sequence
-
-1. Actions → **Stage 3.1 Lock Bootstrap** → Run workflow.
-2. Download `stage31-uv-lock-review`.
-3. Review `uv.lock` and its SHA-256.
-4. Commit the reviewed `uv.lock` to repository root.
-5. Actions → **Stage 3.1 Acceptance** → Run workflow.
-6. Only a fully green target gate may mark Stage 3.1 ACCEPTED / FROZEN.
-
-The acceptance workflow runs the frozen containerized gate with Python 3.14,
-PostgreSQL 18, Ruff, formatting, mypy, Alembic, and real concurrency/recovery tests.
-
-No acceptance workflow is allowed to generate or silently modify `uv.lock`.
+Stage 3.1 behavior is frozen. Stage 3.2 must extend the accepted runtime without
+silently weakening Stage 3.1 invariants. Any regression fix must include a
+regression test and re-run the relevant acceptance gates.
