@@ -33,30 +33,53 @@ jobs:
         run: |
           set -Eeuo pipefail
           python - <<'PY'
+          import ast
           from pathlib import Path
 
           source = Path("src/agentforge/application/run_manager.py").read_text()
+          lines = source.splitlines()
+          tree = ast.parse(source)
+          manager = next(
+              node for node in tree.body
+              if isinstance(node, ast.ClassDef) and node.name == "RunManager"
+          )
+          execute = next(
+              node for node in manager.body
+              if isinstance(node, ast.AsyncFunctionDef) and node.name == "execute"
+          )
 
-          # Final, side-effect proposal, READ proposal, and permission-denied
-          # proposal must all discard current-authority model output when cancel
-          # won the Run-row race.
-          required_regions = [
-              ("record_model_final_decision", "record_model_result_discarded_and_cancel_run"),
-              ("record_model_side_effect_prepared", "record_model_result_discarded_and_cancel_run"),
-              ("record_model_tool_started", "record_model_result_discarded_and_cancel_run"),
-              ("record_model_tool_denied_and_fail_run", "record_model_result_discarded_and_cancel_run"),
+          # Scope the proof strictly to RunManager.execute().  Earlier versions
+          # accidentally matched same-named ExecutionJournal method definitions.
+          required_calls = [
+              "record_model_final_decision",
+              "record_model_side_effect_prepared",
+              "record_model_tool_started",
+              "record_model_tool_denied_and_fail_run",
           ]
-          for start_token, required in required_regions:
-              start = source.index(start_token)
-              end = source.find("\n            if ", start + len(start_token))
-              if end < 0:
-                  end = min(len(source), start + 2200)
-              region = source[start:end]
-              if 'CANCEL_REQUESTED' not in region or required not in region:
+          for name in required_calls:
+              matches = [
+                  node for node in ast.walk(execute)
+                  if isinstance(node, ast.Call)
+                  and isinstance(node.func, ast.Attribute)
+                  and node.func.attr == name
+              ]
+              if len(matches) != 1:
                   raise SystemExit(
-                      f"model consequence path lacks cancellation discard: {start_token}"
+                      f"expected exactly one RunManager.execute call for {name}, found {len(matches)}"
                   )
-          print("all model consequence paths honor cancellation: PASS")
+              lineno = matches[0].lineno
+              lo = max(execute.lineno - 1, lineno - 6)
+              hi = min(execute.end_lineno or len(lines), lineno + 34)
+              region = "\n".join(lines[lo:hi])
+              if "CANCEL_REQUESTED" not in region:
+                  raise SystemExit(
+                      f"model consequence path lacks CANCEL_REQUESTED fence: {name}"
+                  )
+              if "record_model_result_discarded_and_cancel_run" not in region:
+                  raise SystemExit(
+                      f"model consequence path lacks cancellation discard: {name}"
+                  )
+          print("all RunManager.execute model consequence paths honor cancellation: PASS")
           PY
 
       - name: Prove cancellation does not rollback EXECUTING action
