@@ -7,3 +7,5 @@ Retry after aligning integration import anchors.
 Retry after Ruff-clean import formatting.
 
 Retry after canonical Ruff formatting step.
+
+Retry after commit-staging fix; candidate semantics unchanged.
