@@ -358,6 +358,7 @@ class ExecutionJournal(ExecutionRecorder):
         if call.status is not ToolCallStatus.DENIED:
             raise ValueError("denied tool persistence requires a DENIED ToolCall")
         self._assert_no_active_tool_calls(run.id)
+        self._assert_deadline_not_expired(run.id)
         self._persist_completed_invocation(invocation)
         self._assert_no_started_model_invocations(run.id)
         self.events.append(
@@ -728,13 +729,23 @@ class RunManager:
             except PermissionError as exc:
                 call = ToolCall.denied_from_proposal(proposal, error=str(exc))
                 run.fail(f"tool {proposal.tool_name} rejected: {exc}")
-                await recorder.record_model_tool_denied_and_fail_run(
-                    invocation,
-                    proposal,
-                    call,
-                    run,
-                    expected_generation=expected_generation,
-                )
+                try:
+                    await recorder.record_model_tool_denied_and_fail_run(
+                        invocation,
+                        proposal,
+                        call,
+                        run,
+                        expected_generation=expected_generation,
+                    )
+                except BusinessProgressionBlockedError as blocked:
+                    run.failure_reason = blocked.failure_reason
+                    await recorder.record_model_result_discarded_and_fail_run(
+                        invocation,
+                        run,
+                        blocked.failure_reason,
+                        expected_generation=expected_generation,
+                    )
+                    raise RunExecutionFailedError(run.failure_reason) from blocked
                 raise RunExecutionFailedError(run.failure_reason) from exc
 
             call = prepared.call
