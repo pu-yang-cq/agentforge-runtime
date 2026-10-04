@@ -1,0 +1,6 @@
+Stage 3.1 V1.0-RC3 acceptance payload
+
+f0fb353981cc27060f83c4aafa949f9dd4feb57a5b5263878ca1231e2ad582c4  agentforge-stage3.1-v1.0-rc3-clean.tar.gz
+
+Derived from RC2 only by the target-validated mypy/package fix.
+No dependency change; reviewed uv.lock remains unchanged.
