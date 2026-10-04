@@ -48,6 +48,14 @@ class ExecutionRecorder(Protocol):
         expected_generation: int,
     ) -> None: ...
 
+    async def record_recovered_read_blocked_and_fail_run(
+        self,
+        call: ToolCall,
+        run: Run,
+        *,
+        expected_generation: int,
+    ) -> None: ...
+
     async def record_run_started(self, run: Run) -> None: ...
 
     async def begin_model_invocation(
@@ -86,6 +94,15 @@ class ExecutionRecorder(Protocol):
         expected_generation: int,
     ) -> None: ...
 
+    async def record_model_result_discarded_and_fail_run(
+        self,
+        invocation: ModelInvocation,
+        run: Run,
+        reason: str,
+        *,
+        expected_generation: int,
+    ) -> None: ...
+
     async def record_model_failed_and_fail_run(
         self,
         invocation: ModelInvocation,
@@ -111,6 +128,14 @@ class ExecutionRecorder(Protocol):
     ) -> None: ...
 
     async def record_run_failed(self, run: Run, *, expected_generation: int) -> None: ...
+
+    async def record_run_yielded(
+        self,
+        run: Run,
+        *,
+        delay_seconds: int,
+        expected_generation: int,
+    ) -> None: ...
 
 
 class ExecutionRecorderFactory(Protocol):
