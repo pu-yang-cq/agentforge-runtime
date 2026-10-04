@@ -2593,7 +2593,10 @@ async def test_authoritative_reconciliation_not_executed_requeues_non_idempotent
     assert run.status is RunStatus.QUEUED
     assert run.queue_reason is QueueReason.RETRY
     assert len(journal.reconciliation_attempts) == 1
-    assert journal.reconciliation_attempts[0].business_result is ReconciliationBusinessResult.NOT_EXECUTED
+    assert (
+        journal.reconciliation_attempts[0].business_result
+        is ReconciliationBusinessResult.NOT_EXECUTED
+    )
 
 
 @pytest.mark.asyncio
@@ -2921,7 +2924,13 @@ async def test_reconciliation_started_is_durable_before_query_and_can_finalize_s
     side_tool_id = uuid4()
     side_version_id = uuid4()
     async with sessions() as session, session.begin():
-        session.add(ToolDefinitionRow(id=side_tool_id, name="reconcile_commit", description="write"))
+        session.add(
+            ToolDefinitionRow(
+                id=side_tool_id,
+                name="reconcile_commit",
+                description="write",
+            )
+        )
         await session.flush()
         session.add(
             ToolVersionRow(
@@ -3060,7 +3069,13 @@ async def test_reconciliation_retry_survives_deadline_and_exhausts_to_manual_rev
     side_tool_id = uuid4()
     side_version_id = uuid4()
     async with sessions() as session, session.begin():
-        session.add(ToolDefinitionRow(id=side_tool_id, name="reconcile_budget", description="write"))
+        session.add(
+            ToolDefinitionRow(
+                id=side_tool_id,
+                name="reconcile_budget",
+                description="write",
+            )
+        )
         await session.flush()
         session.add(
             ToolVersionRow(
@@ -3198,7 +3213,7 @@ async def test_reconciliation_retry_survives_deadline_and_exhausts_to_manual_rev
 
 
 @pytest.mark.asyncio
-async def test_orphaned_reconciliation_attempt_closes_failed_without_changing_business_truth() -> None:
+async def test_orphaned_reconciliation_attempt_closes_failed_and_preserves_truth() -> None:
     from datetime import UTC, datetime, timedelta
 
     from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode
@@ -3212,7 +3227,13 @@ async def test_orphaned_reconciliation_attempt_closes_failed_without_changing_bu
     side_tool_id = uuid4()
     side_version_id = uuid4()
     async with sessions() as session, session.begin():
-        session.add(ToolDefinitionRow(id=side_tool_id, name="orphan_reconcile", description="write"))
+        session.add(
+            ToolDefinitionRow(
+                id=side_tool_id,
+                name="orphan_reconcile",
+                description="write",
+            )
+        )
         await session.flush()
         session.add(
             ToolVersionRow(
