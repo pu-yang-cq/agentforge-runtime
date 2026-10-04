@@ -1,0 +1,121 @@
+name: Stage 3.2-D2 Safe Retry and Orphan Recovery
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/RUN_STAGE32_D2
+
+permissions:
+  contents: write
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: true
+
+      - name: Apply Stage 3.2-D2 implementation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python scripts/stage32_d2_patch.py
+
+      - name: Canonically format Stage 3.2-D2 candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            -e UV_PROJECT_ENVIRONMENT=/tmp/agentforge-d2-venv \
+            -e UV_CACHE_DIR=/tmp/agentforge-d2-cache \
+            ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim \
+            sh -lc "uv sync --locked --all-groups >/dev/null && uv run --locked ruff format src migrations tests"
+
+      - name: Verify D2 semantic surface
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          grep -R 'SideEffectTransientError' -n src tests
+          grep -R 'record_side_effect_transient_failure' -n src tests
+          grep -R 'LEASE_LOST_RESULT_NOT_DURABLE' -n src tests
+          grep -R 'side_effect_retry_max_attempts' -n src migrations tests
+          grep -R 'ACTION_RETRY_READY' -n src tests
+          test -f migrations/versions/0012_side_effect_retry.py
+          test -f docs/implementation/stage3.2-d1-unknown-boundary.md
+
+      - name: Prove orphan recovery handles side effect before READ recovery
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          source = Path("src/agentforge/infrastructure/db/runtime_store.py").read_text()
+          tree = ast.parse(source)
+          claim = next(
+              node for node in ast.walk(tree)
+              if isinstance(node, ast.AsyncFunctionDef)
+              and node.name == "claim_next_run"
+          )
+          calls = [
+              (node.lineno, node.func.id if isinstance(node.func, ast.Name) else node.func.attr)
+              for node in ast.walk(claim)
+              if isinstance(node, ast.Call)
+              and isinstance(node.func, (ast.Name, ast.Attribute))
+          ]
+          side = min(line for line, name in calls if name == "_recover_orphaned_side_effect_attempts")
+          read = min(line for line, name in calls if name == "_prepare_orphaned_read_calls_for_retry")
+          if not side < read:
+              raise SystemExit(f"side-effect orphan recovery must precede READ scan: {side}, {read}")
+          print("orphan side-effect stabilization before READ recovery: PASS")
+          PY
+
+      - name: Prove retry requires explicit proven-no-effect signal
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          source = Path("src/agentforge/application/run_manager.py").read_text()
+          tree = ast.parse(source)
+          helper = next(
+              node for node in ast.walk(tree)
+              if isinstance(node, ast.AsyncFunctionDef)
+              and node.name == "_execute_side_effect_action"
+          )
+          text = ast.get_source_segment(source, helper) or ""
+          transient = text.find("except SideEffectTransientError")
+          generic = text.find("except ToolAdapterError")
+          unknown = text.find("record_side_effect_unknown")
+          if min(transient, generic, unknown) < 0:
+              raise SystemExit("missing D2 side-effect classification branch")
+          if not transient < generic < unknown:
+              raise SystemExit("safe retry must be narrower than generic ToolAdapterError")
+          print("explicit proven-no-effect retry signal ordering: PASS")
+          PY
+
+      - name: Run Stage 3.2-D2 target gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ./scripts/validate_stage31_containerized.sh
+
+      - name: Commit Stage 3.2-D2 only if green
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "agentforge-stage32-bot"
+          git config user.email "agentforge-stage32-bot@users.noreply.github.com"
+          git rm scripts/stage32_d2_patch.py
+          git add src migrations tests
+          git diff --cached --check
+          git commit -m "feat(runtime): add safe side-effect retry and orphan recovery"
+          git push origin HEAD:main
