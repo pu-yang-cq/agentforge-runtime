@@ -7,3 +7,5 @@ Approved uv.lock SHA-256:
 ea589824df68c1412a9ba797f673cf4110e122540a06e02ffcf15bb3e4fa406a
 
 RC2 reason: exact Ruff-only repair from first real acceptance failure.
+
+Run V1.0-RC3 full target acceptance after promoted typing/package fix.
