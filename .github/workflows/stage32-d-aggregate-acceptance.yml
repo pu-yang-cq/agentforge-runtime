@@ -1,0 +1,190 @@
+name: Stage 3.2-D Aggregate Acceptance
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/RUN_STAGE32_D_AGGREGATE_ACCEPTANCE
+
+permissions:
+  contents: read
+
+jobs:
+  accept:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Verify all D slices are frozen
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f docs/implementation/stage3.2-d1-unknown-boundary.md
+          test -f docs/implementation/stage3.2-d2-safe-retry-orphan.md
+          test -f docs/implementation/stage3.2-d3-reconciliation.md
+          test -f migrations/versions/0011_side_effect_unknown.py
+          test -f migrations/versions/0012_side_effect_retry.py
+          test -f migrations/versions/0013_reconciliation.py
+
+      - name: Prove UNKNOWN cannot jump directly to physical retry
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          rm = Path("src/agentforge/application/run_manager.py").read_text()
+          exec_start = rm.index("async def execute(", rm.index("class RunManager"))
+          body = rm[exec_start:]
+          reconcile_load = body.index("load_reconciliation_external_action")
+          ready_load = body.index("load_ready_external_action")
+          model_start = body.index("begin_model_invocation")
+          if not reconcile_load < ready_load < model_start:
+              raise SystemExit(
+                  "unresolved action reconciliation must precede READY retry and model reasoning"
+              )
+
+          recorder = Path("src/agentforge/infrastructure/db/execution_recorder.py").read_text()
+          result_start = recorder.index("async def record_reconciliation_result")
+          result_body = recorder[result_start:]
+          if "ReconciliationBusinessResult.NOT_EXECUTED" not in result_body:
+              raise SystemExit("reconciliation result does not gate NOT_EXECUTED retry")
+          if "ExternalActionStatus.READY" not in result_body:
+              raise SystemExit("reconciliation has no explicit transition back to READY")
+          print("UNKNOWN -> reconciliation -> explicit safe retry only: PASS")
+          PY
+
+      - name: Prove stable logical action identity across D1-D3
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          coordinator = Path("src/agentforge/runtime/tool_coordinator.py").read_text()
+          recorder = Path("src/agentforge/infrastructure/db/execution_recorder.py").read_text()
+
+          reconcile_start = coordinator.index("def prepare_reconciliation")
+          reconcile_end = coordinator.index("def prepare_recovered_side_effect", reconcile_start)
+          reconcile = coordinator[reconcile_start:reconcile_end]
+          for token in ["action.operation_id", "snapshot.arguments", "snapshot.credential_ref"]:
+              if token not in reconcile:
+                  raise SystemExit(f"reconciliation does not preserve durable identity: {token}")
+
+          result_start = recorder.index("async def record_reconciliation_result")
+          result = recorder[result_start:]
+          forbidden = ["ActionSnapshotRow(", "ExternalActionRow(", "operation_id=uuid4()"]
+          for token in forbidden:
+              if token in result:
+                  raise SystemExit(f"reconciliation result recreates logical action identity: {token}")
+          print("stable ExternalAction/ActionSnapshot/operation_id: PASS")
+          PY
+
+      - name: Prove D1 ambiguity remains fail-safe after D2-D3
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          source = Path("src/agentforge/application/run_manager.py").read_text()
+          tree = ast.parse(source)
+          helper = next(
+              node for node in ast.walk(tree)
+              if isinstance(node, ast.AsyncFunctionDef)
+              and node.name == "_execute_side_effect_action"
+          )
+          text = ast.get_source_segment(source, helper) or ""
+          required = [
+              "SIDE_EFFECT_POSSIBLE_EXECUTION",
+              "SIDE_EFFECT_UNCLASSIFIED_EXCEPTION_AFTER_COMMIT",
+              "record_side_effect_unknown",
+          ]
+          for token in required:
+              if token not in text:
+                  raise SystemExit(f"D1 ambiguity regression: {token}")
+          transient = text.find("except SideEffectTransientError")
+          generic = text.find("except ToolAdapterError")
+          fallback = text.find("except Exception")
+          if not 0 <= transient < generic < fallback:
+              raise SystemExit("D2 safe retry classification broadened over D1 ambiguity")
+          print("D1 UNKNOWN semantics preserved: PASS")
+          PY
+
+      - name: Prove orphan side-effect and reconciliation recovery remain distinct
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          source = Path("src/agentforge/infrastructure/db/runtime_store.py").read_text()
+          side_start = source.index("async def _recover_orphaned_side_effect_attempts")
+          recon_start = source.index("async def _recover_orphaned_reconciliation_attempts")
+          read_start = source.index("async def _prepare_orphaned_read_calls_for_retry")
+          side = source[side_start:recon_start]
+          recon = source[recon_start:read_start]
+
+          for token in [
+              "ToolExecutionAttemptStatus.UNKNOWN",
+              "LEASE_LOST_RESULT_NOT_DURABLE",
+              "ExternalActionStatus.UNKNOWN",
+              "ToolCallStatus.UNRESOLVED",
+          ]:
+              if token not in side:
+                  raise SystemExit(f"side-effect orphan regression: {token}")
+
+          for token in [
+              "ReconciliationAttemptStatus.FAILED",
+              '"LEASE_LOST"',
+          ]:
+              if token not in recon:
+                  raise SystemExit(f"reconciliation orphan regression: {token}")
+          if "ExternalActionStatus.SUCCEEDED" in recon or "ExternalActionStatus.FAILED" in recon:
+              raise SystemExit("reconciliation lease loss must not decide business truth")
+          print("distinct orphan recovery semantics: PASS")
+          PY
+
+      - name: Prove D aggregate still stops before E
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          paths = [
+              Path("src/agentforge/domain/models.py"),
+              Path("src/agentforge/infrastructure/db/models.py"),
+              Path("src/agentforge/application/ports.py"),
+              Path("src/agentforge/infrastructure/db/execution_recorder.py"),
+              Path("src/agentforge/api/app.py"),
+          ]
+          text = "\n".join(path.read_text() for path in paths)
+          for token in [
+              "class ActionResolution",
+              "ActionResolutionRow",
+              "resolve_action",
+              "cancel_requested",
+          ]:
+              if token in text:
+                  raise SystemExit(f"Stage 3.2-D crossed E boundary: {token}")
+          print("Stage 3.2-E remains locked: PASS")
+          PY
+
+      - name: Verify D acceptance evidence and regression cases
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          grep -R 'test_side_effect_possible_execution_becomes_unknown_and_stops_reasoning' -n tests
+          grep -R 'test_safe_side_effect_retry_reuses_operation_id_and_next_attempt_number' -n tests
+          grep -R 'test_orphaned_side_effect_attempt_becomes_unknown_before_recovery_progression' -n tests
+          grep -R 'reconciliation' -n tests/unit/test_run_manager.py | head -n 30
+          grep -R 'reconciliation' -n tests/integration/test_postgres_runtime.py | head -n 40
+
+      - name: Run Stage 3.2-D aggregate regression gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ./scripts/validate_stage31_containerized.sh
