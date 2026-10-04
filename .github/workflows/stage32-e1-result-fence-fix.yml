@@ -1,0 +1,109 @@
+name: Stage 3.2-E1 Result Fence Fix
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/RUN_STAGE32_E1_RESULT_FENCE_FIX
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: true
+
+      - name: Apply E1 result fence fix
+        run: |
+          set -Eeuo pipefail
+          python scripts/stage32_e1_result_fence_fix.py
+
+      - name: Format candidate
+        run: |
+          set -Eeuo pipefail
+          docker run --rm \
+            -v "$PWD:/workspace" -w /workspace \
+            -e UV_PROJECT_ENVIRONMENT=/tmp/agentforge-e1result-venv \
+            -e UV_CACHE_DIR=/tmp/agentforge-e1result-cache \
+            ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim \
+            sh -lc "uv sync --locked --all-groups >/dev/null && uv run --locked ruff format src tests"
+
+      - name: Prove cancel suppresses business retry
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          source = Path("src/agentforge/infrastructure/db/execution_recorder.py").read_text()
+          for name in ["record_side_effect_transient_failure", "record_read_transient_failure"]:
+              start = source.index(f"async def {name}")
+              end = source.index("\n    async def ", start + 10)
+              body = source[start:end]
+              if "cancel_requested" not in body or "RunStatus.CANCELLED" not in body:
+                  raise SystemExit(f"cancel result fence missing from {name}")
+              cancel_pos = body.index("cancel_requested")
+              retry_pos = body.index("retry_allowed")
+              if cancel_pos >= retry_pos:
+                  raise SystemExit(f"{name} evaluates retry before cancellation")
+          print("cancel suppresses READ and side-effect retry: PASS")
+          PY
+
+      - name: Prove reconciliation cannot reopen cancelled business work
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          source = Path("src/agentforge/infrastructure/db/execution_recorder.py").read_text()
+          start = source.index("async def record_reconciliation_result")
+          end = source.index("\n    async def ", start + 10)
+          body = source[start:end]
+          required = [
+              "run_row.cancel_requested",
+              "RunStatus.CANCELLED",
+              "CANCEL_REQUESTED_RECONCILED_NOT_EXECUTED",
+              "ExternalActionStatus.ABORTED",
+          ]
+          for token in required:
+              if token not in body:
+                  raise SystemExit(f"reconciliation cancel fence missing: {token}")
+          print("reconciliation NOT_EXECUTED cannot reopen business work: PASS")
+          PY
+
+      - name: Prove in-flight failure facts do not defeat cancellation
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          source = Path("src/agentforge/infrastructure/db/execution_recorder.py").read_text()
+          for name in [
+              "record_model_failed_and_fail_run",
+              "record_side_effect_definite_failure_and_fail_run",
+              "record_tool_failed_and_fail_run",
+          ]:
+              start = source.index(f"async def {name}")
+              end = source.index("\n    async def ", start + 10)
+              body = source[start:end]
+              if "cancel_requested" not in body or "RunStatus.CANCELLED" not in body:
+                  raise SystemExit(f"failure/cancel serialization missing from {name}")
+          print("in-flight failure evidence preserves cancellation authority: PASS")
+          PY
+
+      - name: Run full E1 regression
+        run: |
+          set -Eeuo pipefail
+          ./scripts/validate_stage31_containerized.sh
+
+      - name: Commit only if green
+        run: |
+          set -Eeuo pipefail
+          git config user.name "agentforge-stage32-bot"
+          git config user.email "agentforge-stage32-bot@users.noreply.github.com"
+          git rm scripts/stage32_e1_result_fence_fix.py
+          git add src
+          git diff --cached --check
+          git commit -m "fix(runtime): fence in-flight results after cancellation"
+          git push origin HEAD:main
