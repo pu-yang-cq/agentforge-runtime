@@ -3,3 +3,5 @@ Run Stage 3.2-A2 durable budget, deadline, consequence-discard, and yield candid
 Retry after static import fixes.
 
 Retry after explicit ToolProposal parent flush.
+
+Adversarial rerun: deadline denial fence, stale precedence, recovered-read usage.
