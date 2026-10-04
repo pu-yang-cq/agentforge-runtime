@@ -229,6 +229,14 @@ replace_once(
 ''',
 )
 
+replace_once(
+    "src/agentforge/application/ports.py",
+    '''        attempt: "ToolExecutionAttempt",
+''',
+    '''        attempt: ToolExecutionAttempt,
+''',
+)
+
 # ---------------------------------------------------------------------------
 # Generic side-effect function adapter for tests/composition; READ FunctionTool
 # remains incapable of accidentally satisfying the side-effect protocol.
@@ -1816,6 +1824,37 @@ async def test_action_commit_budget_block_aborts_ready_action_without_external_i
     assert journal.tool_calls[0].status is ToolCallStatus.NOT_EXECUTED
     assert journal.tool_attempts == []
     assert state.tool_attempts_used == 1
+''',
+)
+
+replace_once(
+    "tests/integration/test_postgres_runtime.py",
+    '''from agentforge.application.errors import (
+    BusinessProgressionBlockedError,
+    IdempotencyConflictError,
+    StaleExecutorError,
+    ToolTransientError,
+)
+''',
+    '''from agentforge.application.errors import (
+    BusinessProgressionBlockedError,
+    IdempotencyConflictError,
+    RunExecutionFailedError,
+    StaleExecutorError,
+    ToolTransientError,
+)
+from agentforge.application.run_manager import RunManager
+''',
+)
+
+replace_once(
+    "tests/integration/test_postgres_runtime.py",
+    '''from agentforge.runtime.fake_model import FinalStep, ScriptedFakeModel, ToolStep
+from agentforge.runtime.tool_coordinator import ToolCoordinator
+''',
+    '''from agentforge.runtime.fake_model import FinalStep, ScriptedFakeModel, ToolStep
+from agentforge.runtime.native_runner import NativeRunner
+from agentforge.runtime.tool_coordinator import ToolCoordinator
 ''',
 )
 
