@@ -1,0 +1,75 @@
+name: Stage 3.2-C Aggregate Acceptance
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/RUN_STAGE32_C_AGGREGATE
+
+permissions:
+  contents: read
+
+jobs:
+  accept:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Verify accepted B + C1 surfaces
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f docs/implementation/stage3.2-b-accepted.md
+          test -f docs/implementation/stage3.2-c1-action-commit-boundary.md
+          grep -R 'record_side_effect_attempt_started' -n src/agentforge
+          grep -R 'ACTION_COMMITTED' -n src/agentforge
+          grep -R 'SideEffectInvocation' -n src/agentforge
+          grep -R 'load_ready_external_action' -n src/agentforge
+          test ! -f scripts/stage32_c1_patch.py
+
+      - name: Prove Action Commit precedes external adapter invocation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          path = Path("src/agentforge/application/run_manager.py")
+          source = path.read_text()
+          tree = ast.parse(source)
+          helper = next(
+              node for node in ast.walk(tree)
+              if isinstance(node, ast.AsyncFunctionDef)
+              and node.name == "_execute_side_effect_action"
+          )
+
+          calls = []
+          for node in ast.walk(helper):
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                  calls.append((node.lineno, node.func.attr))
+
+          commit = min(line for line, name in calls if name == "record_side_effect_attempt_started")
+          effect = min(line for line, name in calls if name == "execute_side_effect")
+          success = min(line for line, name in calls if name == "record_side_effect_succeeded")
+          if not commit < effect < success:
+              raise SystemExit(f"invalid C ordering: {commit}, {effect}, {success}")
+          print("Action Commit -> external effect -> durable success ordering: PASS")
+          PY
+
+      - name: Prove C1 semantic regression cases exist
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          grep -R 'test_action_commit_is_visible_before_physical_side_effect' -n tests
+          grep -R 'test_ready_action_recovery_uses_same_operation_id_without_model_reproposal' -n tests
+          grep -R 'test_action_commit_deadline_block_aborts_ready_action_without_external_call' -n tests
+          grep -R 'test_action_commit_budget_block_aborts_ready_action_without_external_io' -n tests
+          grep -R 'test_action_commit_is_durable_before_side_effect_adapter_call' -n tests
+
+      - name: Run Stage 3.2-C aggregate target gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ./scripts/validate_stage31_containerized.sh
