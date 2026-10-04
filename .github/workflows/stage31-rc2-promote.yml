@@ -1,0 +1,164 @@
+name: Stage 3.1 RC2 Promotion
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/PROMOTE_RC2
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: true
+
+      - name: Reconstruct RC1 and apply reviewed Ruff-only repair
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/agentforge-rc2
+          mkdir -p /tmp/agentforge-rc2
+          cat rc/rc1.part*.b64 | base64 -d > /tmp/agentforge-rc1.tar.gz
+          echo "20a19cd990dbf121cecc308e446d322432ab41ad85d2255f57695e3f2cb5f05d  /tmp/agentforge-rc1.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/agentforge-rc1.tar.gz -C /tmp/agentforge-rc2
+          cp uv.lock /tmp/agentforge-rc2/uv.lock
+
+          docker run --rm \
+            -v /tmp/agentforge-rc2:/workspace \
+            -w /workspace \
+            ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim \
+            sh -lc '
+              set -eu
+              export UV_CACHE_DIR=/tmp/uv-cache
+              uv sync --locked --all-groups
+              uv run --locked ruff check --fix --unsafe-fixes . || true
+              uv run --locked ruff format .
+              rm -rf .venv .ruff_cache
+            '
+
+          python - <<'PY'
+          from pathlib import Path
+
+          root = Path("/tmp/agentforge-rc2")
+          integration = root / "tests/integration/test_postgres_runtime.py"
+          text = integration.read_text()
+          if not text.startswith("# ruff: noqa: E402\n"):
+              integration.write_text("# ruff: noqa: E402\n\n" + text)
+
+          readme = root / "README.md"
+          readme.write_text(readme.read_text().replace("V1.0-RC1", "V1.0-RC2"))
+
+          review = root / "docs/reviews/stage3.1-v1.0-rc2-review.md"
+          review.parent.mkdir(parents=True, exist_ok=True)
+          review.write_text("""# Stage 3.1 V1.0-RC2 Review
+
+## Trigger
+
+RC2 exists only because the first real target acceptance run exposed a Ruff quality-gate failure.
+No new product capability was added.
+
+## Real failure evidence
+
+GitHub Actions run `37178965338` reached the isolated Python 3.14 + PostgreSQL 18 target gate and failed during Ruff lint with 22 findings.
+
+Root causes:
+
+- unused imports in two Alembic revisions and tests/scripts,
+- import-order / formatting issues,
+- one unnecessary explicit UTF-8 argument to `str.encode`,
+- two line-length issues in acceptance tests,
+- intentional delayed imports in `tests/integration/test_postgres_runtime.py` reported as E402.
+
+## Repair
+
+The same pinned target Ruff generated a mechanical repair proposal. The patch was reviewed before promotion.
+Changes are limited to formatting/import cleanup plus a file-level `# ruff: noqa: E402` on the PostgreSQL integration module.
+The E402 suppression is intentional because the module must validate/skip on missing `psycopg` and test database configuration before importing AgentForge database modules.
+
+No Run state-machine transition, SQL predicate, transaction boundary, lease/fencing rule, recovery rule, migration operation, or tool/model execution semantic was changed.
+
+## Local regression
+
+- unit/contract tests: 49 passed
+- compileall: passed
+- integration suite: still reserved for real PostgreSQL 18 target acceptance
+
+## Gate
+
+Stage 3.1 remains NOT ACCEPTED until RC2 passes the full remote Python 3.14 + PostgreSQL 18 acceptance workflow.
+Stage 3.2 remains locked.
+""")
+          PY
+
+      - name: Verify RC2 quality before packaging
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm \
+            -v /tmp/agentforge-rc2:/workspace \
+            -w /workspace \
+            ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim \
+            sh -lc '
+              set -eu
+              export UV_CACHE_DIR=/tmp/uv-cache
+              uv sync --locked --all-groups
+              uv run --locked ruff check .
+              uv run --locked ruff format --check .
+              PYTHONPATH=src uv run --locked pytest -q tests/unit
+              python -m compileall -q src apps tests
+              rm -rf .venv .ruff_cache .pytest_cache
+            '
+
+      - name: Build and verify deterministic RC2 source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -f /tmp/agentforge-rc2/uv.lock
+          find /tmp/agentforge-rc2 -type d \( -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache -o -name .ruff_cache -o -name .venv \) -prune -exec rm -rf {} +
+          find /tmp/agentforge-rc2 -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+          (
+            cd /tmp/agentforge-rc2
+            tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+              --exclude='./uv.lock' \
+              --exclude='./.pytest_cache' \
+              --exclude='./.mypy_cache' \
+              --exclude='./.ruff_cache' \
+              --exclude='./.venv' \
+              --exclude='*/__pycache__/*' \
+              --exclude='*.pyc' \
+              -cf - .
+          ) | gzip -n > /tmp/agentforge-rc2-clean.tar.gz
+          echo "5dade13189461557596a378a70f8f469d06bd48e24bbe6e41abfb1b092b7bc05  /tmp/agentforge-rc2-clean.tar.gz" | sha256sum -c -
+
+      - name: Commit exact RC2 acceptance payload
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -f rc/rc2.part*.b64
+          base64 -w0 /tmp/agentforge-rc2-clean.tar.gz > /tmp/rc2.b64
+          split -b 20000 -d -a 3 /tmp/rc2.b64 /tmp/rc2.part
+          i=0
+          for part in /tmp/rc2.part*; do
+            printf -v n '%03d' "$i"
+            cp "$part" "rc/rc2.part${n}.b64"
+            i=$((i + 1))
+          done
+          cat > rc/RC2_SOURCE_SHA256 <<'EOF'
+          Stage 3.1 V1.0-RC2 acceptance payload
+
+          5dade13189461557596a378a70f8f469d06bd48e24bbe6e41abfb1b092b7bc05  agentforge-stage3.1-v1.0-rc2-clean.tar.gz
+
+          RC2 is derived only from the first real acceptance Ruff failure.
+          No dependency change; reviewed uv.lock remains unchanged.
+          EOF
+          git config user.name "agentforge-stage31-bot"
+          git config user.email "agentforge-stage31-bot@users.noreply.github.com"
+          git add rc/rc2.part*.b64 rc/RC2_SOURCE_SHA256
+          git commit -m "fix(rc): promote Stage 3.1 V1.0-RC2 Ruff repair"
+          git push origin HEAD:main
