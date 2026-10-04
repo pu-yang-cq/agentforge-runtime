@@ -24,6 +24,18 @@ jobs:
           set -Eeuo pipefail
           python scripts/stage32_a1_patch.py
 
+      - name: Canonically format Stage 3.2-A1 candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            -e UV_PROJECT_ENVIRONMENT=/tmp/agentforge-a1-venv \
+            -e UV_CACHE_DIR=/tmp/agentforge-a1-cache \
+            ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim \
+            sh -lc "uv sync --locked --all-groups >/dev/null && uv run --locked ruff format src migrations tests"
+
       - name: Run Stage 3.2-A1 target gate
         shell: bash
         run: |
