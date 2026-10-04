@@ -1,0 +1,181 @@
+name: Stage 3.1 RC4 Promotion
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/PROMOTE_RC4
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: true
+
+      - name: Reconstruct exact RC3 and apply migration-width repair
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/agentforge-rc4
+          mkdir -p /tmp/agentforge-rc4
+          cat rc/rc3.part*.b64 | base64 -d > /tmp/agentforge-rc3.tar.gz
+          echo "f0fb353981cc27060f83c4aafa949f9dd4feb57a5b5263878ca1231e2ad582c4  /tmp/agentforge-rc3.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/agentforge-rc3.tar.gz -C /tmp/agentforge-rc4
+          cp uv.lock /tmp/agentforge-rc4/uv.lock
+
+          python - <<'PY'
+          from pathlib import Path
+
+          root = Path("/tmp/agentforge-rc4")
+          old = "0004_active_progression_invariants"
+          new = "0004_active_progression"
+
+          targets = [
+              root / "migrations/versions/0004_active_progression_invariants.py",
+              root / "migrations/versions/0005_run_terminal_shape.py",
+          ]
+          for path in targets:
+              text = path.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(
+                      f"{path.name}: expected exactly one {old!r}, found {count}"
+                  )
+              path.write_text(text.replace(old, new))
+
+          test = root / "tests/unit/test_alembic_revision_width.py"
+          test.write_text(
+              "import ast\n"
+              "from pathlib import Path\n\n\n"
+              "def _revision_from(path: Path) -> str:\n"
+              "    tree = ast.parse(path.read_text())\n"
+              "    for node in tree.body:\n"
+              "        if isinstance(node, ast.Assign):\n"
+              "            is_revision = any(\n"
+              "                isinstance(target, ast.Name) and target.id == 'revision'\n"
+              "                for target in node.targets\n"
+              "            )\n"
+              "            if (\n"
+              "                is_revision\n"
+              "                and isinstance(node.value, ast.Constant)\n"
+              "                and isinstance(node.value.value, str)\n"
+              "            ):\n"
+              "                return node.value.value\n"
+              "        if (\n"
+              "            isinstance(node, ast.AnnAssign)\n"
+              "            and isinstance(node.target, ast.Name)\n"
+              "            and node.target.id == 'revision'\n"
+              "            and isinstance(node.value, ast.Constant)\n"
+              "            and isinstance(node.value.value, str)\n"
+              "        ):\n"
+              "            return node.value.value\n"
+              "    raise AssertionError(f'no revision id found in {path}')\n\n\n"
+              "def test_alembic_revision_ids_fit_default_version_column() -> None:\n"
+              "    root = Path(__file__).resolve().parents[2] / 'migrations' / 'versions'\n"
+              "    migrations = sorted(root.glob('*.py'))\n"
+              "    assert migrations\n"
+              "    for migration in migrations:\n"
+              "        revision = _revision_from(migration)\n"
+              "        assert len(revision) <= 32, (migration.name, revision, len(revision))\n"
+          )
+
+          readme = root / "README.md"
+          readme.write_text(readme.read_text().replace("V1.0-RC3", "V1.0-RC4"))
+
+          review = root / "docs/reviews/stage3.1-v1.0-rc4-review.md"
+          review.write_text(
+              "# Stage 3.1 V1.0-RC4 Review\n\n"
+              "## Trigger\n\n"
+              "Real PostgreSQL 18 acceptance run 37184056828 passed Python 3.14, "
+              "Ruff, formatting, mypy, project import, and PostgreSQL-major checks, "
+              "then failed during Alembic online migration.\n\n"
+              "## Root cause\n\n"
+              "Alembic's default version table stores version_num in VARCHAR(32). "
+              "Revision id 0004_active_progression_invariants exceeded 32 characters, "
+              "so PostgreSQL rejected the version-table update after migration 0004.\n\n"
+              "## Repair\n\n"
+              "- rename only the revision identifier to 0004_active_progression;\n"
+              "- update migration 0005 down_revision accordingly;\n"
+              "- add a regression test requiring every Alembic revision id to fit "
+              "the default 32-character version column.\n\n"
+              "No migration operation, table/index/check definition, runtime state "
+              "transition, SQL predicate, transaction boundary, lease/fencing rule, "
+              "recovery rule, tool/model semantic, or dependency was changed.\n\n"
+              "Stage 3.1 remains NOT ACCEPTED until the immutable RC4 payload passes "
+              "the full target acceptance workflow.\n"
+          )
+          PY
+
+      - name: Run full target gate on RC4 candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd /tmp/agentforge-rc4
+          ./scripts/validate_stage31_containerized.sh
+
+      - name: Clean candidate and build deterministic RC4 twice
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -f /tmp/agentforge-rc4/uv.lock
+          sudo rm -rf \
+            /tmp/agentforge-rc4/.venv \
+            /tmp/agentforge-rc4/.ruff_cache \
+            /tmp/agentforge-rc4/.pytest_cache \
+            /tmp/agentforge-rc4/.mypy_cache
+          sudo find /tmp/agentforge-rc4 -type d -name '__pycache__' -prune -exec rm -rf {} +
+          sudo find /tmp/agentforge-rc4 -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+          build() {
+            out="$1"
+            (cd /tmp/agentforge-rc4 && \
+              tar --sort=name \
+                  --mtime='UTC 1970-01-01' \
+                  --owner=0 --group=0 --numeric-owner \
+                  --mode='u+rwX,go+rX,go-w' \
+                  --exclude='./uv.lock' \
+                  --exclude='./.pytest_cache' \
+                  --exclude='./.mypy_cache' \
+                  --exclude='./.ruff_cache' \
+                  --exclude='./.venv' \
+                  --exclude='*/__pycache__/*' \
+                  --exclude='*.pyc' \
+                  -cf - .) | gzip -n > "$out"
+          }
+          build /tmp/agentforge-rc4-a.tar.gz
+          build /tmp/agentforge-rc4-b.tar.gz
+          cmp /tmp/agentforge-rc4-a.tar.gz /tmp/agentforge-rc4-b.tar.gz
+          sha256sum /tmp/agentforge-rc4-a.tar.gz | tee /tmp/agentforge-rc4.sha256
+
+      - name: Commit exact RC4 acceptance payload
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          digest="$(awk '{print $1}' /tmp/agentforge-rc4.sha256)"
+          rm -f rc/rc4.part*.b64
+          base64 -w0 /tmp/agentforge-rc4-a.tar.gz > /tmp/rc4.b64
+          split -b 20000 -d -a 3 /tmp/rc4.b64 /tmp/rc4.part
+          i=0
+          for part in /tmp/rc4.part*; do
+            printf -v n '%03d' "$i"
+            cp "$part" "rc/rc4.part${n}.b64"
+            i=$((i + 1))
+          done
+          {
+            echo "Stage 3.1 V1.0-RC4 acceptance payload"
+            echo
+            echo "$digest  agentforge-stage3.1-v1.0-rc4-clean.tar.gz"
+            echo
+            echo "Derived from RC3 only by the PostgreSQL-confirmed Alembic revision-width repair."
+            echo "No dependency change; reviewed uv.lock remains unchanged."
+          } > rc/RC4_SOURCE_SHA256
+          git config user.name "agentforge-stage31-bot"
+          git config user.email "agentforge-stage31-bot@users.noreply.github.com"
+          git add rc/rc4.part*.b64 rc/RC4_SOURCE_SHA256
+          git commit -m "fix(rc): promote Stage 3.1 V1.0-RC4 migration-width repair"
+          git push origin HEAD:main
