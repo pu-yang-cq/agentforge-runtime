@@ -83,6 +83,9 @@ def agent_version_from_parts(
             int,
             int,
             int,
+            int,
+            int,
+            int,
         ]
     ],
 ) -> AgentVersion:
@@ -107,6 +110,9 @@ def agent_version_from_parts(
                 side_effect_retry_max_attempts=side_effect_retry_max_attempts,
                 side_effect_retry_initial_backoff_seconds=side_effect_retry_initial_backoff_seconds,
                 side_effect_retry_max_backoff_seconds=side_effect_retry_max_backoff_seconds,
+                reconciliation_max_attempts=reconciliation_max_attempts,
+                reconciliation_initial_backoff_seconds=reconciliation_initial_backoff_seconds,
+                reconciliation_max_backoff_seconds=reconciliation_max_backoff_seconds,
             )
             for (
                 tool_version_id,
@@ -123,6 +129,9 @@ def agent_version_from_parts(
                 side_effect_retry_max_attempts,
                 side_effect_retry_initial_backoff_seconds,
                 side_effect_retry_max_backoff_seconds,
+                reconciliation_max_attempts,
+                reconciliation_initial_backoff_seconds,
+                reconciliation_max_backoff_seconds,
             ) in bindings
         ),
     )

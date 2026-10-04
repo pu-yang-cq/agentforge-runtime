@@ -5,10 +5,12 @@ from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
 from agentforge.domain.actions import ActionSnapshot, ExternalAction
+from agentforge.domain.enums import ReconciliationBusinessResult
 from agentforge.domain.model_contract import ModelRequest, ModelResponse, ModelToolSpec
 from agentforge.domain.models import (
     AgentVersion,
     ModelInvocation,
+    ReconciliationAttempt,
     Run,
     RunMessage,
     RunState,
@@ -52,6 +54,30 @@ class SideEffectTool(Protocol):
     async def invoke_side_effect(self, invocation: SideEffectInvocation) -> Any: ...
 
 
+@dataclass(frozen=True, slots=True)
+class ReconciliationInvocation:
+    operation_id: UUID
+    arguments: dict[str, Any]
+    credential_ref: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ReconciliationResult:
+    outcome: ReconciliationBusinessResult
+    evidence: dict[str, Any] | None = None
+
+
+@runtime_checkable
+class ReconciliationTool(Protocol):
+    @property
+    def version_id(self) -> UUID: ...
+
+    @property
+    def spec(self) -> ModelToolSpec: ...
+
+    async def reconcile(self, invocation: ReconciliationInvocation) -> ReconciliationResult: ...
+
+
 class ToolRegistry(Protocol):
     def specs(self, bindings: tuple[ToolBinding, ...]) -> tuple[ModelToolSpec, ...]: ...
 
@@ -72,6 +98,56 @@ class ExecutionRecorder(Protocol):
         self,
         run_id: UUID,
     ) -> tuple[ToolCall, ActionSnapshot, ExternalAction] | None: ...
+
+    async def load_reconciliation_external_action(
+        self,
+        run_id: UUID,
+    ) -> tuple[ToolCall, ActionSnapshot, ExternalAction] | None: ...
+
+    async def record_action_manual_review(
+        self,
+        call: ToolCall,
+        action: ExternalAction,
+        run: Run,
+        reason: str,
+        *,
+        expected_generation: int,
+    ) -> None: ...
+
+    async def record_reconciliation_started(
+        self,
+        call: ToolCall,
+        action: ExternalAction,
+        run: Run,
+        *,
+        max_attempts: int,
+        expected_generation: int,
+    ) -> ReconciliationAttempt | None: ...
+
+    async def record_reconciliation_failed(
+        self,
+        action: ExternalAction,
+        attempt: ReconciliationAttempt,
+        run: Run,
+        *,
+        error: str,
+        max_attempts: int,
+        initial_backoff_seconds: int,
+        max_backoff_seconds: int,
+        expected_generation: int,
+    ) -> bool: ...
+
+    async def record_reconciliation_result(
+        self,
+        call: ToolCall,
+        action: ExternalAction,
+        attempt: ReconciliationAttempt,
+        run: Run,
+        result: ReconciliationResult,
+        *,
+        binding: ToolBinding,
+        expected_generation: int,
+    ) -> RunMessage | None: ...
 
     async def record_side_effect_attempt_started(
         self,

@@ -6,7 +6,7 @@ from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
-from agentforge.application.ports import Tool
+from agentforge.application.ports import ReconciliationInvocation, ReconciliationResult, Tool
 from agentforge.domain.model_contract import ModelToolSpec
 from agentforge.domain.models import ToolBinding
 
@@ -83,10 +83,12 @@ class SideEffectFunctionTool:
         description: str,
         input_schema: dict[str, Any],
         func: Callable[[object], Any],
+        reconcile_func: Callable[[object], Any] | None = None,
     ) -> None:
         self._version_id = version_id
         self._spec = ModelToolSpec(name, description, input_schema)
         self._func = func
+        self._reconcile_func = reconcile_func
 
     @property
     def version_id(self) -> UUID:
@@ -105,4 +107,17 @@ class SideEffectFunctionTool:
         value = await asyncio.to_thread(self._func, invocation)
         if inspect.isawaitable(value):
             return await value
+        return value
+
+    async def reconcile(self, invocation: ReconciliationInvocation) -> ReconciliationResult:
+        if self._reconcile_func is None:
+            raise RuntimeError("tool adapter has no reconciliation implementation")
+        if inspect.iscoroutinefunction(self._reconcile_func):
+            value = await self._reconcile_func(invocation)
+        else:
+            value = await asyncio.to_thread(self._reconcile_func, invocation)
+            if inspect.isawaitable(value):
+                value = await value
+        if not isinstance(value, ReconciliationResult):
+            raise TypeError("reconciliation adapter must return ReconciliationResult")
         return value

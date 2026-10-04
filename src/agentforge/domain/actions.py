@@ -171,6 +171,45 @@ class ExternalAction:
         self.status = ExternalActionStatus.ABORTED
         self.current_attempt_id = None
 
+    def start_reconciliation(self) -> None:
+        if self.status not in {
+            ExternalActionStatus.UNKNOWN,
+            ExternalActionStatus.RECONCILING,
+        }:
+            raise ValueError("external action can reconcile only from UNKNOWN/RECONCILING")
+        if self.current_attempt_id is not None:
+            raise ValueError("reconciliation cannot own side-effect current_attempt_id")
+        self.status = ExternalActionStatus.RECONCILING
+
+    def reconcile_succeeded(self) -> None:
+        if self.status is not ExternalActionStatus.RECONCILING:
+            raise ValueError("reconciliation success requires RECONCILING")
+        self.status = ExternalActionStatus.SUCCEEDED
+
+    def reconcile_failed(self) -> None:
+        if self.status is not ExternalActionStatus.RECONCILING:
+            raise ValueError("reconciliation failure requires RECONCILING")
+        self.status = ExternalActionStatus.FAILED
+
+    def reconcile_retry_ready(self) -> None:
+        if self.status is not ExternalActionStatus.RECONCILING:
+            raise ValueError("reconciliation retry-ready requires RECONCILING")
+        self.status = ExternalActionStatus.READY
+
+    def manual_review(self) -> None:
+        if self.status not in {
+            ExternalActionStatus.UNKNOWN,
+            ExternalActionStatus.RECONCILING,
+        }:
+            raise ValueError("manual review requires unresolved action")
+        self.status = ExternalActionStatus.MANUAL_REVIEW
+        self.current_attempt_id = None
+
+    def reconcile_abort_not_executed(self) -> None:
+        if self.status is not ExternalActionStatus.RECONCILING:
+            raise ValueError("reconciliation abort requires RECONCILING")
+        self.status = ExternalActionStatus.ABORTED
+
     def abort(self) -> None:
         if self.status is not ExternalActionStatus.READY or self.current_attempt_id is not None:
             raise ValueError("external action can only abort before Action Commit")

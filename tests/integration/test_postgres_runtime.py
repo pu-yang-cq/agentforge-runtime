@@ -37,6 +37,7 @@ from agentforge.application.errors import (
     ToolAdapterError,
     ToolTransientError,
 )
+from agentforge.application.ports import ReconciliationResult
 from agentforge.application.run_manager import RunManager
 from agentforge.application.worker import CoreWorker
 from agentforge.demo import (
@@ -50,6 +51,8 @@ from agentforge.demo import (
 from agentforge.domain.enums import (
     EventType,
     QueueReason,
+    ReconciliationAttemptStatus,
+    ReconciliationBusinessResult,
     RunStatus,
     ToolCallStatus,
     ToolEffectType,
@@ -65,6 +68,7 @@ from agentforge.infrastructure.db.models import (
     AgentVersionRow,
     AgentVersionToolRow,
     DomainEventRow,
+    ReconciliationAttemptRow,
     RunMessageRow,
     ToolCallRow,
     ToolDefinitionRow,
@@ -3174,4 +3178,458 @@ async def test_orphaned_side_effect_attempt_becomes_unknown_before_recovery_prog
     state_after = await store.load_run_state(created.id)
     assert state_after.model_invocations_used == state_before.model_invocations_used
     assert state_after.tool_attempts_used == state_before.tool_attempts_used
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_started_is_durable_before_query_and_can_finalize_success() -> None:
+    from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode
+    from agentforge.infrastructure.db.models import ExternalActionRow
+
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+
+    side_tool_id = uuid4()
+    side_version_id = uuid4()
+    async with sessions() as session, session.begin():
+        session.add(
+            ToolDefinitionRow(
+                id=side_tool_id,
+                name="reconcile_commit",
+                description="write",
+            )
+        )
+        await session.flush()
+        session.add(
+            ToolVersionRow(
+                id=side_version_id,
+                tool_id=side_tool_id,
+                version_number=1,
+                input_schema={"type": "object"},
+                effect_type=ToolEffectType.WRITE,
+                implementation_ref="tests:reconcile_commit",
+                allow_no_approval_execution=True,
+                reconciliation_mode=ReconciliationMode.AUTHORITATIVE,
+                reconciliation_max_attempts=2,
+                reconciliation_initial_backoff_seconds=0,
+                reconciliation_max_backoff_seconds=0,
+            )
+        )
+        await session.flush()
+        session.add(
+            AgentVersionToolRow(
+                agent_version_id=DEMO_AGENT_VERSION_ID,
+                tool_version_id=side_version_id,
+                tool_alias="reconcile_commit",
+            )
+        )
+
+    async def ambiguous(_invocation):
+        raise ToolAdapterError(
+            "effect may have committed",
+            error_class="RESPONSE_LOST",
+            definite_not_executed=False,
+        )
+
+    observed_started_before_query = False
+
+    async def reconcile(_invocation):
+        nonlocal observed_started_before_query
+        async with sessions() as session:
+            attempt = (
+                await session.execute(
+                    select(ReconciliationAttemptRow).where(
+                        ReconciliationAttemptRow.status == ReconciliationAttemptStatus.STARTED
+                    )
+                )
+            ).scalar_one()
+            action = await session.get(ExternalActionRow, attempt.external_action_id)
+            observed_started_before_query = (
+                action is not None and action.status is ExternalActionStatus.RECONCILING
+            )
+        return ReconciliationResult(
+            ReconciliationBusinessResult.SUCCEEDED,
+            {"resource_id": "R-committed"},
+        )
+
+    registry = InMemoryToolRegistry(
+        [
+            FunctionTool(
+                version_id=DEMO_TOOL_VERSION_ID,
+                name="echo_read",
+                description="read",
+                input_schema={"type": "object"},
+                func=lambda text: {"echo": text},
+            ),
+            SideEffectFunctionTool(
+                version_id=side_version_id,
+                name="reconcile_commit",
+                description="write",
+                input_schema={"type": "object"},
+                func=ambiguous,
+                reconcile_func=reconcile,
+            ),
+        ]
+    )
+    store = PostgresRuntimeStore(sessions)
+    created = await store.create_run(
+        agent_version_id=DEMO_AGENT_VERSION_ID,
+        input_text="reconcile commit boundary",
+        idempotency_key="integration-d3-started-before-query",
+        principal_scope="test-user",
+    )
+    claimed = await store.claim_next_run(worker_id="d3-start", lease_seconds=30)
+    assert claimed is not None
+    version = await store.load_agent_version(DEMO_AGENT_VERSION_ID)
+    manager1 = RunManager(
+        NativeRunner(ScriptedFakeModel([ToolStep("reconcile_commit", {"v": 1})]), registry),
+        ToolCoordinator(registry),
+    )
+    recorder = PostgresExecutionRecorder(
+        sessions,
+        run_id=created.id,
+        generation=claimed.execution_generation,
+    )
+    await manager1.execute(
+        run=claimed,
+        run_state=await store.load_run_state(created.id),
+        agent_version=version,
+        recorder=recorder,
+    )
+
+    manager2 = RunManager(
+        NativeRunner(ScriptedFakeModel([FinalStep("reconciled")]), registry),
+        ToolCoordinator(registry),
+    )
+    assert (
+        await manager2.execute(
+            run=claimed,
+            run_state=await store.load_run_state(created.id),
+            agent_version=version,
+            recorder=recorder,
+        )
+        == "reconciled"
+    )
+    assert observed_started_before_query is True
+
+    async with sessions() as session:
+        attempt = (await session.execute(select(ReconciliationAttemptRow))).scalar_one()
+        action = (await session.execute(select(ExternalActionRow))).scalar_one()
+        call = await session.get(ToolCallRow, action.tool_call_id)
+    assert attempt.status is ReconciliationAttemptStatus.SUCCEEDED
+    assert attempt.business_result is ReconciliationBusinessResult.SUCCEEDED
+    assert action.status is ExternalActionStatus.SUCCEEDED
+    assert call is not None and call.status is ToolCallStatus.SUCCEEDED
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_retry_survives_deadline_and_exhausts_to_manual_review() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode
+    from agentforge.infrastructure.db.models import ExternalActionRow, RunRow
+
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+
+    side_tool_id = uuid4()
+    side_version_id = uuid4()
+    async with sessions() as session, session.begin():
+        session.add(
+            ToolDefinitionRow(
+                id=side_tool_id,
+                name="reconcile_budget",
+                description="write",
+            )
+        )
+        await session.flush()
+        session.add(
+            ToolVersionRow(
+                id=side_version_id,
+                tool_id=side_tool_id,
+                version_number=1,
+                input_schema={"type": "object"},
+                effect_type=ToolEffectType.WRITE,
+                implementation_ref="tests:reconcile_budget",
+                allow_no_approval_execution=True,
+                reconciliation_mode=ReconciliationMode.AUTHORITATIVE,
+                reconciliation_max_attempts=2,
+                reconciliation_initial_backoff_seconds=0,
+                reconciliation_max_backoff_seconds=0,
+            )
+        )
+        await session.flush()
+        session.add(
+            AgentVersionToolRow(
+                agent_version_id=DEMO_AGENT_VERSION_ID,
+                tool_version_id=side_version_id,
+                tool_alias="reconcile_budget",
+            )
+        )
+
+    async def ambiguous(_invocation):
+        raise ToolAdapterError(
+            "maybe committed",
+            error_class="TIMEOUT",
+            definite_not_executed=False,
+        )
+
+    async def reconcile(_invocation):
+        raise RuntimeError("reconciliation transport 503")
+
+    registry = InMemoryToolRegistry(
+        [
+            FunctionTool(
+                version_id=DEMO_TOOL_VERSION_ID,
+                name="echo_read",
+                description="read",
+                input_schema={"type": "object"},
+                func=lambda text: {"echo": text},
+            ),
+            SideEffectFunctionTool(
+                version_id=side_version_id,
+                name="reconcile_budget",
+                description="write",
+                input_schema={"type": "object"},
+                func=ambiguous,
+                reconcile_func=reconcile,
+            ),
+        ]
+    )
+    store = PostgresRuntimeStore(sessions)
+    created = await store.create_run(
+        agent_version_id=DEMO_AGENT_VERSION_ID,
+        input_text="reconciliation safety budget",
+        idempotency_key="integration-d3-safety-budget",
+        principal_scope="test-user",
+    )
+    claimed1 = await store.claim_next_run(worker_id="d3-budget-1", lease_seconds=30)
+    assert claimed1 is not None
+    version = await store.load_agent_version(DEMO_AGENT_VERSION_ID)
+    manager1 = RunManager(
+        NativeRunner(ScriptedFakeModel([ToolStep("reconcile_budget", {})]), registry),
+        ToolCoordinator(registry),
+    )
+    recorder1 = PostgresExecutionRecorder(
+        sessions,
+        run_id=created.id,
+        generation=claimed1.execution_generation,
+    )
+    await manager1.execute(
+        run=claimed1,
+        run_state=await store.load_run_state(created.id),
+        agent_version=version,
+        recorder=recorder1,
+    )
+
+    async with sessions() as session, session.begin():
+        row = await session.get(RunRow, created.id)
+        assert row is not None
+        row.deadline_at = datetime.now(UTC) - timedelta(seconds=1)
+
+    await manager1.execute(
+        run=claimed1,
+        run_state=await store.load_run_state(created.id),
+        agent_version=version,
+        recorder=recorder1,
+    )
+    after_first_reconcile = await store.get_run(created.id)
+    assert after_first_reconcile is not None
+    assert after_first_reconcile.status is RunStatus.QUEUED
+    assert after_first_reconcile.queue_reason is QueueReason.RETRY
+
+    claimed2 = await store.claim_next_run(worker_id="d3-budget-2", lease_seconds=30)
+    assert claimed2 is not None
+    recorder2 = PostgresExecutionRecorder(
+        sessions,
+        run_id=created.id,
+        generation=claimed2.execution_generation,
+    )
+    manager2 = RunManager(
+        NativeRunner(ScriptedFakeModel([FinalStep("must not reason")]), registry),
+        ToolCoordinator(registry),
+    )
+    await manager2.execute(
+        run=claimed2,
+        run_state=await store.load_run_state(created.id),
+        agent_version=version,
+        recorder=recorder2,
+    )
+
+    durable = await store.get_run(created.id)
+    assert durable is not None
+    assert durable.status is RunStatus.WAITING_ACTION_RESOLUTION
+    async with sessions() as session:
+        attempts = (
+            (
+                await session.execute(
+                    select(ReconciliationAttemptRow).order_by(
+                        ReconciliationAttemptRow.attempt_number
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        action = (await session.execute(select(ExternalActionRow))).scalar_one()
+    assert [item.attempt_number for item in attempts] == [1, 2]
+    assert all(item.status is ReconciliationAttemptStatus.FAILED for item in attempts)
+    assert action.status is ExternalActionStatus.MANUAL_REVIEW
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_orphaned_reconciliation_attempt_closes_failed_and_preserves_truth() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode
+    from agentforge.infrastructure.db.models import ExternalActionRow, RunRow
+
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+
+    side_tool_id = uuid4()
+    side_version_id = uuid4()
+    async with sessions() as session, session.begin():
+        session.add(
+            ToolDefinitionRow(
+                id=side_tool_id,
+                name="orphan_reconcile",
+                description="write",
+            )
+        )
+        await session.flush()
+        session.add(
+            ToolVersionRow(
+                id=side_version_id,
+                tool_id=side_tool_id,
+                version_number=1,
+                input_schema={"type": "object"},
+                effect_type=ToolEffectType.WRITE,
+                implementation_ref="tests:orphan_reconcile",
+                allow_no_approval_execution=True,
+                reconciliation_mode=ReconciliationMode.AUTHORITATIVE,
+                reconciliation_max_attempts=2,
+                reconciliation_initial_backoff_seconds=0,
+                reconciliation_max_backoff_seconds=0,
+            )
+        )
+        await session.flush()
+        session.add(
+            AgentVersionToolRow(
+                agent_version_id=DEMO_AGENT_VERSION_ID,
+                tool_version_id=side_version_id,
+                tool_alias="orphan_reconcile",
+            )
+        )
+
+    registry = InMemoryToolRegistry(
+        [
+            FunctionTool(
+                version_id=DEMO_TOOL_VERSION_ID,
+                name="echo_read",
+                description="read",
+                input_schema={"type": "object"},
+                func=lambda text: {"echo": text},
+            ),
+            SideEffectFunctionTool(
+                version_id=side_version_id,
+                name="orphan_reconcile",
+                description="write",
+                input_schema={"type": "object"},
+                func=lambda invocation: {"unused": True},
+                reconcile_func=lambda invocation: ReconciliationResult(
+                    ReconciliationBusinessResult.UNKNOWN
+                ),
+            ),
+        ]
+    )
+    store = PostgresRuntimeStore(sessions)
+    created = await store.create_run(
+        agent_version_id=DEMO_AGENT_VERSION_ID,
+        input_text="orphan reconciliation",
+        idempotency_key="integration-d3-orphan-reconcile",
+        principal_scope="test-user",
+    )
+    claimed1 = await store.claim_next_run(worker_id="d3-orphan-1", lease_seconds=30)
+    assert claimed1 is not None
+    recorder1 = PostgresExecutionRecorder(
+        sessions,
+        run_id=created.id,
+        generation=claimed1.execution_generation,
+    )
+    version = await store.load_agent_version(DEMO_AGENT_VERSION_ID)
+
+    _, invocation = await recorder1.begin_model_invocation(
+        run_id=created.id,
+        invocation_id=uuid4(),
+        expected_generation=claimed1.execution_generation,
+    )
+    invocation.complete("TOOL_PROPOSAL")
+    proposal = ToolProposal.create(
+        run_id=created.id,
+        model_invocation_id=invocation.id,
+        tool_name="orphan_reconcile",
+        arguments={"v": 1},
+    )
+    prepared = ToolCoordinator(registry).prepare_side_effect(
+        proposal=proposal,
+        agent_version=version,
+    )
+    await recorder1.record_model_side_effect_prepared(
+        invocation,
+        proposal,
+        prepared.call,
+        prepared.snapshot,
+        prepared.action,
+        expected_generation=claimed1.execution_generation,
+    )
+    physical = await recorder1.record_side_effect_attempt_started(
+        prepared.call,
+        prepared.action,
+        expected_generation=claimed1.execution_generation,
+    )
+    await recorder1.record_side_effect_unknown(
+        prepared.call,
+        prepared.action,
+        physical,
+        error="ambiguous",
+        error_class="TIMEOUT",
+        outcome_reason="SIDE_EFFECT_POSSIBLE_EXECUTION",
+        expected_generation=claimed1.execution_generation,
+    )
+    unresolved = await recorder1.load_reconciliation_external_action(created.id)
+    assert unresolved is not None
+    call, _snapshot, action = unresolved
+    recon_attempt = await recorder1.record_reconciliation_started(
+        call,
+        action,
+        claimed1,
+        max_attempts=2,
+        expected_generation=claimed1.execution_generation,
+    )
+    assert recon_attempt is not None
+
+    async with sessions() as session, session.begin():
+        row = await session.get(RunRow, created.id)
+        assert row is not None
+        row.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+
+    claimed2 = await store.claim_next_run(worker_id="d3-orphan-2", lease_seconds=30)
+    assert claimed2 is not None
+    async with sessions() as session:
+        durable_attempt = await session.get(ReconciliationAttemptRow, recon_attempt.id)
+        durable_action = (await session.execute(select(ExternalActionRow))).scalar_one()
+    assert durable_attempt is not None
+    assert durable_attempt.status is ReconciliationAttemptStatus.FAILED
+    assert durable_attempt.outcome_reason == "LEASE_LOST"
+    assert durable_action.status is ExternalActionStatus.RECONCILING
+    assert durable_action.current_attempt_id is None
     await engine.dispose()

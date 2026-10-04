@@ -23,6 +23,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from agentforge.domain.enums import (
     ExternalActionStatus,
     QueueReason,
+    ReconciliationAttemptStatus,
+    ReconciliationBusinessResult,
     ReconciliationMode,
     RunStatus,
     ToolCallStatus,
@@ -101,6 +103,18 @@ class ToolVersionRow(Base):
             "side_effect_retry_max_backoff_seconds >= side_effect_retry_initial_backoff_seconds",
             name="ck_tool_versions_side_effect_retry_backoff_order",
         ),
+        CheckConstraint(
+            "reconciliation_max_attempts > 0",
+            name="ck_tool_versions_positive_reconciliation_attempts",
+        ),
+        CheckConstraint(
+            "reconciliation_initial_backoff_seconds >= 0",
+            name="ck_tool_versions_nonnegative_reconciliation_initial_backoff",
+        ),
+        CheckConstraint(
+            "reconciliation_max_backoff_seconds >= reconciliation_initial_backoff_seconds",
+            name="ck_tool_versions_reconciliation_backoff_order",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
@@ -139,6 +153,13 @@ class ToolVersionRow(Base):
         Integer, nullable=False, default=1
     )
     side_effect_retry_max_backoff_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=30
+    )
+    reconciliation_max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    reconciliation_initial_backoff_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1
+    )
+    reconciliation_max_backoff_seconds: Mapped[int] = mapped_column(
         Integer, nullable=False, default=30
     )
     created_at: Mapped[datetime] = mapped_column(
@@ -475,6 +496,47 @@ class ToolExecutionAttemptRow(Base):
     outcome_reason: Mapped[str | None] = mapped_column(String(120))
     definite_not_executed: Mapped[bool | None] = mapped_column(Boolean)
     adapter_metadata: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ReconciliationAttemptRow(Base):
+    __tablename__ = "reconciliation_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "external_action_id",
+            "attempt_number",
+            name="uq_reconciliation_attempts_action_number",
+        ),
+        Index(
+            "uq_reconciliation_attempts_one_started_per_action",
+            "external_action_id",
+            unique=True,
+            postgresql_where=text("status = 'STARTED'"),
+        ),
+        Index("ix_reconciliation_attempts_run_id", "run_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    run_id: Mapped[UUID] = mapped_column(ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False)
+    external_action_id: Mapped[UUID] = mapped_column(
+        ForeignKey("external_actions.id", ondelete="RESTRICT"), nullable=False
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    execution_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[ReconciliationAttemptStatus] = mapped_column(
+        Enum(ReconciliationAttemptStatus, name="reconciliation_attempt_status"),
+        nullable=False,
+    )
+    business_result: Mapped[ReconciliationBusinessResult | None] = mapped_column(
+        Enum(ReconciliationBusinessResult, name="reconciliation_business_result"),
+        nullable=True,
+    )
+    evidence: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    error: Mapped[str | None] = mapped_column(Text)
+    outcome_reason: Mapped[str | None] = mapped_column(String(120))
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
     )

@@ -17,6 +17,7 @@ from agentforge.domain.enums import (
     MessageRole,
     ModelInvocationStatus,
     QueueReason,
+    ReconciliationAttemptStatus,
     RunStatus,
     ToolCallStatus,
     ToolEffectType,
@@ -42,6 +43,7 @@ from agentforge.infrastructure.db.models import (
     ExternalActionRow,
     IdempotencyRecordRow,
     ModelInvocationRow,
+    ReconciliationAttemptRow,
     RunCounterRow,
     RunMessageRow,
     RunRow,
@@ -188,6 +190,47 @@ async def _recover_orphaned_side_effect_attempts(
         call.status = ToolCallStatus.UNRESOLVED
         call.error = "previous executor lease expired with external truth unresolved"
         recovered.append((action.id, call.id, attempt.id))
+    return recovered
+
+
+async def _recover_orphaned_reconciliation_attempts(
+    session: AsyncSession,
+    run_id: UUID,
+) -> list[tuple[UUID, UUID]]:
+    actions = (
+        (
+            await session.execute(
+                select(ExternalActionRow)
+                .where(
+                    ExternalActionRow.run_id == run_id,
+                    ExternalActionRow.status == ExternalActionStatus.RECONCILING,
+                )
+                .order_by(ExternalActionRow.id)
+                .with_for_update()
+            )
+        )
+        .scalars()
+        .all()
+    )
+    recovered: list[tuple[UUID, UUID]] = []
+    for action in actions:
+        attempt = (
+            await session.execute(
+                select(ReconciliationAttemptRow)
+                .where(
+                    ReconciliationAttemptRow.external_action_id == action.id,
+                    ReconciliationAttemptRow.status == ReconciliationAttemptStatus.STARTED,
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if attempt is None:
+            continue
+        attempt.status = ReconciliationAttemptStatus.FAILED
+        attempt.error = "previous executor lease expired during read-only reconciliation"
+        attempt.outcome_reason = "LEASE_LOST"
+        attempt.finished_at = func.clock_timestamp()
+        recovered.append((action.id, attempt.id))
     return recovered
 
 
@@ -388,6 +431,11 @@ class PostgresRuntimeStore(RuntimeStore):
                 if was_recovery
                 else []
             )
+            recovered_reconciliations = (
+                await _recover_orphaned_reconciliation_attempts(session, row.id)
+                if was_recovery
+                else []
+            )
             recovered_call_ids = (
                 await _prepare_orphaned_read_calls_for_retry(session, row.id)
                 if was_recovery
@@ -401,6 +449,7 @@ class PostgresRuntimeStore(RuntimeStore):
                     base_event_count
                     + len(recovered_model_ids)
                     + len(recovered_side_effects)
+                    + len(recovered_reconciliations)
                     + len(recovered_call_ids),
                 )
             )
@@ -461,6 +510,21 @@ class PostgresRuntimeStore(RuntimeStore):
                             "tool_call_id": str(tool_call_id),
                             "attempt_id": str(attempt_id),
                             "reason": "LEASE_LOST_RESULT_NOT_DURABLE",
+                        },
+                    )
+                )
+                offset += 1
+            for external_action_id, attempt_id in recovered_reconciliations:
+                session.add(
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=row.id,
+                        sequence=sequences[offset],
+                        event_type=EventType.RECONCILIATION_FAILED.value,
+                        payload={
+                            "external_action_id": str(external_action_id),
+                            "attempt_id": str(attempt_id),
+                            "reason": "LEASE_LOST",
                         },
                     )
                 )
@@ -535,6 +599,9 @@ class PostgresRuntimeStore(RuntimeStore):
                         ToolVersionRow.side_effect_retry_max_attempts,
                         ToolVersionRow.side_effect_retry_initial_backoff_seconds,
                         ToolVersionRow.side_effect_retry_max_backoff_seconds,
+                        ToolVersionRow.reconciliation_max_attempts,
+                        ToolVersionRow.reconciliation_initial_backoff_seconds,
+                        ToolVersionRow.reconciliation_max_backoff_seconds,
                     )
                     .join(
                         ToolVersionRow,
@@ -565,6 +632,9 @@ class PostgresRuntimeStore(RuntimeStore):
                         side_effect_retry_max_attempts,
                         side_effect_retry_initial_backoff_seconds,
                         side_effect_retry_max_backoff_seconds,
+                        reconciliation_max_attempts,
+                        reconciliation_initial_backoff_seconds,
+                        reconciliation_max_backoff_seconds,
                     )
                     for (
                         tool_version_id,
@@ -581,6 +651,9 @@ class PostgresRuntimeStore(RuntimeStore):
                         side_effect_retry_max_attempts,
                         side_effect_retry_initial_backoff_seconds,
                         side_effect_retry_max_backoff_seconds,
+                        reconciliation_max_attempts,
+                        reconciliation_initial_backoff_seconds,
+                        reconciliation_max_backoff_seconds,
                     ) in rows
                 ],
             )
