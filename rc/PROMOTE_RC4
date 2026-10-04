@@ -13,3 +13,5 @@ Retry after explicit FK-ordered integration seeding and revision-contract update
 Retry after YAML-safe fixture transformation.
 
 Retry after explicit create_run RunRow flush before FK children.
+
+Retry after YAML-safe create_run persistence repair.
