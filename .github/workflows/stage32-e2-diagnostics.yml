@@ -1,0 +1,76 @@
+name: Stage 3.2-E2 Diagnostics
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/RUN_STAGE32_E2_DIAG
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Materialize E2 candidate
+        run: |
+          set -Eeuo pipefail
+          python scripts/stage32_e2_patch.py
+          docker run --rm \
+            -v "$PWD:/workspace" -w /workspace \
+            -e UV_PROJECT_ENVIRONMENT=/tmp/agentforge-e2diag-venv \
+            -e UV_CACHE_DIR=/tmp/agentforge-e2diag-cache \
+            ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim \
+            sh -lc "uv sync --locked --all-groups >/dev/null && uv run --locked ruff format src migrations tests"
+
+      - name: Ruff gate
+        run: |
+          set -Eeuo pipefail
+          docker run --rm \
+            -v "$PWD:/workspace" -w /workspace \
+            -e UV_PROJECT_ENVIRONMENT=/tmp/agentforge-e2diag-venv \
+            -e UV_CACHE_DIR=/tmp/agentforge-e2diag-cache \
+            -e RUFF_CACHE_DIR=/tmp/ruff-cache \
+            ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim \
+            sh -lc "uv sync --locked --all-groups >/dev/null && uv run --locked ruff check src apps tests migrations && uv run --locked ruff format --check src apps tests migrations"
+
+      - name: mypy strict gate
+        run: |
+          set -Eeuo pipefail
+          docker run --rm \
+            -v "$PWD:/workspace" -w /workspace \
+            -e UV_PROJECT_ENVIRONMENT=/tmp/agentforge-e2diag-venv \
+            -e UV_CACHE_DIR=/tmp/agentforge-e2diag-cache \
+            ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim \
+            sh -lc "uv sync --locked --all-groups >/dev/null && uv run --locked mypy --cache-dir /tmp/mypy-cache"
+
+      - name: Start PostgreSQL 18
+        run: |
+          set -Eeuo pipefail
+          docker compose -p agentforge_e2_diag -f docker-compose.acceptance.yml up -d postgres
+
+      - name: Alembic online migration gate
+        run: |
+          set -Eeuo pipefail
+          docker compose -p agentforge_e2_diag -f docker-compose.acceptance.yml run --rm validator \
+            sh -lc "uv sync --locked --all-groups >/dev/null && uv run --locked alembic upgrade head"
+
+      - name: Unit tests
+        run: |
+          set -Eeuo pipefail
+          docker compose -p agentforge_e2_diag -f docker-compose.acceptance.yml run --rm validator \
+            sh -lc "uv sync --locked --all-groups >/dev/null && uv run --locked pytest -q -p no:cacheprovider tests/unit"
+
+      - name: PostgreSQL integration tests
+        run: |
+          set -Eeuo pipefail
+          docker compose -p agentforge_e2_diag -f docker-compose.acceptance.yml run --rm validator \
+            sh -lc "uv sync --locked --all-groups >/dev/null && uv run --locked pytest -q -p no:cacheprovider tests/integration/test_postgres_runtime.py"
+
+      - name: Cleanup
+        if: always()
+        run: docker compose -p agentforge_e2_diag -f docker-compose.acceptance.yml down -v --remove-orphans || true
