@@ -1,0 +1,55 @@
+name: Stage 3.2-D3 Static Diagnostics
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/RUN_STAGE32_D3_STATIC_DIAG
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: stage32-d3-debug
+
+      - name: Ruff lint
+        continue-on-error: true
+        shell: bash
+        run: |
+          docker run --rm -v "$PWD:/workspace" -w /workspace \
+            -e UV_PROJECT_ENVIRONMENT=/tmp/d3-venv -e UV_CACHE_DIR=/tmp/d3-cache \
+            ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim \
+            sh -lc "uv sync --locked --all-groups >/dev/null && uv run --locked ruff check src apps tests migrations"
+
+      - name: Ruff format check
+        continue-on-error: true
+        shell: bash
+        run: |
+          docker run --rm -v "$PWD:/workspace" -w /workspace \
+            -e UV_PROJECT_ENVIRONMENT=/tmp/d3-venv -e UV_CACHE_DIR=/tmp/d3-cache \
+            ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim \
+            sh -lc "uv sync --locked --all-groups >/dev/null && uv run --locked ruff format --check src apps tests migrations"
+
+      - name: Mypy strict
+        continue-on-error: true
+        shell: bash
+        run: |
+          docker run --rm -v "$PWD:/workspace" -w /workspace \
+            -e UV_PROJECT_ENVIRONMENT=/tmp/d3-venv -e UV_CACHE_DIR=/tmp/d3-cache \
+            ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim \
+            sh -lc "uv sync --locked --all-groups >/dev/null && uv run --locked mypy --cache-dir /tmp/mypy-cache"
+
+      - name: Compile
+        continue-on-error: true
+        shell: bash
+        run: |
+          docker run --rm -v "$PWD:/workspace" -w /workspace \
+            -e UV_PROJECT_ENVIRONMENT=/tmp/d3-venv -e UV_CACHE_DIR=/tmp/d3-cache \
+            ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim \
+            sh -lc "uv sync --locked --all-groups >/dev/null && uv run --locked python -m compileall -q src apps migrations tests"
