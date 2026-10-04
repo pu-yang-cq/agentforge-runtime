@@ -930,9 +930,9 @@ def downgrade() -> None:
 # ---------- migration/schema contracts ----------
 replace_once(
     "tests/unit/test_migration_contract.py",
-    '''    assert "CK_RUN_STATES_NONNEGATIVE_TOOL_USAGE" in ddl
+    '''    assert "TOOL_ATTEMPTS_USED" in ddl
 ''',
-    '''    assert "CK_RUN_STATES_NONNEGATIVE_TOOL_USAGE" in ddl
+    '''    assert "TOOL_ATTEMPTS_USED" in ddl
     assert "0008_READ_RETRY_POLICY" in ddl
     assert "READ_RETRY_MAX_ATTEMPTS" in ddl
     assert "CK_TOOL_VERSIONS_POSITIVE_READ_RETRY_ATTEMPTS" in ddl
