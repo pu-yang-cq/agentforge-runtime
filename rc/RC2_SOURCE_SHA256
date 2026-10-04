@@ -1,0 +1,6 @@
+Stage 3.1 V1.0-RC2 acceptance payload
+
+81a5efecdd1e9a7f23918ce444b9e4fe74a03f984192961f337b4fe6ea4ed6ce  agentforge-stage3.1-v1.0-rc2-clean.tar.gz
+
+RC2 is derived only from the first real acceptance Ruff failure.
+No dependency change; reviewed uv.lock remains unchanged.
