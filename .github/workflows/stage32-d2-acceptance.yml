@@ -1,0 +1,147 @@
+name: Stage 3.2-D2 Acceptance
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/RUN_STAGE32_D2_ACCEPTANCE
+
+permissions:
+  contents: read
+
+jobs:
+  accept:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Verify committed D2 surface
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f docs/implementation/stage3.2-d1-unknown-boundary.md
+          test -f migrations/versions/0012_side_effect_retry.py
+          test ! -f scripts/stage32_d2_patch.py
+          grep -R 'class SideEffectTransientError' -n src/agentforge
+          grep -R 'record_side_effect_transient_failure' -n src/agentforge
+          grep -R '_recover_orphaned_side_effect_attempts' -n src/agentforge
+          grep -R 'ACTION_RETRY_READY' -n src/agentforge
+          grep -R 'side_effect_retry_max_attempts' -n src/agentforge
+
+      - name: Prove only proven non-execution can enter safe retry
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          source = Path("src/agentforge/application/run_manager.py").read_text()
+          tree = ast.parse(source)
+          helper = next(
+              node for node in ast.walk(tree)
+              if isinstance(node, ast.AsyncFunctionDef)
+              and node.name == "_execute_side_effect_action"
+          )
+          text = ast.get_source_segment(source, helper) or ""
+          safe = text.find("except SideEffectTransientError")
+          generic = text.find("except ToolAdapterError")
+          fallback = text.find("except Exception")
+          retry = text.find("record_side_effect_transient_failure")
+          unknown = text.find("record_side_effect_unknown")
+          if min(safe, generic, fallback, retry, unknown) < 0:
+              raise SystemExit("missing D2 classification branch")
+          if not safe <= retry < generic < fallback:
+              raise SystemExit("safe retry is not narrower than generic ambiguity handling")
+          if unknown < generic:
+              raise SystemExit("UNKNOWN path appears before generic adapter classification")
+          print("safe retry requires explicit proven-no-effect signal: PASS")
+          PY
+
+      - name: Prove retry preserves identity and durable scheduling semantics
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          path = Path("src/agentforge/infrastructure/db/execution_recorder.py")
+          source = path.read_text()
+          tree = ast.parse(source)
+          fn = next(
+              node for node in ast.walk(tree)
+              if isinstance(node, ast.AsyncFunctionDef)
+              and node.name == "record_side_effect_transient_failure"
+          )
+          text = ast.get_source_segment(source, fn) or ""
+          required = [
+              "ExternalActionStatus.READY",
+              "ToolCallStatus.READY",
+              "QueueReason.RETRY",
+              "available_at",
+              "owner_worker_id",
+              "lease_expires_at",
+              "definite_not_executed = True",
+              "ACTION_RETRY_READY",
+          ]
+          for token in required:
+              if token not in text:
+                  raise SystemExit(f"missing safe-retry durable invariant: {token}")
+          forbidden = [
+              "ActionSnapshotRow(",
+              "operation_id = uuid4",
+              "ExternalActionRow(",
+          ]
+          for token in forbidden:
+              if token in text:
+                  raise SystemExit(f"retry recreates frozen action identity: {token}")
+          print("stable action identity + durable RETRY scheduling: PASS")
+          PY
+
+      - name: Prove orphan takeover stabilizes before any replacement attempt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          source = Path("src/agentforge/infrastructure/db/runtime_store.py").read_text()
+          tree = ast.parse(source)
+          helper = next(
+              node for node in ast.walk(tree)
+              if isinstance(node, ast.AsyncFunctionDef)
+              and node.name == "_recover_orphaned_side_effect_attempts"
+          )
+          text = ast.get_source_segment(source, helper) or ""
+          required = [
+              "ToolExecutionAttemptStatus.UNKNOWN",
+              "LEASE_LOST_RESULT_NOT_DURABLE",
+              "ExternalActionStatus.UNKNOWN",
+              "ToolCallStatus.UNRESOLVED",
+              "current_attempt_id = None",
+          ]
+          for token in required:
+              if token not in text:
+                  raise SystemExit(f"missing orphan stabilization invariant: {token}")
+          if "ToolExecutionAttemptRow(" in text:
+              raise SystemExit("orphan recovery must not create a replacement physical attempt")
+          print("orphan STARTED side effect closes to UNKNOWN before replacement work: PASS")
+          PY
+
+      - name: Verify explicit D2 regression cases
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          grep -R 'test_safe_side_effect_retry_reuses_operation_id_and_next_attempt_number' -n tests
+          grep -R 'test_safe_side_effect_retry_exhaustion_fails_without_unknown' -n tests
+          grep -R 'test_side_effect_safe_retry_reuses_action_and_operation_id_across_claims' -n tests
+          grep -R 'test_orphaned_side_effect_attempt_becomes_unknown_before_recovery_progression' -n tests
+
+      - name: Run independent D2 acceptance gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ./scripts/validate_stage31_containerized.sh
