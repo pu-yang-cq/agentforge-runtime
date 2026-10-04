@@ -1070,7 +1070,6 @@ replace_once(
     PreparedToolCall,
 ''',
     '''    PreparedExternalAction,
-    PreparedReconciliation,
     PreparedToolCall,
 ''',
 )
@@ -3339,4 +3338,97 @@ async def test_orphaned_reconciliation_attempt_closes_failed_without_changing_bu
     assert durable_action.current_attempt_id is None
     await engine.dispose()
 '''
+)
+
+
+# ---------------------------------------------------------------------------
+# Cross-table serialization: unresolved action truth blocks new model reasoning
+# even if a caller bypasses RunManager sequencing.
+# ---------------------------------------------------------------------------
+replace_once(
+    "src/agentforge/application/run_manager.py",
+    '''    def _started_tool_attempt(self, tool_call_id: UUID) -> ToolExecutionAttempt:
+''',
+    '''    def _assert_no_unresolved_actions(self, run_id: UUID) -> None:
+        unresolved = [
+            action
+            for action in self.external_actions
+            if action.run_id == run_id
+            and action.status
+            in {
+                ExternalActionStatus.UNKNOWN,
+                ExternalActionStatus.RECONCILING,
+                ExternalActionStatus.MANUAL_REVIEW,
+            }
+        ]
+        if unresolved:
+            raise RuntimeError(
+                f"cannot start model reasoning with unresolved ExternalAction {unresolved[0].id}"
+            )
+
+    def _started_tool_attempt(self, tool_call_id: UUID) -> ToolExecutionAttempt:
+''',
+)
+
+replace_once(
+    "src/agentforge/application/run_manager.py",
+    '''        if self.run_state is None or self.run_state.run_id != run_id:
+            raise RuntimeError("journal run state is not seeded")
+        self._assert_no_active_tool_calls(run_id)
+        self._assert_no_started_tool_attempts(run_id)
+''',
+    '''        if self.run_state is None or self.run_state.run_id != run_id:
+            raise RuntimeError("journal run state is not seeded")
+        self._assert_no_active_tool_calls(run_id)
+        self._assert_no_unresolved_actions(run_id)
+        self._assert_no_started_tool_attempts(run_id)
+''',
+)
+
+replace_once(
+    "src/agentforge/infrastructure/db/execution_recorder.py",
+    '''async def _assert_no_started_tool_attempts(session: AsyncSession, run_id: UUID) -> None:
+''',
+    '''async def _assert_no_unresolved_actions(session: AsyncSession, run_id: UUID) -> None:
+    unresolved_id = await session.scalar(
+        select(ExternalActionRow.id)
+        .where(
+            ExternalActionRow.run_id == run_id,
+            ExternalActionRow.status.in_(
+                [
+                    ExternalActionStatus.UNKNOWN,
+                    ExternalActionStatus.RECONCILING,
+                    ExternalActionStatus.MANUAL_REVIEW,
+                ]
+            ),
+        )
+        .limit(1)
+    )
+    if unresolved_id is not None:
+        raise RuntimeError(
+            f"cannot start model reasoning with unresolved ExternalAction {unresolved_id}"
+        )
+
+
+async def _assert_no_started_tool_attempts(session: AsyncSession, run_id: UUID) -> None:
+''',
+)
+
+replace_once(
+    "src/agentforge/infrastructure/db/execution_recorder.py",
+    '''            run_row = await _lock_owned_run(
+                session, run_id=run_id, expected_generation=expected_generation
+            )
+            await _assert_no_active_tool_calls(session, run_id)
+            await _assert_no_started_tool_attempts(session, run_id)
+            await _assert_no_started_model_invocations(session, run_id)
+''',
+    '''            run_row = await _lock_owned_run(
+                session, run_id=run_id, expected_generation=expected_generation
+            )
+            await _assert_no_active_tool_calls(session, run_id)
+            await _assert_no_unresolved_actions(session, run_id)
+            await _assert_no_started_tool_attempts(session, run_id)
+            await _assert_no_started_model_invocations(session, run_id)
+''',
 )
