@@ -1,1 +1,1 @@
-trigger Stage 3.2-D aggregate acceptance
+rerun Stage 3.2-D aggregate acceptance after identity-proof scope fix
