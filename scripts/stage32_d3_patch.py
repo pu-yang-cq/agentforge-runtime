@@ -2474,6 +2474,7 @@ replace_once(
     '''from agentforge.domain.enums import (
     EventType,
     QueueReason,
+    ReconciliationAttemptStatus,
     ReconciliationBusinessResult,
 ''',
 )
@@ -2489,12 +2490,12 @@ from agentforge.application.run_manager import ExecutionJournal, RunManager
 
 append_text(
     "tests/unit/test_run_manager.py",
-    "test_authoritative_reconciliation_not_executed_can_safely_requeue_non_idempotent_action",
+    "test_authoritative_reconciliation_not_executed_requeues_non_idempotent",
     r'''
 
 
 @pytest.mark.asyncio
-async def test_authoritative_reconciliation_not_executed_can_safely_requeue_non_idempotent_action() -> None:
+async def test_authoritative_reconciliation_not_executed_requeues_non_idempotent() -> None:
     from agentforge.application.errors import ToolAdapterError
     from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode, ToolEffectType
 
@@ -3433,5 +3434,59 @@ replace_once(
             await _assert_no_unresolved_actions(session, run_id)
             await _assert_no_started_tool_attempts(session, run_id)
             await _assert_no_started_model_invocations(session, run_id)
+''',
+)
+
+
+# ---------------------------------------------------------------------------
+# D3 generated-source import completeness. Keep these explicit even though the
+# workflow also canonicalizes imports, because undefined symbols must never be
+# hidden by formatting.
+# ---------------------------------------------------------------------------
+replace_once(
+    "src/agentforge/application/run_manager.py",
+    '''    RunMessage,
+    RunState,
+    ToolCall,
+''',
+    '''    RunMessage,
+    RunState,
+    ToolBinding,
+    ToolCall,
+''',
+)
+
+replace_once(
+    "src/agentforge/infrastructure/db/execution_recorder.py",
+    '''    EventType,
+    ExternalActionStatus,
+    ModelInvocationStatus,
+''',
+    '''    EventType,
+    ExternalActionStatus,
+    MessageRole,
+    ModelInvocationStatus,
+''',
+)
+
+replace_once(
+    "src/agentforge/infrastructure/db/execution_recorder.py",
+    '''    RunMessage,
+    RunState,
+    ToolCall,
+''',
+    '''    RunMessage,
+    RunState,
+    ToolBinding,
+    ToolCall,
+''',
+)
+
+replace_once(
+    "src/agentforge/infrastructure/db/execution_recorder.py",
+    '''from agentforge.infrastructure.db.runtime_store import _allocate_event_sequences
+''',
+    '''from agentforge.infrastructure.db.runtime_store import _allocate_event_sequences
+from agentforge.runtime.tool_coordinator import tool_result_message_content
 ''',
 )
