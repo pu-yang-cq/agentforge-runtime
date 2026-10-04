@@ -7,3 +7,5 @@ Scope: shorten Alembic revision id to fit default VARCHAR(32) + regression test
 Retry after accepting documented revision-id references in migration files.
 
 Retry after emitting the regression test in exact Ruff format.
+
+Retry after explicit FK-ordered integration seeding and revision-contract update.
