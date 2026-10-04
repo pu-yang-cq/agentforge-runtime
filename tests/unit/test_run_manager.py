@@ -808,3 +808,215 @@ def test_versioned_read_retry_backoff_is_bounded_exponential() -> None:
         read_retry_max_backoff_seconds=5,
     )
     assert [binding.read_retry_delay_seconds(n) for n in (1, 2, 3, 4)] == [2, 4, 5, 5]
+
+
+@pytest.mark.asyncio
+async def test_side_effect_proposal_prepares_durable_intent_without_external_io() -> None:
+    from agentforge.domain.enums import (
+        ExternalActionStatus,
+        ReconciliationMode,
+        ToolEffectType,
+    )
+
+    version_id = uuid4()
+    physical_calls = 0
+
+    def forbidden_external_call(summary: str):
+        nonlocal physical_calls
+        physical_calls += 1
+        return {"created": summary}
+
+    registry = InMemoryToolRegistry(
+        [
+            FunctionTool(
+                version_id=version_id,
+                name="create_ticket",
+                description="create external ticket",
+                input_schema={"type": "object"},
+                func=forbidden_external_call,
+            )
+        ]
+    )
+    model = ScriptedFakeModel([ToolStep("create_ticket", {"summary": "intent only"})])
+    manager = RunManager(NativeRunner(model, registry), ToolCoordinator(registry))
+    av = AgentVersion(
+        uuid4(),
+        uuid4(),
+        1,
+        "prepare external action",
+        (
+            ToolBinding(
+                version_id,
+                "create_ticket",
+                effect_type=ToolEffectType.EXTERNAL_SIDE_EFFECT,
+                allow_no_approval_execution=True,
+                credential_ref="credential://jira/test",
+                idempotency_supported=True,
+                reconciliation_mode=ReconciliationMode.AUTHORITATIVE,
+            ),
+        ),
+    )
+    run = Run(uuid4(), av.id, "create a ticket")
+    run.queue()
+    state = RunState(run.id)
+    journal = ExecutionJournal()
+
+    result = await manager.execute(
+        run=run,
+        run_state=state,
+        agent_version=av,
+        recorder=journal,
+    )
+
+    assert result is None
+    assert physical_calls == 0
+    assert run.status is RunStatus.RUNNING
+    assert state.model_invocations_used == 1
+    assert state.tool_call_count == 1
+    assert state.tool_attempts_used == 0
+    assert len(journal.tool_calls) == 1
+    assert journal.tool_calls[0].status is ToolCallStatus.READY
+    assert journal.tool_attempts == []
+    assert len(journal.action_snapshots) == 1
+    assert len(journal.external_actions) == 1
+    action = journal.external_actions[0]
+    snapshot = journal.action_snapshots[0]
+    assert action.status is ExternalActionStatus.READY
+    assert action.current_attempt_id is None
+    assert action.operation_id == snapshot.operation_id
+    assert snapshot.effect_type is ToolEffectType.EXTERNAL_SIDE_EFFECT
+    assert snapshot.credential_ref == "credential://jira/test"
+    assert EventType.ACTION_PREPARED in [event.type for event in journal.events]
+    assert await journal.load_recoverable_read_call(run.id) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("effect_type", "allow_no_approval_execution", "approval_required"),
+    [
+        ("DESTRUCTIVE", False, False),
+        ("EXTERNAL_SIDE_EFFECT", False, False),
+        ("EXTERNAL_SIDE_EFFECT", False, True),
+    ],
+)
+async def test_non_executable_side_effect_toolversion_fails_closed(
+    effect_type: str,
+    allow_no_approval_execution: bool,
+    approval_required: bool,
+) -> None:
+    from agentforge.domain.enums import ToolEffectType
+
+    version_id = uuid4()
+    physical_calls = 0
+
+    def forbidden_external_call():
+        nonlocal physical_calls
+        physical_calls += 1
+        return {"unexpected": True}
+
+    registry = InMemoryToolRegistry(
+        [
+            FunctionTool(
+                version_id=version_id,
+                name="dangerous_write",
+                description="must not execute",
+                input_schema={"type": "object"},
+                func=forbidden_external_call,
+            )
+        ]
+    )
+    model = ScriptedFakeModel([ToolStep("dangerous_write", {})])
+    manager = RunManager(NativeRunner(model, registry), ToolCoordinator(registry))
+    av = AgentVersion(
+        uuid4(),
+        uuid4(),
+        1,
+        "fail closed",
+        (
+            ToolBinding(
+                version_id,
+                "dangerous_write",
+                effect_type=ToolEffectType(effect_type),
+                approval_required=approval_required,
+                allow_no_approval_execution=allow_no_approval_execution,
+            ),
+        ),
+    )
+    run = Run(uuid4(), av.id, "unsafe")
+    run.queue()
+    journal = ExecutionJournal()
+
+    with pytest.raises(RunExecutionFailedError):
+        await manager.execute(
+            run=run,
+            run_state=RunState(run.id),
+            agent_version=av,
+            recorder=journal,
+        )
+
+    assert physical_calls == 0
+    assert run.status is RunStatus.FAILED
+    assert journal.external_actions == []
+    assert journal.action_snapshots == []
+    assert journal.tool_attempts == []
+    assert journal.tool_calls[-1].status is ToolCallStatus.DENIED
+
+
+@pytest.mark.asyncio
+async def test_side_effect_preparation_respects_tool_budget_without_reserving_attempt() -> None:
+    from agentforge.domain.enums import ToolEffectType
+
+    version_id = uuid4()
+    physical_calls = 0
+
+    def forbidden_external_call():
+        nonlocal physical_calls
+        physical_calls += 1
+        return {"unexpected": True}
+
+    registry = InMemoryToolRegistry(
+        [
+            FunctionTool(
+                version_id=version_id,
+                name="write_once",
+                description="side effect",
+                input_schema={"type": "object"},
+                func=forbidden_external_call,
+            )
+        ]
+    )
+    model = ScriptedFakeModel([ToolStep("write_once", {})])
+    manager = RunManager(NativeRunner(model, registry), ToolCoordinator(registry))
+    av = AgentVersion(
+        uuid4(),
+        uuid4(),
+        1,
+        "budget",
+        (
+            ToolBinding(
+                version_id,
+                "write_once",
+                effect_type=ToolEffectType.WRITE,
+                allow_no_approval_execution=True,
+            ),
+        ),
+    )
+    run = Run(uuid4(), av.id, "budget", max_tool_attempts=1)
+    run.queue()
+    state = RunState(run.id, tool_attempts_used=1)
+    journal = ExecutionJournal()
+
+    with pytest.raises(RunExecutionFailedError, match="BUDGET_EXCEEDED"):
+        await manager.execute(
+            run=run,
+            run_state=state,
+            agent_version=av,
+            recorder=journal,
+        )
+
+    assert physical_calls == 0
+    assert state.tool_attempts_used == 1
+    assert journal.external_actions == []
+    assert journal.action_snapshots == []
+    assert journal.tool_attempts == []
+    assert journal.tool_calls == []

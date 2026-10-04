@@ -23,6 +23,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from agentforge.domain.enums import (
     ExternalActionStatus,
     QueueReason,
+    ReconciliationMode,
     RunStatus,
     ToolCallStatus,
     ToolEffectType,
@@ -72,6 +73,22 @@ class ToolVersionRow(Base):
             "read_retry_max_backoff_seconds >= read_retry_initial_backoff_seconds",
             name="ck_tool_versions_read_retry_backoff_order",
         ),
+        CheckConstraint(
+            "NOT (approval_required AND allow_no_approval_execution)",
+            name="ck_tool_versions_approval_execution_exclusive",
+        ),
+        CheckConstraint(
+            "credential_ref IS NULL OR length(btrim(credential_ref)) > 0",
+            name="ck_tool_versions_nonblank_credential_ref",
+        ),
+        CheckConstraint(
+            "effect_type <> 'DESTRUCTIVE' OR NOT allow_no_approval_execution",
+            name="ck_tool_versions_destructive_not_stage32_executable",
+        ),
+        CheckConstraint(
+            "effect_type <> 'READ' OR NOT allow_no_approval_execution",
+            name="ck_tool_versions_read_not_side_effect_executable",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
@@ -84,6 +101,22 @@ class ToolVersionRow(Base):
         Enum(ToolEffectType, name="tool_effect_type"), nullable=False
     )
     implementation_ref: Mapped[str] = mapped_column(String(300), nullable=False)
+    approval_required: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    allow_no_approval_execution: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    credential_ref: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    idempotency_supported: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    reconciliation_mode: Mapped[ReconciliationMode] = mapped_column(
+        Enum(ReconciliationMode, name="reconciliation_mode"),
+        nullable=False,
+        default=ReconciliationMode.NONE,
+        server_default=text("'NONE'"),
+    )
     read_retry_max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     read_retry_initial_backoff_seconds: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1

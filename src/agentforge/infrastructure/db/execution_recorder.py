@@ -11,12 +11,15 @@ from sqlalchemy.sql import Select
 
 from agentforge.application.errors import BusinessProgressionBlockedError, StaleExecutorError
 from agentforge.application.ports import ExecutionRecorder
+from agentforge.domain.actions import ActionSnapshot, ExternalAction
 from agentforge.domain.enums import (
     EventType,
+    ExternalActionStatus,
     ModelInvocationStatus,
     QueueReason,
     RunStatus,
     ToolCallStatus,
+    ToolEffectType,
     ToolExecutionAttemptStatus,
 )
 from agentforge.domain.models import (
@@ -33,7 +36,10 @@ from agentforge.infrastructure.db.mappers import (
     tool_call_from_row,
 )
 from agentforge.infrastructure.db.models import (
+    ActionSnapshotRow,
+    AgentVersionToolRow,
     DomainEventRow,
+    ExternalActionRow,
     ModelInvocationRow,
     RunCounterRow,
     RunMessageRow,
@@ -42,6 +48,7 @@ from agentforge.infrastructure.db.models import (
     ToolCallRow,
     ToolExecutionAttemptRow,
     ToolProposalRow,
+    ToolVersionRow,
 )
 from agentforge.infrastructure.db.runtime_store import _allocate_event_sequences
 
@@ -180,6 +187,44 @@ async def _next_tool_attempt_number(session: AsyncSession, tool_call_id: UUID) -
     return int(current or 0) + 1
 
 
+async def _lock_stage32_side_effect_tool_version(
+    session: AsyncSession,
+    *,
+    run: RunRow,
+    proposal: ToolProposal,
+    call: ToolCall,
+) -> ToolVersionRow:
+    if call.tool_version_id is None:
+        raise PermissionError("side-effect ToolCall must bind a ToolVersion")
+    row = (
+        await session.execute(
+            select(ToolVersionRow)
+            .join(
+                AgentVersionToolRow,
+                AgentVersionToolRow.tool_version_id == ToolVersionRow.id,
+            )
+            .where(
+                AgentVersionToolRow.agent_version_id == run.agent_version_id,
+                AgentVersionToolRow.tool_alias == proposal.tool_name,
+                ToolVersionRow.id == call.tool_version_id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise PermissionError("side-effect ToolVersion is no longer bound to the Run AgentVersion")
+    if row.effect_type not in {
+        ToolEffectType.WRITE,
+        ToolEffectType.EXTERNAL_SIDE_EFFECT,
+    }:
+        raise PermissionError("ToolVersion is not an executable Stage-3.2 side effect")
+    if row.approval_required or not row.allow_no_approval_execution:
+        raise PermissionError("ToolVersion is not eligible for no-approval Stage-3.2 execution")
+    if row.credential_ref is not None and not row.credential_ref.strip():
+        raise PermissionError("ToolVersion credential_ref configuration is invalid")
+    return row
+
+
 async def _assert_no_started_model_invocations(session: AsyncSession, run_id: UUID) -> None:
     started_id = await session.scalar(
         select(ModelInvocationRow.id)
@@ -234,9 +279,19 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                 (
                     await session.execute(
                         select(ToolCallRow)
+                        .join(
+                            ToolVersionRow,
+                            ToolVersionRow.id == ToolCallRow.tool_version_id,
+                        )
+                        .outerjoin(
+                            ExternalActionRow,
+                            ExternalActionRow.tool_call_id == ToolCallRow.id,
+                        )
                         .where(
                             ToolCallRow.run_id == run_id,
                             ToolCallRow.status == ToolCallStatus.READY,
+                            ToolVersionRow.effect_type == ToolEffectType.READ,
+                            ExternalActionRow.id.is_(None),
                         )
                         .order_by(ToolCallRow.id)
                     )
@@ -534,6 +589,166 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                             "tool_name": call.tool_name,
                             "attempt_id": str(attempt.id),
                             "attempt_number": attempt.attempt_number,
+                        },
+                    ),
+                ]
+            )
+            await session.flush()
+            return run_state_from_row(state)
+
+    async def record_model_side_effect_prepared(
+        self,
+        invocation: ModelInvocation,
+        proposal: ToolProposal,
+        call: ToolCall,
+        snapshot: ActionSnapshot,
+        action: ExternalAction,
+        *,
+        expected_generation: int,
+    ) -> RunState:
+        """Atomically commit side-effect intent without crossing the effect boundary."""
+        self._assert_generation(expected_generation)
+        if invocation.status is not ModelInvocationStatus.COMPLETED:
+            raise ValueError("model invocation must be COMPLETED before persistence")
+        if call.status is not ToolCallStatus.READY:
+            raise ValueError("side-effect ToolCall must be READY before persistence")
+        if call.tool_version_id is None:
+            raise ValueError("side-effect ToolCall must bind a tool version")
+        if action.status is not ExternalActionStatus.READY:
+            raise ValueError("prepared ExternalAction must be READY")
+        if snapshot.operation_id != action.operation_id:
+            raise ValueError("ActionSnapshot and ExternalAction operation_id mismatch")
+        if action.run_id != call.run_id:
+            raise ValueError("ExternalAction run does not match ToolCall")
+        if action.tool_call_id != call.id or action.action_snapshot_id != snapshot.id:
+            raise ValueError("ExternalAction references do not match prepared intent")
+        if snapshot.tool_version_id != call.tool_version_id:
+            raise ValueError("ActionSnapshot ToolVersion does not match ToolCall")
+        if snapshot.arguments != call.arguments or call.arguments != proposal.arguments:
+            raise ValueError("prepared side-effect arguments diverged")
+
+        async with self._sessions() as session, session.begin():
+            run_row = await _lock_owned_run(
+                session,
+                run_id=call.run_id,
+                expected_generation=expected_generation,
+            )
+            await _assert_no_active_tool_calls(session, call.run_id)
+            await _assert_no_started_tool_attempts(session, call.run_id)
+            state = await _lock_run_state(session, call.run_id)
+            await _assert_deadline_not_expired(session, run_row)
+            _assert_tool_budget(run_row, state)
+            tool_version = await _lock_stage32_side_effect_tool_version(
+                session,
+                run=run_row,
+                proposal=proposal,
+                call=call,
+            )
+            if snapshot.effect_type is not tool_version.effect_type:
+                raise ValueError("ActionSnapshot effect type does not match durable ToolVersion")
+            if snapshot.credential_ref != tool_version.credential_ref:
+                raise ValueError("ActionSnapshot credential_ref does not match durable ToolVersion")
+
+            result = await session.execute(
+                update(ModelInvocationRow)
+                .where(
+                    ModelInvocationRow.id == invocation.id,
+                    ModelInvocationRow.run_id == call.run_id,
+                    ModelInvocationRow.status == ModelInvocationStatus.STARTED.value,
+                )
+                .values(
+                    status=invocation.status.value,
+                    outcome_type=invocation.outcome_type,
+                    completed_at=func.clock_timestamp(),
+                )
+            )
+            if cast(CursorResult[Any], result).rowcount != 1:
+                raise RuntimeError("model invocation no longer STARTED")
+
+            session.add(
+                ToolProposalRow(
+                    id=proposal.id,
+                    run_id=proposal.run_id,
+                    model_invocation_id=proposal.model_invocation_id,
+                    tool_name=proposal.tool_name,
+                    arguments=proposal.arguments,
+                )
+            )
+            await session.flush()
+
+            state.tool_call_count += 1
+            state.state_version += 1
+            session.add(
+                ToolCallRow(
+                    id=call.id,
+                    run_id=call.run_id,
+                    proposal_id=call.proposal_id,
+                    tool_version_id=call.tool_version_id,
+                    tool_name=call.tool_name,
+                    arguments=call.arguments,
+                    status=ToolCallStatus.READY,
+                )
+            )
+            session.add(
+                ActionSnapshotRow(
+                    id=snapshot.id,
+                    format_version=snapshot.format_version,
+                    operation_id=snapshot.operation_id,
+                    tool_version_id=snapshot.tool_version_id,
+                    effect_type=snapshot.effect_type,
+                    credential_ref=snapshot.credential_ref,
+                    arguments=snapshot.arguments,
+                    canonical_json=snapshot.canonical_json,
+                    digest=snapshot.digest,
+                )
+            )
+            await session.flush()
+            session.add(
+                ExternalActionRow(
+                    id=action.id,
+                    run_id=action.run_id,
+                    tool_call_id=action.tool_call_id,
+                    action_snapshot_id=action.action_snapshot_id,
+                    operation_id=action.operation_id,
+                    status=ExternalActionStatus.READY,
+                    current_attempt_id=None,
+                )
+            )
+
+            seqs = list(await _allocate_event_sequences(session, call.run_id, 3))
+            session.add_all(
+                [
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=call.run_id,
+                        sequence=seqs[0],
+                        event_type=EventType.MODEL_COMPLETED.value,
+                        payload={
+                            "turn": invocation.turn,
+                            "outcome_type": invocation.outcome_type,
+                        },
+                    ),
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=call.run_id,
+                        sequence=seqs[1],
+                        event_type=EventType.TOOL_PROPOSED.value,
+                        payload={
+                            "proposal_id": str(proposal.id),
+                            "tool_name": proposal.tool_name,
+                        },
+                    ),
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=call.run_id,
+                        sequence=seqs[2],
+                        event_type=EventType.ACTION_PREPARED.value,
+                        payload={
+                            "tool_call_id": str(call.id),
+                            "external_action_id": str(action.id),
+                            "operation_id": str(action.operation_id),
+                            "snapshot_digest": snapshot.digest,
+                            "effect_type": snapshot.effect_type.value,
                         },
                     ),
                 ]

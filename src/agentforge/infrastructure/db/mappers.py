@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from agentforge.domain.enums import ReconciliationMode, ToolEffectType
 from agentforge.domain.models import AgentVersion, Run, RunMessage, RunState, ToolBinding, ToolCall
 from agentforge.infrastructure.db.models import RunMessageRow, RunRow, RunStateRow, ToolCallRow
 
@@ -58,7 +59,21 @@ def agent_version_from_parts(
     agent_id: UUID,
     version_number: int,
     instructions: str,
-    bindings: list[tuple[UUID, str, int, int, int]],
+    bindings: list[
+        tuple[
+            UUID,
+            str,
+            int,
+            int,
+            int,
+            ToolEffectType,
+            bool,
+            bool,
+            str | None,
+            bool,
+            ReconciliationMode,
+        ]
+    ],
 ) -> AgentVersion:
     return AgentVersion(
         id=version_id,
@@ -72,6 +87,12 @@ def agent_version_from_parts(
                 retry_max_attempts,
                 retry_initial_backoff,
                 retry_max_backoff,
+                effect_type=effect_type,
+                approval_required=approval_required,
+                allow_no_approval_execution=allow_no_approval_execution,
+                credential_ref=credential_ref,
+                idempotency_supported=idempotency_supported,
+                reconciliation_mode=reconciliation_mode,
             )
             for (
                 tool_version_id,
@@ -79,6 +100,12 @@ def agent_version_from_parts(
                 retry_max_attempts,
                 retry_initial_backoff,
                 retry_max_backoff,
+                effect_type,
+                approval_required,
+                allow_no_approval_execution,
+                credential_ref,
+                idempotency_supported,
+                reconciliation_mode,
             ) in bindings
         ),
     )

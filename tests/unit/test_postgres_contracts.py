@@ -231,3 +231,21 @@ def test_run_limits_have_positive_and_nonnegative_database_guards() -> None:
     }
     assert "ck_run_states_nonnegative_model_usage" in state_checks
     assert "ck_run_states_nonnegative_tool_usage" in state_checks
+
+
+def test_tool_version_declares_stage32_side_effect_capabilities() -> None:
+    table = Base.metadata.tables["tool_versions"]
+    assert {
+        "approval_required",
+        "allow_no_approval_execution",
+        "credential_ref",
+        "idempotency_supported",
+        "reconciliation_mode",
+    }.issubset(table.c.keys())
+    checks = {constraint.name for constraint in table.constraints if constraint.name}
+    assert {
+        "ck_tool_versions_approval_execution_exclusive",
+        "ck_tool_versions_nonblank_credential_ref",
+        "ck_tool_versions_destructive_not_stage32_executable",
+        "ck_tool_versions_read_not_side_effect_executable",
+    }.issubset(checks)

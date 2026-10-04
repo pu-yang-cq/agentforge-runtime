@@ -434,6 +434,12 @@ class PostgresRuntimeStore(RuntimeStore):
                         ToolVersionRow.read_retry_max_attempts,
                         ToolVersionRow.read_retry_initial_backoff_seconds,
                         ToolVersionRow.read_retry_max_backoff_seconds,
+                        ToolVersionRow.effect_type,
+                        ToolVersionRow.approval_required,
+                        ToolVersionRow.allow_no_approval_execution,
+                        ToolVersionRow.credential_ref,
+                        ToolVersionRow.idempotency_supported,
+                        ToolVersionRow.reconciliation_mode,
                     )
                     .join(
                         ToolVersionRow,
@@ -455,6 +461,12 @@ class PostgresRuntimeStore(RuntimeStore):
                         retry_max_attempts,
                         retry_initial_backoff,
                         retry_max_backoff,
+                        effect_type,
+                        approval_required,
+                        allow_no_approval_execution,
+                        credential_ref,
+                        idempotency_supported,
+                        reconciliation_mode,
                     )
                     for (
                         tool_version_id,
@@ -462,6 +474,12 @@ class PostgresRuntimeStore(RuntimeStore):
                         retry_max_attempts,
                         retry_initial_backoff,
                         retry_max_backoff,
+                        effect_type,
+                        approval_required,
+                        allow_no_approval_execution,
+                        credential_ref,
+                        idempotency_supported,
+                        reconciliation_mode,
                     ) in rows
                 ],
             )

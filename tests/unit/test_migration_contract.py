@@ -54,6 +54,10 @@ def test_alembic_offline_upgrade_compiles_core_schema_and_model_lifecycle() -> N
     assert "CREATE TABLE EXTERNAL_ACTIONS" in ddl
     assert "UQ_EXTERNAL_ACTIONS_ONE_NONTERMINAL_PER_RUN" in ddl
     assert "FK_TOOL_EXECUTION_ATTEMPTS_EXTERNAL_ACTION" in ddl
+    assert "0010_SIDE_EFFECT_PREPARATION" in ddl
+    assert "ALLOW_NO_APPROVAL_EXECUTION" in ddl
+    assert "RECONCILIATION_MODE" in ddl
+    assert "CK_TOOL_VERSIONS_APPROVAL_EXECUTION_EXCLUSIVE" in ddl
 
 
 def test_run_terminal_shape_migration_is_present() -> None:

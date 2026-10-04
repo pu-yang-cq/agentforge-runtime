@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 from uuid import UUID
 
+from agentforge.domain.actions import ActionSnapshot, ExternalAction
 from agentforge.domain.model_contract import ModelRequest, ModelResponse, ModelToolSpec
 from agentforge.domain.models import (
     AgentVersion,
@@ -71,6 +72,17 @@ class ExecutionRecorder(Protocol):
         invocation: ModelInvocation,
         proposal: ToolProposal,
         call: ToolCall,
+        *,
+        expected_generation: int,
+    ) -> RunState: ...
+
+    async def record_model_side_effect_prepared(
+        self,
+        invocation: ModelInvocation,
+        proposal: ToolProposal,
+        call: ToolCall,
+        snapshot: ActionSnapshot,
+        action: ExternalAction,
         *,
         expected_generation: int,
     ) -> RunState: ...

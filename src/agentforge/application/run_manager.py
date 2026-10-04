@@ -11,8 +11,10 @@ from agentforge.application.errors import (
     ToolTransientError,
 )
 from agentforge.application.ports import ExecutionRecorder
+from agentforge.domain.actions import ActionSnapshot, ExternalAction
 from agentforge.domain.enums import (
     EventType,
+    ExternalActionStatus,
     MessageRole,
     QueueReason,
     RunStatus,
@@ -33,7 +35,12 @@ from agentforge.domain.models import (
     utcnow,
 )
 from agentforge.runtime.native_runner import FinalDecision, NativeRunner, ToolDecision
-from agentforge.runtime.tool_coordinator import ToolCoordinator, tool_result_message_content
+from agentforge.runtime.tool_coordinator import (
+    PreparedExternalAction,
+    PreparedToolCall,
+    ToolCoordinator,
+    tool_result_message_content,
+)
 
 
 @dataclass(slots=True)
@@ -46,6 +53,8 @@ class ExecutionJournal(ExecutionRecorder):
     proposals: list[ToolProposal] = field(default_factory=list)
     tool_calls: list[ToolCall] = field(default_factory=list)
     tool_attempts: list[ToolExecutionAttempt] = field(default_factory=list)
+    action_snapshots: list[ActionSnapshot] = field(default_factory=list)
+    external_actions: list[ExternalAction] = field(default_factory=list)
     run_state: RunState | None = None
     seeded_run: Run | None = None
 
@@ -178,10 +187,13 @@ class ExecutionJournal(ExecutionRecorder):
         return [message for message in self.messages if message.run_id == run_id]
 
     async def load_recoverable_read_call(self, run_id: UUID) -> ToolCall | None:
+        side_effect_call_ids = {action.tool_call_id for action in self.external_actions}
         calls = [
             call
             for call in self.tool_calls
-            if call.run_id == run_id and call.status is ToolCallStatus.READY
+            if call.run_id == run_id
+            and call.status is ToolCallStatus.READY
+            and call.id not in side_effect_call_ids
         ]
         if len(calls) > 1:
             raise RuntimeError("Wave-1 recovery found multiple READY ToolCalls")
@@ -339,6 +351,75 @@ class ExecutionJournal(ExecutionRecorder):
                     "tool_name": call.tool_name,
                     "attempt_id": str(attempt.id),
                     "attempt_number": attempt.attempt_number,
+                },
+            )
+        )
+        return self.run_state
+
+    async def record_model_side_effect_prepared(
+        self,
+        invocation: ModelInvocation,
+        proposal: ToolProposal,
+        call: ToolCall,
+        snapshot: ActionSnapshot,
+        action: ExternalAction,
+        *,
+        expected_generation: int,
+    ) -> RunState:
+        if self.run_state is None:
+            raise RuntimeError("journal run state is not seeded")
+        if call.status is not ToolCallStatus.READY:
+            raise ValueError("side-effect ToolCall must be READY before persistence")
+        if call.tool_version_id is None:
+            raise ValueError("side-effect ToolCall must bind a tool version")
+        if action.status is not ExternalActionStatus.READY:
+            raise ValueError("prepared ExternalAction must be READY")
+        if snapshot.operation_id != action.operation_id:
+            raise ValueError("ActionSnapshot and ExternalAction operation_id mismatch")
+        if action.tool_call_id != call.id or action.action_snapshot_id != snapshot.id:
+            raise ValueError("ExternalAction references do not match prepared intent")
+        if snapshot.tool_version_id != call.tool_version_id:
+            raise ValueError("ActionSnapshot tool version does not match ToolCall")
+        if snapshot.arguments != call.arguments or call.arguments != proposal.arguments:
+            raise ValueError("prepared side-effect arguments diverged")
+        self._assert_no_active_tool_calls(call.run_id)
+        self._assert_no_started_tool_attempts(call.run_id)
+        self._assert_deadline_not_expired(call.run_id)
+        self._assert_tool_budget(call.run_id)
+        self._persist_completed_invocation(invocation)
+        self.events.append(
+            DomainEvent(
+                invocation.run_id,
+                len(self.events) + 1,
+                EventType.MODEL_COMPLETED,
+                {"turn": invocation.turn, "outcome_type": invocation.outcome_type},
+            )
+        )
+        self.proposals.append(proposal)
+        self.events.append(
+            DomainEvent(
+                proposal.run_id,
+                len(self.events) + 1,
+                EventType.TOOL_PROPOSED,
+                {"proposal_id": str(proposal.id), "tool_name": proposal.tool_name},
+            )
+        )
+        self.run_state.tool_call_count += 1
+        self.run_state.state_version += 1
+        self.tool_calls.append(call)
+        self.action_snapshots.append(snapshot)
+        self.external_actions.append(action)
+        self.events.append(
+            DomainEvent(
+                call.run_id,
+                len(self.events) + 1,
+                EventType.ACTION_PREPARED,
+                {
+                    "tool_call_id": str(call.id),
+                    "external_action_id": str(action.id),
+                    "operation_id": str(action.operation_id),
+                    "snapshot_digest": snapshot.digest,
+                    "effect_type": snapshot.effect_type.value,
                 },
             )
         )
@@ -681,6 +762,7 @@ class RunManager:
             raise RuntimeError("run has no durable user message")
 
         progression_steps = 0
+        prepared: PreparedToolCall | PreparedExternalAction
         recoverable_call = await recorder.load_recoverable_read_call(run.id)
         if recoverable_call is not None:
             prepared = self._tools.prepare_recovered_read(
@@ -817,7 +899,10 @@ class RunManager:
             invocation.complete("TOOL_PROPOSAL")
             proposal = decision.proposal
             try:
-                prepared = self._tools.prepare_read(proposal=proposal, agent_version=agent_version)
+                prepared = self._tools.prepare_model_tool(
+                    proposal=proposal,
+                    agent_version=agent_version,
+                )
             except PermissionError as exc:
                 call = ToolCall.denied_from_proposal(proposal, error=str(exc))
                 run.fail(f"tool {proposal.tool_name} rejected: {exc}")
@@ -839,6 +924,30 @@ class RunManager:
                     )
                     raise RunExecutionFailedError(run.failure_reason) from blocked
                 raise RunExecutionFailedError(run.failure_reason) from exc
+
+            if isinstance(prepared, PreparedExternalAction):
+                call = prepared.call
+                try:
+                    run_state = await recorder.record_model_side_effect_prepared(
+                        invocation,
+                        proposal,
+                        call,
+                        prepared.snapshot,
+                        prepared.action,
+                        expected_generation=expected_generation,
+                    )
+                except BusinessProgressionBlockedError as exc:
+                    run.fail(exc.failure_reason)
+                    await recorder.record_model_result_discarded_and_fail_run(
+                        invocation,
+                        run,
+                        exc.failure_reason,
+                        expected_generation=expected_generation,
+                    )
+                    raise RunExecutionFailedError(run.failure_reason) from exc
+                # B2 stops at durable intent. Action Commit and physical side-effect
+                # execution remain locked for Stage 3.2-C.
+                return None
 
             call = prepared.call
             try:

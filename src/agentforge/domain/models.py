@@ -10,8 +10,10 @@ from .enums import (
     MessageRole,
     ModelInvocationStatus,
     QueueReason,
+    ReconciliationMode,
     RunStatus,
     ToolCallStatus,
+    ToolEffectType,
     ToolExecutionAttemptStatus,
 )
 
@@ -42,6 +44,12 @@ class ToolBinding:
     read_retry_max_attempts: int = 1
     read_retry_initial_backoff_seconds: int = 1
     read_retry_max_backoff_seconds: int = 30
+    effect_type: ToolEffectType = ToolEffectType.READ
+    approval_required: bool = False
+    allow_no_approval_execution: bool = False
+    credential_ref: str | None = None
+    idempotency_supported: bool = False
+    reconciliation_mode: ReconciliationMode = ReconciliationMode.NONE
 
     def __post_init__(self) -> None:
         if self.read_retry_max_attempts <= 0:
@@ -50,6 +58,26 @@ class ToolBinding:
             raise ValueError("read retry initial backoff cannot be negative")
         if self.read_retry_max_backoff_seconds < self.read_retry_initial_backoff_seconds:
             raise ValueError("read retry max backoff cannot be below initial backoff")
+        if self.credential_ref is not None and not self.credential_ref.strip():
+            raise ValueError("credential_ref cannot be blank")
+        if self.approval_required and self.allow_no_approval_execution:
+            raise ValueError("approval-required tool cannot allow no-approval execution")
+        if self.effect_type is ToolEffectType.DESTRUCTIVE and self.allow_no_approval_execution:
+            raise ValueError("destructive tool cannot allow Stage-3.2 execution")
+        if self.effect_type is ToolEffectType.READ and self.allow_no_approval_execution:
+            raise ValueError("READ tool cannot be marked for side-effect execution")
+
+    @property
+    def stage32_side_effect_executable(self) -> bool:
+        return (
+            self.effect_type
+            in {
+                ToolEffectType.WRITE,
+                ToolEffectType.EXTERNAL_SIDE_EFFECT,
+            }
+            and not self.approval_required
+            and self.allow_no_approval_execution
+        )
 
     def read_retry_delay_seconds(self, failed_attempt_number: int) -> int:
         if failed_attempt_number <= 0:
