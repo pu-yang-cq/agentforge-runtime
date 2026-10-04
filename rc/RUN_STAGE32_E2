@@ -1,1 +1,1 @@
-trigger Stage 3.2-E2 action resolution
+rerun Stage 3.2-E2 after Ruff canonicalization
