@@ -2,6 +2,10 @@ name: Stage 3.1 Acceptance
 
 "on":
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - rc/RUN_STAGE31_ACCEPTANCE
 
 permissions:
   contents: read
@@ -9,6 +13,7 @@ permissions:
 jobs:
   acceptance:
     name: Python 3.14 + PostgreSQL 18 acceptance
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -27,6 +32,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          rm -rf /tmp/agentforge-rc1
           mkdir -p /tmp/agentforge-rc1
           cat rc/rc1.part*.b64 | base64 -d > /tmp/agentforge-rc1.tar.gz
           echo "20a19cd990dbf121cecc308e446d322432ab41ad85d2255f57695e3f2cb5f05d  /tmp/agentforge-rc1.tar.gz" | sha256sum -c -
@@ -36,6 +42,7 @@ jobs:
             exit 2
           }
           cp uv.lock /tmp/agentforge-rc1/uv.lock
+          echo "ea589824df68c1412a9ba797f673cf4110e122540a06e02ffcf15bb3e4fa406a  /tmp/agentforge-rc1/uv.lock" | sha256sum -c -
 
       - name: Run isolated Stage 3.1 target gate
         shell: bash
