@@ -21,7 +21,14 @@ from agentforge.domain.enums import (
     ToolEffectType,
     ToolExecutionAttemptStatus,
 )
-from agentforge.domain.models import AgentVersion, Run, RunState
+from agentforge.domain.models import (
+    DEFAULT_MAX_MODEL_INVOCATIONS,
+    DEFAULT_MAX_TOOL_ATTEMPTS,
+    DEFAULT_RUN_DEADLINE_SECONDS,
+    AgentVersion,
+    Run,
+    RunState,
+)
 from agentforge.infrastructure.db.mappers import (
     agent_version_from_parts,
     run_from_row,
@@ -71,6 +78,12 @@ def _lease_deadline_expr(lease_seconds: int) -> Any:
     if lease_seconds <= 0:
         raise ValueError("lease_seconds must be positive")
     return func.clock_timestamp() + text(f"INTERVAL '{int(lease_seconds)} seconds'")
+
+
+def _run_deadline_expr() -> Any:
+    return func.clock_timestamp() + text(
+        f"INTERVAL '{int(DEFAULT_RUN_DEADLINE_SECONDS)} seconds'"
+    )
 
 
 async def _allocate_event_sequences(session: AsyncSession, run_id: UUID, count: int) -> range:
@@ -225,12 +238,22 @@ class PostgresRuntimeStore(RuntimeStore):
                 queue_reason=QueueReason.INITIAL,
                 available_at=None,
                 execution_generation=0,
+                max_model_invocations=DEFAULT_MAX_MODEL_INVOCATIONS,
+                max_tool_attempts=DEFAULT_MAX_TOOL_ATTEMPTS,
+                deadline_at=_run_deadline_expr(),
             )
             session.add(row)
             await session.flush()
             session.add_all(
                 [
-                    RunStateRow(run_id=run_id, state_version=0, turn_count=0, tool_call_count=0),
+                    RunStateRow(
+                        run_id=run_id,
+                        state_version=0,
+                        turn_count=0,
+                        tool_call_count=0,
+                        model_invocations_used=0,
+                        tool_attempts_used=0,
+                    ),
                     RunCounterRow(run_id=run_id, event_sequence=2, message_sequence=1),
                     RunMessageRow(
                         id=uuid4(),
@@ -282,6 +305,7 @@ class PostgresRuntimeStore(RuntimeStore):
                 .values(
                     status=RunStatus.RUNNING,
                     queue_reason=None,
+                    available_at=None,
                     execution_generation=next_generation,
                     owner_worker_id=worker_id,
                     lease_expires_at=lease_expression,
