@@ -1,1 +1,3 @@
 Inspect immutable RC3 seed fixture and migration contract after RC4 PostgreSQL integration failure.
+
+Inspect create_run persistence ordering after DomainEvent FK failures.
