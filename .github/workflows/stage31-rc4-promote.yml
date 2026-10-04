@@ -86,88 +86,92 @@ jobs:
 
           integration = root / "tests/integration/test_postgres_runtime.py"
           integration_text = integration.read_text()
-          old_seed = """async def seed_demo(session_factory) -> None:
-    async with session_factory() as session, session.begin():
-        session.add_all(
-            [
-                AgentRow(
-                    id=DEMO_AGENT_ID,
-                    name="wave1-demo-agent",
-                    description="test agent",
-                ),
-                ToolDefinitionRow(
-                    id=DEMO_TOOL_ID,
-                    name="echo_read",
-                    description="read tool",
-                ),
-                ToolVersionRow(
-                    id=DEMO_TOOL_VERSION_ID,
-                    tool_id=DEMO_TOOL_ID,
-                    version_number=1,
-                    input_schema={"type": "object"},
-                    effect_type=ToolEffectType.READ,
-                    implementation_ref="agentforge.demo:echo_read",
-                ),
-                AgentVersionRow(
-                    id=DEMO_AGENT_VERSION_ID,
-                    agent_id=DEMO_AGENT_ID,
-                    version_number=1,
-                    instructions="Call echo_read once, then finish.",
-                ),
-                AgentVersionToolRow(
-                    agent_version_id=DEMO_AGENT_VERSION_ID,
-                    tool_version_id=DEMO_TOOL_VERSION_ID,
-                    tool_alias="echo_read",
-                ),
-            ]
-        )
-"""
-          new_seed = """async def seed_demo(session_factory) -> None:
-    async with session_factory() as session, session.begin():
-        session.add_all(
-            [
-                AgentRow(
-                    id=DEMO_AGENT_ID,
-                    name="wave1-demo-agent",
-                    description="test agent",
-                ),
-                ToolDefinitionRow(
-                    id=DEMO_TOOL_ID,
-                    name="echo_read",
-                    description="read tool",
-                ),
-            ]
-        )
-        await session.flush()
-
-        session.add_all(
-            [
-                ToolVersionRow(
-                    id=DEMO_TOOL_VERSION_ID,
-                    tool_id=DEMO_TOOL_ID,
-                    version_number=1,
-                    input_schema={"type": "object"},
-                    effect_type=ToolEffectType.READ,
-                    implementation_ref="agentforge.demo:echo_read",
-                ),
-                AgentVersionRow(
-                    id=DEMO_AGENT_VERSION_ID,
-                    agent_id=DEMO_AGENT_ID,
-                    version_number=1,
-                    instructions="Call echo_read once, then finish.",
-                ),
-            ]
-        )
-        await session.flush()
-
-        session.add(
-            AgentVersionToolRow(
-                agent_version_id=DEMO_AGENT_VERSION_ID,
-                tool_version_id=DEMO_TOOL_VERSION_ID,
-                tool_alias="echo_read",
-            )
-        )
-"""
+          old_seed_lines = [
+              'async def seed_demo(session_factory) -> None:',
+              '    async with session_factory() as session, session.begin():',
+              '        session.add_all(',
+              '            [',
+              '                AgentRow(',
+              '                    id=DEMO_AGENT_ID,',
+              '                    name="wave1-demo-agent",',
+              '                    description="test agent",',
+              '                ),',
+              '                ToolDefinitionRow(',
+              '                    id=DEMO_TOOL_ID,',
+              '                    name="echo_read",',
+              '                    description="read tool",',
+              '                ),',
+              '                ToolVersionRow(',
+              '                    id=DEMO_TOOL_VERSION_ID,',
+              '                    tool_id=DEMO_TOOL_ID,',
+              '                    version_number=1,',
+              '                    input_schema={"type": "object"},',
+              '                    effect_type=ToolEffectType.READ,',
+              '                    implementation_ref="agentforge.demo:echo_read",',
+              '                ),',
+              '                AgentVersionRow(',
+              '                    id=DEMO_AGENT_VERSION_ID,',
+              '                    agent_id=DEMO_AGENT_ID,',
+              '                    version_number=1,',
+              '                    instructions="Call echo_read once, then finish.",',
+              '                ),',
+              '                AgentVersionToolRow(',
+              '                    agent_version_id=DEMO_AGENT_VERSION_ID,',
+              '                    tool_version_id=DEMO_TOOL_VERSION_ID,',
+              '                    tool_alias="echo_read",',
+              '                ),',
+              '            ]',
+              '        )',
+          ]
+          new_seed_lines = [
+              'async def seed_demo(session_factory) -> None:',
+              '    async with session_factory() as session, session.begin():',
+              '        session.add_all(',
+              '            [',
+              '                AgentRow(',
+              '                    id=DEMO_AGENT_ID,',
+              '                    name="wave1-demo-agent",',
+              '                    description="test agent",',
+              '                ),',
+              '                ToolDefinitionRow(',
+              '                    id=DEMO_TOOL_ID,',
+              '                    name="echo_read",',
+              '                    description="read tool",',
+              '                ),',
+              '            ]',
+              '        )',
+              '        await session.flush()',
+              '',
+              '        session.add_all(',
+              '            [',
+              '                ToolVersionRow(',
+              '                    id=DEMO_TOOL_VERSION_ID,',
+              '                    tool_id=DEMO_TOOL_ID,',
+              '                    version_number=1,',
+              '                    input_schema={"type": "object"},',
+              '                    effect_type=ToolEffectType.READ,',
+              '                    implementation_ref="agentforge.demo:echo_read",',
+              '                ),',
+              '                AgentVersionRow(',
+              '                    id=DEMO_AGENT_VERSION_ID,',
+              '                    agent_id=DEMO_AGENT_ID,',
+              '                    version_number=1,',
+              '                    instructions="Call echo_read once, then finish.",',
+              '                ),',
+              '            ]',
+              '        )',
+              '        await session.flush()',
+              '',
+              '        session.add(',
+              '            AgentVersionToolRow(',
+              '                agent_version_id=DEMO_AGENT_VERSION_ID,',
+              '                tool_version_id=DEMO_TOOL_VERSION_ID,',
+              '                tool_alias="echo_read",',
+              '            )',
+              '        )',
+          ]
+          old_seed = "\n".join(old_seed_lines) + "\n"
+          new_seed = "\n".join(new_seed_lines) + "\n"
           if integration_text.count(old_seed) != 1:
               raise SystemExit("seed_demo fixture shape changed; refusing blind replacement")
           integration.write_text(integration_text.replace(old_seed, new_seed))
