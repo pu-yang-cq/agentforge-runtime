@@ -1,0 +1,14 @@
+Stage 3.1 lock review approved
+
+Reviewed artifact:
+- workflow run: 37178741923
+- artifact: stage31-uv-lock-review (11294920006)
+- uv.lock SHA-256: ea589824df68c1412a9ba797f673cf4110e122540a06e02ffcf15bb3e4fa406a
+
+Review findings:
+- 52 packages total
+- 51 registry packages from https://pypi.org/simple
+- distribution files only from files.pythonhosted.org
+- all distribution entries carry sha256 hashes
+- all direct/dev dependency versions satisfy frozen pyproject ranges
+- no git/private/arbitrary URL/path dependency sources
