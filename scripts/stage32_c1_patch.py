@@ -1558,6 +1558,45 @@ replace_once(
 ''',
 )
 
+replace_once(
+    "tests/unit/test_run_manager.py",
+    '''    run = Run(uuid4(), av.id, "create a ticket")
+    run.queue()
+    state = RunState(run.id)
+    journal = ExecutionJournal()
+
+    journal.seed(run, state)
+''',
+    '''    run = Run(uuid4(), av.id, "create a ticket")
+    run.queue()
+    run.start()
+    state = RunState(run.id)
+    journal = ExecutionJournal()
+
+    journal.seed(run, state)
+''',
+)
+
+replace_once(
+    "tests/unit/test_run_manager.py",
+    '''            FunctionTool(
+                version_id=version_id,
+                name="write_once",
+                description="side effect",
+                input_schema={"type": "object"},
+                func=forbidden_external_call,
+            )
+''',
+    '''            SideEffectFunctionTool(
+                version_id=version_id,
+                name="write_once",
+                description="side effect",
+                input_schema={"type": "object"},
+                func=lambda invocation: forbidden_external_call(),
+            )
+''',
+)
+
 # ---------------------------------------------------------------------------
 # C1 pure-runtime tests: commit-before-call, success projection, READY recovery,
 # and budget stabilization without external I/O.
