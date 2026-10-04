@@ -1,0 +1,5 @@
+Promote Stage 3.1 V1.0-RC4 from RC3 after real PostgreSQL 18 migration failure.
+
+Source: RC3
+Evidence: acceptance run 37184056828
+Scope: shorten Alembic revision id to fit default VARCHAR(32) + regression test
