@@ -2884,10 +2884,10 @@ replace_once(
 
 replace_once(
     "tests/integration/test_postgres_runtime.py",
-    '''from agentforge.domain.models import ToolProposal
+    '''from agentforge.application.run_manager import RunManager
 ''',
     '''from agentforge.application.ports import ReconciliationResult
-from agentforge.domain.models import ToolProposal
+from agentforge.application.run_manager import RunManager
 ''',
 )
 
@@ -3488,5 +3488,45 @@ replace_once(
 ''',
     '''from agentforge.infrastructure.db.runtime_store import _allocate_event_sequences
 from agentforge.runtime.tool_coordinator import tool_result_message_content
+''',
+)
+
+
+# ---------------------------------------------------------------------------
+# Generate Ruff-clean import ordering instead of relying on a later auto-fix.
+# ---------------------------------------------------------------------------
+replace_once(
+    "src/agentforge/application/ports.py",
+    '''    ModelInvocation,
+    Run,
+    RunMessage,
+    ReconciliationAttempt,
+    RunState,
+''',
+    '''    ModelInvocation,
+    ReconciliationAttempt,
+    Run,
+    RunMessage,
+    RunState,
+''',
+)
+
+replace_once(
+    "src/agentforge/infrastructure/db/execution_recorder.py",
+    '''    MessageRole,
+    ModelInvocationStatus,
+    ReconciliationAttemptStatus,
+    ReconciliationBusinessResult,
+    ReconciliationMode,
+    QueueReason,
+    RunStatus,
+''',
+    '''    MessageRole,
+    ModelInvocationStatus,
+    QueueReason,
+    ReconciliationAttemptStatus,
+    ReconciliationBusinessResult,
+    ReconciliationMode,
+    RunStatus,
 ''',
 )
