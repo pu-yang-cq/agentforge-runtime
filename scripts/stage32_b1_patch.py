@@ -39,9 +39,9 @@ class ExternalActionStatus(StrEnum):
 Path("src/agentforge/domain/actions.py").write_text(
     '''from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from hashlib import sha256
-import json
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -628,7 +628,6 @@ def test_run_schema_enforces_terminal_row_shape() -> None:
 
 Path("tests/unit/test_stage32_b1_migration_contract.py").write_text(
     '''from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[2]
 
