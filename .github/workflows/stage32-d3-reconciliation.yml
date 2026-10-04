@@ -34,7 +34,7 @@ jobs:
             -e UV_PROJECT_ENVIRONMENT=/tmp/agentforge-d3-venv \
             -e UV_CACHE_DIR=/tmp/agentforge-d3-cache \
             ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim \
-            sh -lc "uv sync --locked --all-groups >/dev/null && uv run --locked ruff format src migrations tests"
+            sh -lc "uv sync --locked --all-groups >/dev/null && uv run --locked ruff check --fix src migrations tests && uv run --locked ruff format src migrations tests"
 
       - name: Verify D3 durable surface
         shell: bash
