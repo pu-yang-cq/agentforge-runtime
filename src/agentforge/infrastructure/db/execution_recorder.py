@@ -564,6 +564,7 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                 session, run_id=run.id, expected_generation=expected_generation
             )
             await _assert_no_active_tool_calls(session, run.id)
+            await _assert_deadline_not_expired(session, row)
             result = await session.execute(
                 update(ModelInvocationRow)
                 .where(
