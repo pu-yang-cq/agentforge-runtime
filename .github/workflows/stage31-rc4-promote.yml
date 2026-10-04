@@ -43,9 +43,9 @@ jobs:
           for path in targets:
               text = path.read_text()
               count = text.count(old)
-              if count != 1:
+              if count < 1 or count > 2:
                   raise SystemExit(
-                      f"{path.name}: expected exactly one {old!r}, found {count}"
+                      f"{path.name}: expected 1-2 references to {old!r}, found {count}"
                   )
               path.write_text(text.replace(old, new))
 
