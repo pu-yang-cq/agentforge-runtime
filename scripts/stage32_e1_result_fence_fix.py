@@ -479,7 +479,9 @@ method_replace(
 # ---------------------------------------------------------------------------
 rm = Path("src/agentforge/application/run_manager.py")
 text = rm.read_text()
-text = text.replace(
+# Side-effect helper and both READ execution paths use two indentation levels.
+for old_block, new_block in [
+    (
 '''            if scheduled:
                 return None
             raise RunExecutionFailedError(run.failure_reason or str(exc)) from exc
@@ -490,10 +492,23 @@ text = text.replace(
                 return None
             raise RunExecutionFailedError(run.failure_reason or str(exc)) from exc
 ''',
-)
-# There are READ + side-effect transient sites; both should now contain the cancel check.
-if text.count("if run.status is RunStatus.CANCELLED:\n                return None") < 2:
-    raise SystemExit("expected cancellation handling on both transient paths")
+    ),
+    (
+'''                if scheduled:
+                    return None
+                raise RunExecutionFailedError(run.failure_reason or str(exc)) from exc
+''',
+'''                if scheduled:
+                    return None
+                if run.status is RunStatus.CANCELLED:
+                    return None
+                raise RunExecutionFailedError(run.failure_reason or str(exc)) from exc
+''',
+    ),
+]:
+    text = text.replace(old_block, new_block)
+if text.count("run.status is RunStatus.CANCELLED") < 3:
+    raise SystemExit("expected cancellation handling on side-effect and READ transient paths")
 text = text.replace(
 '''                await recorder.record_side_effect_definite_failure_and_fail_run(
                     prepared.call,
