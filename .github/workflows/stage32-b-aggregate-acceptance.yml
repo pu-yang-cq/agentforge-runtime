@@ -1,0 +1,89 @@
+name: Stage 3.2-B Aggregate Acceptance
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/RUN_STAGE32_B_AGGREGATE
+
+permissions:
+  contents: read
+
+jobs:
+  accept:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Verify accepted B1 + B2 surfaces
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f docs/implementation/stage3.2-b1-action-intent-schema.md
+          test -f docs/implementation/stage3.2-b2-side-effect-preparation.md
+          test -f migrations/versions/0009_external_action_intent.py
+          test -f migrations/versions/0010_side_effect_preparation.py
+          test ! -f scripts/stage32_b1_patch.py
+          test ! -f scripts/stage32_b2_patch.py
+          grep -R 'class ActionSnapshot' -n src/agentforge/domain/actions.py
+          grep -R 'class ExternalAction' -n src/agentforge/domain/actions.py
+          grep -R 'record_model_side_effect_prepared' -n src/agentforge
+          grep -R 'ACTION_PREPARED' -n src/agentforge
+
+      - name: Prove B2 preparation cannot cross Action Commit
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          path = Path("src/agentforge/infrastructure/db/execution_recorder.py")
+          tree = ast.parse(path.read_text())
+          target = None
+          for node in ast.walk(tree):
+              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "record_model_side_effect_prepared":
+                  target = node
+                  break
+          if target is None:
+              raise SystemExit("record_model_side_effect_prepared not found")
+
+          calls = []
+          names = []
+          for node in ast.walk(target):
+              if isinstance(node, ast.Call):
+                  if isinstance(node.func, ast.Attribute):
+                      calls.append(node.func.attr)
+                  elif isinstance(node.func, ast.Name):
+                      calls.append(node.func.id)
+              if isinstance(node, ast.Name):
+                  names.append(node.id)
+
+          if "invoke" in calls:
+              raise SystemExit("B2 preparation calls an adapter invoke")
+          if "ToolExecutionAttemptRow" in calls or "ToolExecutionAttemptRow" in names:
+              raise SystemExit("B2 preparation creates/references a physical Tool attempt")
+
+          source = ast.get_source_segment(path.read_text(), target) or ""
+          if "tool_attempts_used +=" in source:
+              raise SystemExit("B2 preparation reserves tool-attempt budget")
+
+          manager = Path("src/agentforge/application/run_manager.py").read_text()
+          marker = "if isinstance(prepared, PreparedExternalAction):"
+          start = manager.index(marker)
+          stop = manager.index("call = prepared.call", start + len(marker))
+          branch = manager[start:stop]
+          if "execute_prepared" in branch or ".invoke(" in branch:
+              raise SystemExit("RunManager side-effect preparation crosses external-I/O boundary")
+          if "return None" not in branch:
+              raise SystemExit("B2 side-effect path does not STOP after durable intent")
+
+          print("Intent Before Effect structural proof: PASS")
+          PY
+
+      - name: Run aggregate target gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ./scripts/validate_stage31_containerized.sh
