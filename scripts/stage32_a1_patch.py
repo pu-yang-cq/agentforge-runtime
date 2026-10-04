@@ -1026,11 +1026,12 @@ replace_once(
 # Integration import shape.
 replace_once(
     "tests/integration/test_postgres_runtime.py",
-    "from agentforge.domain.enums import EventType, RunStatus, ToolCallStatus\n",
+    "from agentforge.domain.enums import EventType, RunStatus, ToolCallStatus, ToolEffectType\n",
     '''from agentforge.domain.enums import (
     EventType,
     RunStatus,
     ToolCallStatus,
+    ToolEffectType,
     ToolExecutionAttemptStatus,
 )
 ''',
@@ -1039,11 +1040,11 @@ replace_once(
 replace_once(
     "tests/integration/test_postgres_runtime.py",
     '''    ToolCallRow,
-)
+    ToolDefinitionRow,
 ''',
     '''    ToolCallRow,
     ToolExecutionAttemptRow,
-)
+    ToolDefinitionRow,
 ''',
 )
 
