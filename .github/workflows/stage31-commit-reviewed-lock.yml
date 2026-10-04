@@ -1,0 +1,68 @@
+name: Stage 3.1 Commit Reviewed Lock
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  commit-reviewed-lock:
+    name: Commit reviewed uv.lock from bootstrap run 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      EXPECTED_LOCK_SHA256: ea589824df68c1412a9ba797f673cf4110e122540a06e02ffcf15bb3e4fa406a
+      REVIEWED_ARTIFACT_ID: "11294920006"
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: main
+
+      - name: Refuse an existing lockfile
+        shell: bash
+        run: |
+          test ! -e uv.lock || {
+            echo "uv.lock already exists; refusing to overwrite it." >&2
+            exit 2
+          }
+
+      - name: Download reviewed bootstrap artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/stage31-lock
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${REVIEWED_ARTIFACT_ID}/zip" \
+            > /tmp/stage31-lock/artifact.zip
+          unzip -q /tmp/stage31-lock/artifact.zip -d /tmp/stage31-lock/artifact
+
+      - name: Verify reviewed lockfile
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f /tmp/stage31-lock/artifact/uv.lock
+          test -f /tmp/stage31-lock/artifact/uv.lock.sha256
+          actual="$(sha256sum /tmp/stage31-lock/artifact/uv.lock | awk '{print $1}')"
+          test "$actual" = "$EXPECTED_LOCK_SHA256" || {
+            echo "uv.lock digest mismatch: $actual" >&2
+            exit 3
+          }
+          grep -F "$EXPECTED_LOCK_SHA256" /tmp/stage31-lock/artifact/uv.lock.sha256 >/dev/null
+          cp /tmp/stage31-lock/artifact/uv.lock ./uv.lock
+
+      - name: Commit exactly the reviewed lockfile
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add uv.lock
+          test "$(git diff --cached --name-only)" = "uv.lock"
+          git commit -m "build: commit reviewed Stage 3.1 uv.lock"
+          git push origin HEAD:main
