@@ -2318,8 +2318,8 @@ replace_once(
                 binding=binding,
                 expected_generation=expected_generation,
             )
-            if run.status is RunStatus.FAILED:
-                raise RunExecutionFailedError(run.failure_reason or "reconciliation failed Run")
+            if run.failure_reason is not None:
+                raise RunExecutionFailedError(run.failure_reason)
             if reconciled_message is None:
                 return None
             messages.append(reconciled_message)
