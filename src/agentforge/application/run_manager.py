@@ -4,11 +4,15 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID, uuid4
 
-from agentforge.application.errors import RunExecutionFailedError
+from agentforge.application.errors import (
+    BusinessProgressionBlockedError,
+    RunExecutionFailedError,
+)
 from agentforge.application.ports import ExecutionRecorder
 from agentforge.domain.enums import (
     EventType,
     MessageRole,
+    QueueReason,
     RunStatus,
     ToolCallStatus,
     ToolExecutionAttemptStatus,
@@ -24,6 +28,7 @@ from agentforge.domain.models import (
     ToolCall,
     ToolExecutionAttempt,
     ToolProposal,
+    utcnow,
 )
 from agentforge.runtime.native_runner import FinalDecision, NativeRunner, ToolDecision
 from agentforge.runtime.tool_coordinator import ToolCoordinator, tool_result_message_content
@@ -40,9 +45,11 @@ class ExecutionJournal(ExecutionRecorder):
     tool_calls: list[ToolCall] = field(default_factory=list)
     tool_attempts: list[ToolExecutionAttempt] = field(default_factory=list)
     run_state: RunState | None = None
+    seeded_run: Run | None = None
 
     def seed(self, run: Run, run_state: RunState) -> None:
         self.run_state = run_state
+        self.seeded_run = run
         if not self.messages:
             self._append_message(run, MessageRole.USER, run.input_text)
 
@@ -123,6 +130,37 @@ class ExecutionJournal(ExecutionRecorder):
                 f"cannot progress run {run_id} with STARTED ToolExecutionAttempt {started[0].id}"
             )
 
+    def _limits(self, run_id: UUID) -> tuple[Run, RunState]:
+        if self.seeded_run is None or self.seeded_run.id != run_id:
+            raise RuntimeError("journal run is not seeded")
+        if self.run_state is None or self.run_state.run_id != run_id:
+            raise RuntimeError("journal run state is not seeded")
+        return self.seeded_run, self.run_state
+
+    def _assert_deadline_not_expired(self, run_id: UUID) -> None:
+        run, _ = self._limits(run_id)
+        if utcnow() >= run.deadline_at:
+            raise BusinessProgressionBlockedError(
+                "DEADLINE_EXCEEDED",
+                "run deadline has expired",
+            )
+
+    def _assert_model_budget(self, run_id: UUID) -> None:
+        run, state = self._limits(run_id)
+        if state.model_invocations_used >= run.max_model_invocations:
+            raise BusinessProgressionBlockedError(
+                "BUDGET_EXCEEDED",
+                "max_model_invocations exhausted",
+            )
+
+    def _assert_tool_budget(self, run_id: UUID) -> None:
+        run, state = self._limits(run_id)
+        if state.tool_attempts_used >= run.max_tool_attempts:
+            raise BusinessProgressionBlockedError(
+                "BUDGET_EXCEEDED",
+                "max_tool_attempts exhausted",
+            )
+
     def _assert_no_started_model_invocations(self, run_id: UUID) -> None:
         started = [
             invocation
@@ -155,8 +193,13 @@ class ExecutionJournal(ExecutionRecorder):
     ) -> None:
         if call.status is not ToolCallStatus.EXECUTING:
             raise ValueError("recovered READ call must be EXECUTING before persistence")
+        self._assert_deadline_not_expired(call.run_id)
+        self._assert_tool_budget(call.run_id)
         self._assert_no_started_model_invocations(call.run_id)
         self._assert_no_started_tool_attempts(call.run_id)
+        assert self.run_state is not None
+        self.run_state.tool_attempts_used += 1
+        self.run_state.state_version += 1
         attempt = ToolExecutionAttempt(
             uuid4(),
             call.run_id,
@@ -180,6 +223,31 @@ class ExecutionJournal(ExecutionRecorder):
             )
         )
 
+    async def record_recovered_read_blocked_and_fail_run(
+        self,
+        call: ToolCall,
+        run: Run,
+        *,
+        expected_generation: int,
+    ) -> None:
+        if call.status is not ToolCallStatus.FAILED:
+            raise ValueError("blocked recovered READ must be FAILED")
+        if run.status is not RunStatus.FAILED:
+            raise ValueError("blocked recovered READ requires FAILED run")
+        self._assert_no_started_tool_attempts(run.id)
+        self._assert_no_started_model_invocations(run.id)
+        durable = next(item for item in self.tool_calls if item.id == call.id)
+        if durable.status is not ToolCallStatus.READY:
+            raise RuntimeError("durable recovered READ is no longer READY")
+        durable.status = ToolCallStatus.FAILED
+        durable.error = call.error
+        self._append_event(
+            run,
+            EventType.TOOL_FAILED,
+            {"tool_call_id": str(call.id), "error": call.error},
+        )
+        self._append_event(run, EventType.RUN_FAILED, {"reason": run.failure_reason})
+
     async def record_run_started(self, run: Run) -> None:
         self._append_event(run, EventType.RUN_STARTED, {})
 
@@ -195,7 +263,10 @@ class ExecutionJournal(ExecutionRecorder):
         self._assert_no_active_tool_calls(run_id)
         self._assert_no_started_tool_attempts(run_id)
         self._assert_no_started_model_invocations(run_id)
+        self._assert_deadline_not_expired(run_id)
+        self._assert_model_budget(run_id)
         self.run_state.turn_count += 1
+        self.run_state.model_invocations_used += 1
         self.run_state.state_version += 1
         invocation = ModelInvocation(invocation_id, run_id, self.run_state.turn_count)
         self.model_invocations.append(
@@ -224,6 +295,8 @@ class ExecutionJournal(ExecutionRecorder):
         if call.status is not ToolCallStatus.EXECUTING:
             raise ValueError("accepted tool call must be EXECUTING before persistence")
         self._assert_no_active_tool_calls(call.run_id)
+        self._assert_deadline_not_expired(call.run_id)
+        self._assert_tool_budget(call.run_id)
         self._persist_completed_invocation(invocation)
         self.events.append(
             DomainEvent(
@@ -243,6 +316,7 @@ class ExecutionJournal(ExecutionRecorder):
             )
         )
         self.run_state.tool_call_count += 1
+        self.run_state.tool_attempts_used += 1
         self.run_state.state_version += 1
         self.tool_calls.append(call)
         attempt = ToolExecutionAttempt(
@@ -284,6 +358,7 @@ class ExecutionJournal(ExecutionRecorder):
         if call.status is not ToolCallStatus.DENIED:
             raise ValueError("denied tool persistence requires a DENIED ToolCall")
         self._assert_no_active_tool_calls(run.id)
+        self._assert_deadline_not_expired(run.id)
         self._persist_completed_invocation(invocation)
         self._assert_no_started_model_invocations(run.id)
         self.events.append(
@@ -324,9 +399,10 @@ class ExecutionJournal(ExecutionRecorder):
         *,
         expected_generation: int,
     ) -> None:
-        if run.status is not RunStatus.COMPLETED:
-            raise ValueError("final decision persistence requires a COMPLETED run")
+        if run.status is not RunStatus.RUNNING:
+            raise ValueError("final decision persistence requires a RUNNING run")
         self._assert_no_active_tool_calls(run.id)
+        self._assert_deadline_not_expired(run.id)
         self._persist_completed_invocation(invocation)
         self._assert_no_started_model_invocations(run.id)
         self.events.append(
@@ -347,6 +423,31 @@ class ExecutionJournal(ExecutionRecorder):
             )
         )
         self._append_event(run, EventType.RUN_COMPLETED, {})
+
+    async def record_model_result_discarded_and_fail_run(
+        self,
+        invocation: ModelInvocation,
+        run: Run,
+        reason: str,
+        *,
+        expected_generation: int,
+    ) -> None:
+        if run.status is not RunStatus.FAILED:
+            raise ValueError("discarded model result requires FAILED run")
+        self._assert_no_active_tool_calls(run.id)
+        self._persist_completed_invocation(invocation)
+        self._assert_no_started_model_invocations(run.id)
+        self._append_event(
+            run,
+            EventType.MODEL_COMPLETED,
+            {"turn": invocation.turn, "outcome_type": invocation.outcome_type},
+        )
+        self._append_event(
+            run,
+            EventType.MODEL_RESULT_DISCARDED,
+            {"invocation_id": str(invocation.id), "reason": reason},
+        )
+        self._append_event(run, EventType.RUN_FAILED, {"reason": run.failure_reason})
 
     async def record_model_failed_and_fail_run(
         self,
@@ -438,6 +539,28 @@ class ExecutionJournal(ExecutionRecorder):
         self._assert_no_started_model_invocations(run.id)
         self._append_event(run, EventType.RUN_FAILED, {"reason": run.failure_reason})
 
+    async def record_run_yielded(
+        self,
+        run: Run,
+        *,
+        delay_seconds: int,
+        expected_generation: int,
+    ) -> None:
+        if run.status is not RunStatus.QUEUED or run.queue_reason is not QueueReason.YIELD:
+            raise ValueError("durable yield requires QUEUED/YIELD run")
+        if delay_seconds < 0:
+            raise ValueError("delay_seconds cannot be negative")
+        self._assert_no_active_tool_calls(run.id)
+        self._assert_no_started_tool_attempts(run.id)
+        self._assert_no_started_model_invocations(run.id)
+        self._assert_deadline_not_expired(run.id)
+        self._assert_model_budget(run.id)
+        self._append_event(
+            run,
+            EventType.RUN_YIELDED,
+            {"delay_seconds": delay_seconds},
+        )
+
 
 class RunManager:
     """Owns Wave-1 Run progression; the recorder owns durable facts/transactions."""
@@ -447,11 +570,13 @@ class RunManager:
         runner: NativeRunner,
         tools: ToolCoordinator,
         *,
-        max_turns: int = 16,
+        max_progression_steps_per_claim: int = 8,
     ) -> None:
+        if max_progression_steps_per_claim <= 0:
+            raise ValueError("max_progression_steps_per_claim must be positive")
         self._runner = runner
         self._tools = tools
-        self._max_turns = max_turns
+        self._max_progression_steps_per_claim = max_progression_steps_per_claim
 
     async def execute(
         self,
@@ -460,7 +585,7 @@ class RunManager:
         run_state: RunState,
         agent_version: AgentVersion,
         recorder: ExecutionRecorder,
-    ) -> str:
+    ) -> str | None:
         if isinstance(recorder, ExecutionJournal):
             recorder.seed(run, run_state)
 
@@ -475,14 +600,25 @@ class RunManager:
         if not messages:
             raise RuntimeError("run has no durable user message")
 
+        progression_steps = 0
         recoverable_call = await recorder.load_recoverable_read_call(run.id)
         if recoverable_call is not None:
             prepared = self._tools.prepare_recovered_read(
                 call=recoverable_call, agent_version=agent_version
             )
-            await recorder.record_recovered_read_started(
-                recoverable_call, expected_generation=expected_generation
-            )
+            try:
+                await recorder.record_recovered_read_started(
+                    recoverable_call, expected_generation=expected_generation
+                )
+            except BusinessProgressionBlockedError as exc:
+                recoverable_call.fail(exc.failure_reason)
+                run.fail(exc.failure_reason)
+                await recorder.record_recovered_read_blocked_and_fail_run(
+                    recoverable_call,
+                    run,
+                    expected_generation=expected_generation,
+                )
+                raise RunExecutionFailedError(run.failure_reason) from exc
             try:
                 recovered_call = await self._tools.execute_prepared(prepared)
             except Exception as exc:
@@ -503,8 +639,27 @@ class RunManager:
                 recovered_call, recovered_message, expected_generation=expected_generation
             )
             messages.append(recovered_message)
+            progression_steps += 1
 
-        while run_state.turn_count < self._max_turns:
+        while True:
+            if progression_steps >= self._max_progression_steps_per_claim:
+                run.yield_to_queue(QueueReason.YIELD)
+                try:
+                    await recorder.record_run_yielded(
+                        run,
+                        delay_seconds=0,
+                        expected_generation=expected_generation,
+                    )
+                except BusinessProgressionBlockedError as exc:
+                    run.status = RunStatus.RUNNING
+                    run.queue_reason = None
+                    run.fail(exc.failure_reason)
+                    await recorder.record_run_failed(
+                        run,
+                        expected_generation=expected_generation,
+                    )
+                    raise RunExecutionFailedError(run.failure_reason) from exc
+                return None
             invocation_id = uuid4()
             model_messages = tuple(
                 ModelMessage(message.role.value.lower(), message.content) for message in messages
@@ -515,11 +670,19 @@ class RunManager:
                 agent_version=agent_version,
                 messages=model_messages,
             )
-            run_state, invocation = await recorder.begin_model_invocation(
-                run_id=run.id,
-                invocation_id=invocation_id,
-                expected_generation=expected_generation,
-            )
+            try:
+                run_state, invocation = await recorder.begin_model_invocation(
+                    run_id=run.id,
+                    invocation_id=invocation_id,
+                    expected_generation=expected_generation,
+                )
+            except BusinessProgressionBlockedError as exc:
+                run.fail(exc.failure_reason)
+                await recorder.record_run_failed(
+                    run,
+                    expected_generation=expected_generation,
+                )
+                raise RunExecutionFailedError(run.failure_reason) from exc
             try:
                 decision = await self._runner.decide_prepared(request)
             except Exception as exc:
@@ -539,10 +702,23 @@ class RunManager:
                     decision.text,
                     decision.model_invocation_id,
                 )
+                try:
+                    await recorder.record_model_final_decision(
+                        invocation,
+                        run,
+                        message,
+                        expected_generation=expected_generation,
+                    )
+                except BusinessProgressionBlockedError as exc:
+                    run.fail(exc.failure_reason)
+                    await recorder.record_model_result_discarded_and_fail_run(
+                        invocation,
+                        run,
+                        exc.failure_reason,
+                        expected_generation=expected_generation,
+                    )
+                    raise RunExecutionFailedError(run.failure_reason) from exc
                 run.complete(decision.text)
-                await recorder.record_model_final_decision(
-                    invocation, run, message, expected_generation=expected_generation
-                )
                 return decision.text
 
             assert isinstance(decision, ToolDecision)
@@ -553,22 +729,42 @@ class RunManager:
             except PermissionError as exc:
                 call = ToolCall.denied_from_proposal(proposal, error=str(exc))
                 run.fail(f"tool {proposal.tool_name} rejected: {exc}")
-                await recorder.record_model_tool_denied_and_fail_run(
-                    invocation,
-                    proposal,
-                    call,
-                    run,
-                    expected_generation=expected_generation,
-                )
+                try:
+                    await recorder.record_model_tool_denied_and_fail_run(
+                        invocation,
+                        proposal,
+                        call,
+                        run,
+                        expected_generation=expected_generation,
+                    )
+                except BusinessProgressionBlockedError as blocked:
+                    run.failure_reason = blocked.failure_reason
+                    await recorder.record_model_result_discarded_and_fail_run(
+                        invocation,
+                        run,
+                        blocked.failure_reason,
+                        expected_generation=expected_generation,
+                    )
+                    raise RunExecutionFailedError(run.failure_reason) from blocked
                 raise RunExecutionFailedError(run.failure_reason) from exc
 
             call = prepared.call
-            run_state = await recorder.record_model_tool_started(
-                invocation,
-                proposal,
-                call,
-                expected_generation=expected_generation,
-            )
+            try:
+                run_state = await recorder.record_model_tool_started(
+                    invocation,
+                    proposal,
+                    call,
+                    expected_generation=expected_generation,
+                )
+            except BusinessProgressionBlockedError as exc:
+                run.fail(exc.failure_reason)
+                await recorder.record_model_result_discarded_and_fail_run(
+                    invocation,
+                    run,
+                    exc.failure_reason,
+                    expected_generation=expected_generation,
+                )
+                raise RunExecutionFailedError(run.failure_reason) from exc
             try:
                 call = await self._tools.execute_prepared(prepared)
             except Exception as exc:
@@ -589,7 +785,4 @@ class RunManager:
                 call, message, expected_generation=expected_generation
             )
             messages.append(message)
-
-        run.fail("max turns exceeded")
-        await recorder.record_run_failed(run, expected_generation=expected_generation)
-        raise RunExecutionFailedError("max turns exceeded")
+            progression_steps += 1

@@ -67,6 +67,13 @@ def test_core_schema_contains_versioned_tool_bindings_and_durable_facts() -> Non
     assert "execution_generation" in run_table.c
     assert "lease_expires_at" in run_table.c
     assert "available_at" in run_table.c
+    assert "max_model_invocations" in run_table.c
+    assert "max_tool_attempts" in run_table.c
+    assert "deadline_at" in run_table.c
+
+    run_state = Base.metadata.tables["run_states"]
+    assert "model_invocations_used" in run_state.c
+    assert "tool_attempts_used" in run_state.c
 
     tool_call = Base.metadata.tables["tool_calls"]
     assert len(tool_call.c.tool_version_id.foreign_keys) == 1
@@ -142,3 +149,19 @@ def test_run_schema_enforces_terminal_row_shape() -> None:
         "ck_runs_failed_shape",
         "ck_runs_nonterminal_has_no_completed_at",
     }.issubset(checks)
+
+
+def test_run_limits_have_positive_and_nonnegative_database_guards() -> None:
+    run_table = Base.metadata.tables["runs"]
+    run_checks = {
+        constraint.name for constraint in run_table.constraints if constraint.name is not None
+    }
+    assert "ck_runs_positive_model_budget" in run_checks
+    assert "ck_runs_positive_tool_budget" in run_checks
+
+    state_table = Base.metadata.tables["run_states"]
+    state_checks = {
+        constraint.name for constraint in state_table.constraints if constraint.name is not None
+    }
+    assert "ck_run_states_nonnegative_model_usage" in state_checks
+    assert "ck_run_states_nonnegative_tool_usage" in state_checks

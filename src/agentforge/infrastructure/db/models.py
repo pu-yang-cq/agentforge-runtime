@@ -135,6 +135,14 @@ class RunRow(Base):
             "status NOT IN ('CREATED', 'QUEUED', 'RUNNING') OR completed_at IS NULL",
             name="ck_runs_nonterminal_has_no_completed_at",
         ),
+        CheckConstraint(
+            "max_model_invocations > 0",
+            name="ck_runs_positive_model_budget",
+        ),
+        CheckConstraint(
+            "max_tool_attempts > 0",
+            name="ck_runs_positive_tool_budget",
+        ),
         Index("ix_runs_runnable", "status", "available_at", "created_at"),
         Index("ix_runs_lease", "status", "lease_expires_at"),
     )
@@ -154,6 +162,9 @@ class RunRow(Base):
     execution_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     owner_worker_id: Mapped[str | None] = mapped_column(String(200))
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    max_model_invocations: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_tool_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+    deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
     )
@@ -163,6 +174,16 @@ class RunRow(Base):
 
 class RunStateRow(Base):
     __tablename__ = "run_states"
+    __table_args__ = (
+        CheckConstraint(
+            "model_invocations_used >= 0",
+            name="ck_run_states_nonnegative_model_usage",
+        ),
+        CheckConstraint(
+            "tool_attempts_used >= 0",
+            name="ck_run_states_nonnegative_tool_usage",
+        ),
+    )
 
     run_id: Mapped[UUID] = mapped_column(
         ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True
@@ -170,6 +191,8 @@ class RunStateRow(Base):
     state_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     turn_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     tool_call_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    model_invocations_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    tool_attempts_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
 class RunCounterRow(Base):

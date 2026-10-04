@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -15,9 +15,17 @@ from .enums import (
     ToolExecutionAttemptStatus,
 )
 
+DEFAULT_MAX_MODEL_INVOCATIONS = 16
+DEFAULT_MAX_TOOL_ATTEMPTS = 32
+DEFAULT_RUN_DEADLINE_SECONDS = 15 * 60
+
 
 def utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def default_deadline_at() -> datetime:
+    return utcnow() + timedelta(seconds=DEFAULT_RUN_DEADLINE_SECONDS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +66,9 @@ class Run:
     created_at: datetime = field(default_factory=utcnow)
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    max_model_invocations: int = DEFAULT_MAX_MODEL_INVOCATIONS
+    max_tool_attempts: int = DEFAULT_MAX_TOOL_ATTEMPTS
+    deadline_at: datetime = field(default_factory=default_deadline_at)
 
     def queue(self, reason: QueueReason = QueueReason.INITIAL) -> None:
         if self.status is not RunStatus.CREATED:
@@ -69,7 +80,10 @@ class Run:
         if self.status is not RunStatus.QUEUED:
             raise ValueError(f"cannot start run from {self.status}")
         self.status = RunStatus.RUNNING
-        self.started_at = utcnow()
+        self.queue_reason = None
+        self.available_at = None
+        if self.started_at is None:
+            self.started_at = utcnow()
 
     def complete(self, output: str) -> None:
         if self.status is not RunStatus.RUNNING:
@@ -85,6 +99,14 @@ class Run:
         self.failure_reason = reason
         self.completed_at = utcnow()
 
+    def yield_to_queue(self, reason: QueueReason = QueueReason.YIELD) -> None:
+        if self.status is not RunStatus.RUNNING:
+            raise ValueError(f"cannot yield run from {self.status}")
+        self.status = RunStatus.QUEUED
+        self.queue_reason = reason
+        self.owner_worker_id = None
+        self.lease_expires_at = None
+
 
 @dataclass(slots=True)
 class RunState:
@@ -92,6 +114,8 @@ class RunState:
     state_version: int = 0
     turn_count: int = 0
     tool_call_count: int = 0
+    model_invocations_used: int = 0
+    tool_attempts_used: int = 0
 
 
 @dataclass(frozen=True, slots=True)

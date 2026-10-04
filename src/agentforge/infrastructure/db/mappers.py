@@ -22,6 +22,9 @@ def run_from_row(row: RunRow) -> Run:
         created_at=row.created_at,
         started_at=row.started_at,
         completed_at=row.completed_at,
+        max_model_invocations=row.max_model_invocations,
+        max_tool_attempts=row.max_tool_attempts,
+        deadline_at=row.deadline_at,
     )
 
 
@@ -31,6 +34,8 @@ def run_state_from_row(row: RunStateRow) -> RunState:
         state_version=row.state_version,
         turn_count=row.turn_count,
         tool_call_count=row.tool_call_count,
+        model_invocations_used=row.model_invocations_used,
+        tool_attempts_used=row.tool_attempts_used,
     )
 
 
