@@ -1,0 +1,77 @@
+name: Stage 3.2 Source Bootstrap
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/BOOTSTRAP_STAGE32_SOURCE
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: true
+
+      - name: Reconstruct accepted Stage 3.1 RC4
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/agentforge-stage32-base
+          mkdir -p /tmp/agentforge-stage32-base
+          cat rc/rc4.part*.b64 | base64 -d > /tmp/agentforge-rc4.tar.gz
+          echo "696a889a86fc35ea127f6fde803818269427df978d2268345ea614af56d847b7  /tmp/agentforge-rc4.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/agentforge-rc4.tar.gz -C /tmp/agentforge-stage32-base
+          test ! -e src
+          test ! -e apps
+          test ! -e migrations
+          test ! -e tests
+          test ! -e scripts
+
+      - name: Materialize accepted source without overwriting current envelopes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for d in src apps migrations tests scripts; do
+            cp -a "/tmp/agentforge-stage32-base/$d" "./$d"
+          done
+          for f in \
+            pyproject.toml \
+            alembic.ini \
+            docker-compose.yml \
+            docker-compose.acceptance.yml \
+            .env.example \
+            .python-version \
+            .gitignore
+          do
+            cp -a "/tmp/agentforge-stage32-base/$f" "./$f"
+          done
+
+          # Keep the reviewed lockfile and current Stage 3.2 docs/workflows from main.
+          echo "ea589824df68c1412a9ba797f673cf4110e122540a06e02ffcf15bb3e4fa406a  uv.lock" | sha256sum -c -
+
+      - name: Prove materialized Stage 3.1 baseline
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ./scripts/validate_stage31_containerized.sh
+
+      - name: Commit normal source tree
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "agentforge-stage32-bot"
+          git config user.email "agentforge-stage32-bot@users.noreply.github.com"
+          git add \
+            src apps migrations tests scripts \
+            pyproject.toml alembic.ini \
+            docker-compose.yml docker-compose.acceptance.yml \
+            .env.example .python-version .gitignore
+          git diff --cached --check
+          git commit -m "build: materialize accepted Stage 3.1 source for Stage 3.2"
+          git push origin HEAD:main
