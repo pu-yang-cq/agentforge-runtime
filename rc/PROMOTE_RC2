@@ -1,3 +1,3 @@
 Promote Stage 3.1 V1.0-RC2 derived solely from real acceptance Ruff findings.
 Expected clean source SHA-256: 5dade13189461557596a378a70f8f469d06bd48e24bbe6e41abfb1b092b7bc05
-Retry: YAML-safe promotion workflow.
+Retry: real-newline E402 suppression.
