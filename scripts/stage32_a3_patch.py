@@ -358,7 +358,7 @@ replace_once(
         expected_generation: int,
     ) -> None: ...
 
-    async def record_run_failed(
+    async def record_run_failed(self, run: Run, *, expected_generation: int) -> None: ...
 ''',
     '''    async def record_read_transient_failure(
         self,
@@ -379,7 +379,7 @@ replace_once(
         expected_generation: int,
     ) -> None: ...
 
-    async def record_run_failed(
+    async def record_run_failed(self, run: Run, *, expected_generation: int) -> None: ...
 ''',
 )
 
