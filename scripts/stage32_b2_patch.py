@@ -724,6 +724,7 @@ replace_once(
 ''',
     '''from agentforge.runtime.tool_coordinator import (
     PreparedExternalAction,
+    PreparedToolCall,
     ToolCoordinator,
     tool_result_message_content,
 )
@@ -839,6 +840,17 @@ replace_once(
     "src/agentforge/application/run_manager.py",
     journal_marker,
     journal_method + journal_marker,
+)
+
+replace_once(
+    "src/agentforge/application/run_manager.py",
+    '''        progression_steps = 0
+        recoverable_call = await recorder.load_recoverable_read_call(run.id)
+''',
+    '''        progression_steps = 0
+        prepared: PreparedToolCall | PreparedExternalAction
+        recoverable_call = await recorder.load_recoverable_read_call(run.id)
+''',
 )
 
 replace_once(
