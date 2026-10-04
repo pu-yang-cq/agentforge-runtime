@@ -1,0 +1,121 @@
+from uuid import uuid4
+
+from sqlalchemy import select
+from sqlalchemy.dialects import postgresql
+
+from agentforge.infrastructure.db.execution_recorder import build_owned_run_stmt
+from agentforge.infrastructure.db.models import Base
+from agentforge.infrastructure.db.runtime_store import (
+    _lease_deadline_expr,
+    build_claim_candidate_stmt,
+)
+
+
+def _compile(stmt) -> str:
+    return str(
+        stmt.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    ).upper()
+
+
+def test_claim_query_uses_skip_locked_and_wall_clock_database_time() -> None:
+    sql = _compile(build_claim_candidate_stmt())
+    assert "FOR UPDATE SKIP LOCKED" in sql
+    assert "CLOCK_TIMESTAMP()" in sql
+    assert "CURRENT_TIMESTAMP" not in sql
+    assert "LEASE_EXPIRES_AT" in sql
+    assert "AVAILABLE_AT" in sql
+
+
+def test_progression_fence_requires_generation_live_lease_and_row_lock() -> None:
+    sql = _compile(build_owned_run_stmt(run_id=uuid4(), expected_generation=7))
+    assert "FOR UPDATE" in sql
+    assert "EXECUTION_GENERATION = 7" in sql
+    assert "LEASE_EXPIRES_AT" in sql
+    assert "CLOCK_TIMESTAMP()" in sql
+
+
+def test_lease_deadline_uses_database_wall_clock_not_transaction_start_time() -> None:
+    sql = _compile(select(_lease_deadline_expr(30)))
+    assert "CLOCK_TIMESTAMP()" in sql
+    assert "INTERVAL '30 SECONDS'" in sql
+
+
+def test_core_schema_contains_versioned_tool_bindings_and_durable_facts() -> None:
+    expected = {
+        "agents",
+        "agent_versions",
+        "tool_definitions",
+        "tool_versions",
+        "agent_version_tools",
+        "idempotency_records",
+        "runs",
+        "run_states",
+        "run_counters",
+        "run_messages",
+        "model_invocations",
+        "tool_proposals",
+        "tool_calls",
+        "domain_events",
+    }
+    assert expected.issubset(Base.metadata.tables)
+
+    run_table = Base.metadata.tables["runs"]
+    assert "execution_generation" in run_table.c
+    assert "lease_expires_at" in run_table.c
+    assert "available_at" in run_table.c
+
+    tool_call = Base.metadata.tables["tool_calls"]
+    assert len(tool_call.c.tool_version_id.foreign_keys) == 1
+
+
+def test_model_invocation_schema_tracks_started_completed_failed_lifecycle() -> None:
+    table = Base.metadata.tables["model_invocations"]
+    assert {"status", "outcome_type", "error", "completed_at"}.issubset(set(table.c.keys()))
+    assert table.c.outcome_type.nullable is True
+    assert table.c.status.nullable is False
+
+
+def test_only_denied_tool_calls_may_omit_tool_version_binding() -> None:
+    table = Base.metadata.tables["tool_calls"]
+    assert table.c.tool_version_id.nullable is True
+    checks = {constraint.name for constraint in table.constraints if constraint.name}
+    assert "ck_tool_calls_bound_version_unless_denied" in checks
+
+
+def test_agent_version_tool_binding_remains_non_nullable() -> None:
+    table = Base.metadata.tables["agent_version_tools"]
+    assert table.c.tool_version_id.nullable is False
+
+
+def test_core_schema_enforces_one_active_tool_call_per_run() -> None:
+    table = Base.metadata.tables["tool_calls"]
+    indexes = {index.name: index for index in table.indexes}
+    active = indexes["uq_tool_calls_one_active_per_run"]
+    assert active.unique is True
+    assert [column.name for column in active.columns] == ["run_id"]
+    where = str(active.dialect_options["postgresql"]["where"]).upper()
+    assert "READY" in where
+    assert "EXECUTING" in where
+
+
+def test_core_schema_enforces_one_started_model_invocation_per_run() -> None:
+    table = Base.metadata.tables["model_invocations"]
+    indexes = {index.name: index for index in table.indexes}
+    active = indexes["uq_model_invocations_one_started_per_run"]
+    assert active.unique is True
+    assert [column.name for column in active.columns] == ["run_id"]
+    where = str(active.dialect_options["postgresql"]["where"]).upper()
+    assert "STATUS = 'STARTED'" in where
+
+
+def test_run_schema_enforces_terminal_row_shape() -> None:
+    table = Base.metadata.tables["runs"]
+    checks = {constraint.name for constraint in table.constraints if constraint.name}
+    assert {
+        "ck_runs_completed_shape",
+        "ck_runs_failed_shape",
+        "ck_runs_nonterminal_has_no_completed_at",
+    }.issubset(checks)

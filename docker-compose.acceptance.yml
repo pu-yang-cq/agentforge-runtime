@@ -1,0 +1,30 @@
+services:
+  postgres:
+    image: postgres:18.6-bookworm
+    environment:
+      POSTGRES_DB: agentforge
+      POSTGRES_USER: agentforge
+      POSTGRES_PASSWORD: agentforge
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentforge -d agentforge"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  validator:
+    image: ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim
+    working_dir: /workspace
+    volumes:
+      - .:/workspace:ro
+    environment:
+      AGENTFORGE_DATABASE_URL: postgresql+psycopg://agentforge:agentforge@postgres:5432/agentforge
+      AGENTFORGE_TEST_DATABASE_URL: postgresql+psycopg://agentforge:agentforge@postgres:5432/agentforge
+      AGENTFORGE_REQUIRE_POSTGRES_INTEGRATION: "1"
+      UV_PROJECT_ENVIRONMENT: /tmp/agentforge-venv
+      UV_CACHE_DIR: /tmp/uv-cache
+      RUFF_CACHE_DIR: /tmp/ruff-cache
+      PYTHONDONTWRITEBYTECODE: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["/bin/sh", "-lc", "./scripts/validate_stage31_inside_container.sh"]

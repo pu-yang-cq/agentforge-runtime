@@ -1,0 +1,80 @@
+from __future__ import annotations
+
+from uuid import UUID
+
+from agentforge.domain.models import AgentVersion, Run, RunMessage, RunState, ToolBinding, ToolCall
+from agentforge.infrastructure.db.models import RunMessageRow, RunRow, RunStateRow, ToolCallRow
+
+
+def run_from_row(row: RunRow) -> Run:
+    return Run(
+        id=row.id,
+        agent_version_id=row.agent_version_id,
+        input_text=row.input_text,
+        status=row.status,
+        queue_reason=row.queue_reason,
+        final_output=row.final_output,
+        failure_reason=row.failure_reason,
+        execution_generation=row.execution_generation,
+        owner_worker_id=row.owner_worker_id,
+        lease_expires_at=row.lease_expires_at,
+        available_at=row.available_at,
+        created_at=row.created_at,
+        started_at=row.started_at,
+        completed_at=row.completed_at,
+    )
+
+
+def run_state_from_row(row: RunStateRow) -> RunState:
+    return RunState(
+        run_id=row.run_id,
+        state_version=row.state_version,
+        turn_count=row.turn_count,
+        tool_call_count=row.tool_call_count,
+    )
+
+
+def message_from_row(row: RunMessageRow) -> RunMessage:
+    from agentforge.domain.enums import MessageRole
+
+    return RunMessage(
+        run_id=row.run_id,
+        sequence=row.sequence,
+        role=MessageRole(row.role),
+        content=row.content,
+        source_id=row.source_id,
+        created_at=row.created_at,
+    )
+
+
+def agent_version_from_parts(
+    *,
+    version_id: UUID,
+    agent_id: UUID,
+    version_number: int,
+    instructions: str,
+    bindings: list[tuple[UUID, str]],
+) -> AgentVersion:
+    return AgentVersion(
+        id=version_id,
+        agent_id=agent_id,
+        version_number=version_number,
+        instructions=instructions,
+        tool_bindings=tuple(
+            ToolBinding(tool_version_id, alias) for tool_version_id, alias in bindings
+        ),
+    )
+
+
+def tool_call_from_row(row: ToolCallRow) -> ToolCall:
+    return ToolCall(
+        id=row.id,
+        run_id=row.run_id,
+        proposal_id=row.proposal_id,
+        tool_version_id=row.tool_version_id,
+        tool_name=row.tool_name,
+        arguments=dict(row.arguments),
+        status=row.status,
+        result=row.result,
+        error=row.error,
+    )
