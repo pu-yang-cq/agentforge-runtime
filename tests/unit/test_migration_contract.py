@@ -40,6 +40,12 @@ def test_alembic_offline_upgrade_compiles_core_schema_and_model_lifecycle() -> N
     assert "0006_TOOL_ATTEMPTS" in ddl
     assert "CREATE TABLE TOOL_EXECUTION_ATTEMPTS" in ddl
     assert "UQ_TOOL_EXECUTION_ATTEMPTS_ONE_STARTED_PER_CALL" in ddl
+    assert "0007_RUN_LIMITS" in ddl
+    assert "MAX_MODEL_INVOCATIONS" in ddl
+    assert "MAX_TOOL_ATTEMPTS" in ddl
+    assert "DEADLINE_AT" in ddl
+    assert "MODEL_INVOCATIONS_USED" in ddl
+    assert "TOOL_ATTEMPTS_USED" in ddl
 
 
 def test_run_terminal_shape_migration_is_present() -> None:
@@ -57,3 +63,14 @@ def test_alembic_online_url_supports_environment_with_explicit_caller_precedence
     assert 'config.attributes.get("agentforge_explicit_database_url")' in env_py
     assert 'explicit_database_url or os.getenv("AGENTFORGE_DATABASE_URL")' in env_py
     assert 'config.set_main_option("sqlalchemy.url", str(database_url))' in env_py
+
+
+
+def test_stage32_a2_run_limit_migration_is_forward_only_from_attempt_head() -> None:
+    migration = (ROOT / "migrations" / "versions" / "0007_run_limits.py").read_text()
+    assert 'revision: str = "0007_run_limits"' in migration
+    assert 'down_revision: str | None = "0006_tool_attempts"' in migration
+    assert "clock_timestamp()" in migration
+    assert "max_model_invocations" in migration
+    assert "max_tool_attempts" in migration
+    assert "deadline_at" in migration
