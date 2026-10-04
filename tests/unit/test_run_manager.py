@@ -629,3 +629,40 @@ async def test_cooperative_yield_requeues_and_resumes_without_failure() -> None:
     assert run.status is RunStatus.COMPLETED
     assert state.model_invocations_used == 2
     assert state.tool_attempts_used == 1
+
+
+
+@pytest.mark.asyncio
+async def test_denied_tool_result_after_deadline_is_discarded_not_persisted() -> None:
+    run_holder: dict[str, Run] = {}
+    scripted = ScriptedFakeModel([ToolStep("unbound_tool", {"id": "c1"})])
+
+    class DeadlineCrossingModel:
+        async def invoke(self, request):
+            run_holder["run"].deadline_at = utcnow() - timedelta(seconds=1)
+            return await scripted.invoke(request)
+
+    registry = InMemoryToolRegistry([])
+    manager = RunManager(
+        NativeRunner(DeadlineCrossingModel(), registry),
+        ToolCoordinator(registry),
+    )
+    av = AgentVersion(uuid4(), uuid4(), 1, "deadline denial")
+    run = Run(uuid4(), av.id, "deadline denial")
+    run_holder["run"] = run
+    run.queue()
+    journal = ExecutionJournal()
+
+    with pytest.raises(RunExecutionFailedError, match="DEADLINE_EXCEEDED"):
+        await manager.execute(
+            run=run,
+            run_state=RunState(run.id),
+            agent_version=av,
+            recorder=journal,
+        )
+
+    assert run.status is RunStatus.FAILED
+    assert journal.proposals == []
+    assert journal.tool_calls == []
+    assert EventType.TOOL_DENIED not in [event.type for event in journal.events]
+    assert EventType.MODEL_RESULT_DISCARDED in [event.type for event in journal.events]
