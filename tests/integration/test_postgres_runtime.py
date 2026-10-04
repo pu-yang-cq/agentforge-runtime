@@ -33,6 +33,7 @@ from agentforge.application.errors import (
     IdempotencyConflictError,
     RunExecutionFailedError,
     StaleExecutorError,
+    ToolAdapterError,
     ToolTransientError,
 )
 from agentforge.application.run_manager import RunManager
@@ -2548,4 +2549,290 @@ async def test_action_commit_deadline_block_aborts_ready_action_without_external
     assert action.current_attempt_id is None
     assert call is not None and call.status is ToolCallStatus.NOT_EXECUTED
     assert attempts == 0
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_side_effect_ambiguous_result_persists_unknown_without_new_reasoning() -> None:
+    from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode
+    from agentforge.infrastructure.db.models import (
+        ExternalActionRow,
+        ModelInvocationRow,
+    )
+
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+
+    side_tool_id = uuid4()
+    side_version_id = uuid4()
+    async with sessions() as session, session.begin():
+        session.add(
+            ToolDefinitionRow(id=side_tool_id, name="ambiguous_ticket", description="write")
+        )
+        await session.flush()
+        session.add(
+            ToolVersionRow(
+                id=side_version_id,
+                tool_id=side_tool_id,
+                version_number=1,
+                input_schema={"type": "object"},
+                effect_type=ToolEffectType.EXTERNAL_SIDE_EFFECT,
+                implementation_ref="tests:ambiguous_ticket",
+                allow_no_approval_execution=True,
+                idempotency_supported=False,
+                reconciliation_mode=ReconciliationMode.AUTHORITATIVE,
+            )
+        )
+        await session.flush()
+        session.add(
+            AgentVersionToolRow(
+                agent_version_id=DEMO_AGENT_VERSION_ID,
+                tool_version_id=side_version_id,
+                tool_alias="ambiguous_ticket",
+            )
+        )
+
+    physical_calls = 0
+
+    async def ambiguous(_invocation):
+        nonlocal physical_calls
+        physical_calls += 1
+        raise ToolAdapterError(
+            "response lost after request may have committed",
+            error_class="RESPONSE_LOST",
+            definite_not_executed=False,
+        )
+
+    registry = InMemoryToolRegistry(
+        [
+            FunctionTool(
+                version_id=DEMO_TOOL_VERSION_ID,
+                name="echo_read",
+                description="read",
+                input_schema={"type": "object"},
+                func=lambda text: {"echo": text},
+            ),
+            SideEffectFunctionTool(
+                version_id=side_version_id,
+                name="ambiguous_ticket",
+                description="write",
+                input_schema={"type": "object"},
+                func=ambiguous,
+            ),
+        ]
+    )
+    store = PostgresRuntimeStore(sessions)
+    created = await store.create_run(
+        agent_version_id=DEMO_AGENT_VERSION_ID,
+        input_text="ambiguous side effect",
+        idempotency_key="integration-d1-ambiguous-1",
+        principal_scope="test-user",
+    )
+    claimed = await store.claim_next_run(worker_id="worker-d1", lease_seconds=30)
+    assert claimed is not None
+    recorder = PostgresExecutionRecorder(
+        sessions,
+        run_id=created.id,
+        generation=claimed.execution_generation,
+    )
+    manager = RunManager(
+        NativeRunner(
+            ScriptedFakeModel(
+                [
+                    ToolStep("ambiguous_ticket", {"summary": "maybe created"}),
+                    FinalStep("must not be reached"),
+                ]
+            ),
+            registry,
+        ),
+        ToolCoordinator(registry),
+    )
+
+    result = await manager.execute(
+        run=claimed,
+        run_state=await store.load_run_state(created.id),
+        agent_version=await store.load_agent_version(DEMO_AGENT_VERSION_ID),
+        recorder=recorder,
+    )
+    assert result is None
+    assert physical_calls == 1
+
+    async with sessions() as session:
+        action = (
+            await session.execute(
+                select(ExternalActionRow).where(ExternalActionRow.run_id == created.id)
+            )
+        ).scalar_one()
+        call = await session.get(ToolCallRow, action.tool_call_id)
+        attempt = (
+            await session.execute(
+                select(ToolExecutionAttemptRow).where(
+                    ToolExecutionAttemptRow.external_action_id == action.id
+                )
+            )
+        ).scalar_one()
+        invocations = await session.scalar(
+            select(func.count())
+            .select_from(ModelInvocationRow)
+            .where(ModelInvocationRow.run_id == created.id)
+        )
+        event_types = (
+            (
+                await session.execute(
+                    select(DomainEventRow.event_type)
+                    .where(DomainEventRow.run_id == created.id)
+                    .order_by(DomainEventRow.sequence)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert action.status is ExternalActionStatus.UNKNOWN
+    assert action.current_attempt_id is None
+    assert call is not None and call.status is ToolCallStatus.UNRESOLVED
+    assert attempt.status is ToolExecutionAttemptStatus.UNKNOWN
+    assert attempt.definite_not_executed is False
+    assert attempt.error_class == "RESPONSE_LOST"
+    assert attempt.outcome_reason == "SIDE_EFFECT_POSSIBLE_EXECUTION"
+    assert invocations == 1
+    assert EventType.ACTION_UNKNOWN.value in event_types
+
+    # Same generation: durable UNKNOWN short-circuits before a second model call.
+    second = await manager.execute(
+        run=claimed,
+        run_state=await store.load_run_state(created.id),
+        agent_version=await store.load_agent_version(DEMO_AGENT_VERSION_ID),
+        recorder=recorder,
+    )
+    assert second is None
+    assert physical_calls == 1
+    async with sessions() as session:
+        invocations_after = await session.scalar(
+            select(func.count())
+            .select_from(ModelInvocationRow)
+            .where(ModelInvocationRow.run_id == created.id)
+        )
+    assert invocations_after == 1
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_side_effect_definite_nonexecution_persists_failed_truth() -> None:
+    from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode
+    from agentforge.infrastructure.db.models import ExternalActionRow
+
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+
+    side_tool_id = uuid4()
+    side_version_id = uuid4()
+    async with sessions() as session, session.begin():
+        session.add(
+            ToolDefinitionRow(id=side_tool_id, name="preflight_failure", description="write")
+        )
+        await session.flush()
+        session.add(
+            ToolVersionRow(
+                id=side_version_id,
+                tool_id=side_tool_id,
+                version_number=1,
+                input_schema={"type": "object"},
+                effect_type=ToolEffectType.WRITE,
+                implementation_ref="tests:preflight_failure",
+                allow_no_approval_execution=True,
+                reconciliation_mode=ReconciliationMode.NONE,
+            )
+        )
+        await session.flush()
+        session.add(
+            AgentVersionToolRow(
+                agent_version_id=DEMO_AGENT_VERSION_ID,
+                tool_version_id=side_version_id,
+                tool_alias="preflight_failure",
+            )
+        )
+
+    async def definite(_invocation):
+        raise ToolAdapterError(
+            "credential resolution failed before external request",
+            error_class="CREDENTIAL",
+            definite_not_executed=True,
+        )
+
+    registry = InMemoryToolRegistry(
+        [
+            FunctionTool(
+                version_id=DEMO_TOOL_VERSION_ID,
+                name="echo_read",
+                description="read",
+                input_schema={"type": "object"},
+                func=lambda text: {"echo": text},
+            ),
+            SideEffectFunctionTool(
+                version_id=side_version_id,
+                name="preflight_failure",
+                description="write",
+                input_schema={"type": "object"},
+                func=definite,
+            ),
+        ]
+    )
+    store = PostgresRuntimeStore(sessions)
+    created = await store.create_run(
+        agent_version_id=DEMO_AGENT_VERSION_ID,
+        input_text="definite nonexecution",
+        idempotency_key="integration-d1-definite-1",
+        principal_scope="test-user",
+    )
+    claimed = await store.claim_next_run(worker_id="worker-d1-definite", lease_seconds=30)
+    assert claimed is not None
+    manager = RunManager(
+        NativeRunner(
+            ScriptedFakeModel([ToolStep("preflight_failure", {})]),
+            registry,
+        ),
+        ToolCoordinator(registry),
+    )
+    recorder = PostgresExecutionRecorder(
+        sessions,
+        run_id=created.id,
+        generation=claimed.execution_generation,
+    )
+
+    with pytest.raises(RunExecutionFailedError, match="definitely did not execute"):
+        await manager.execute(
+            run=claimed,
+            run_state=await store.load_run_state(created.id),
+            agent_version=await store.load_agent_version(DEMO_AGENT_VERSION_ID),
+            recorder=recorder,
+        )
+
+    durable = await store.get_run(created.id)
+    assert durable is not None and durable.status is RunStatus.FAILED
+    async with sessions() as session:
+        action = (
+            await session.execute(
+                select(ExternalActionRow).where(ExternalActionRow.run_id == created.id)
+            )
+        ).scalar_one()
+        call = await session.get(ToolCallRow, action.tool_call_id)
+        attempt = (
+            await session.execute(
+                select(ToolExecutionAttemptRow).where(
+                    ToolExecutionAttemptRow.external_action_id == action.id
+                )
+            )
+        ).scalar_one()
+    assert action.status is ExternalActionStatus.FAILED
+    assert action.current_attempt_id is None
+    assert call is not None and call.status is ToolCallStatus.FAILED
+    assert attempt.status is ToolExecutionAttemptStatus.FAILED
+    assert attempt.definite_not_executed is True
+    assert attempt.error_class == "CREDENTIAL"
+    assert attempt.outcome_reason == "SIDE_EFFECT_DEFINITE_NOT_EXECUTED"
     await engine.dispose()

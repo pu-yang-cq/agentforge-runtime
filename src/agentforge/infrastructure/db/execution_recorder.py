@@ -340,6 +340,40 @@ class PostgresExecutionRecorder(ExecutionRecorder):
             external_action_from_row(action_row),
         )
 
+    async def load_unknown_external_action(
+        self,
+        run_id: UUID,
+    ) -> tuple[ToolCall, ActionSnapshot, ExternalAction] | None:
+        if run_id != self._run_id:
+            raise ValueError("recorder is scoped to one run")
+        async with self._sessions() as session:
+            rows = (
+                await session.execute(
+                    select(ExternalActionRow, ToolCallRow, ActionSnapshotRow)
+                    .join(ToolCallRow, ToolCallRow.id == ExternalActionRow.tool_call_id)
+                    .join(
+                        ActionSnapshotRow,
+                        ActionSnapshotRow.id == ExternalActionRow.action_snapshot_id,
+                    )
+                    .where(
+                        ExternalActionRow.run_id == run_id,
+                        ExternalActionRow.status == ExternalActionStatus.UNKNOWN,
+                        ExternalActionRow.current_attempt_id.is_(None),
+                        ToolCallRow.status == ToolCallStatus.UNRESOLVED,
+                    )
+                )
+            ).all()
+        if len(rows) > 1:
+            raise RuntimeError("found multiple UNKNOWN ExternalActions for one Run")
+        if not rows:
+            return None
+        action_row, call_row, snapshot_row = rows[0]
+        return (
+            tool_call_from_row(call_row),
+            action_snapshot_from_row(snapshot_row),
+            external_action_from_row(action_row),
+        )
+
     async def record_side_effect_attempt_started(
         self,
         call: ToolCall,
@@ -698,6 +732,250 @@ class PostgresExecutionRecorder(ExecutionRecorder):
 
         attempt.succeed(call.result)
         action.succeed()
+
+    async def record_side_effect_unknown(
+        self,
+        call: ToolCall,
+        action: ExternalAction,
+        attempt: ToolExecutionAttempt,
+        *,
+        error: str,
+        error_class: str,
+        outcome_reason: str,
+        expected_generation: int,
+    ) -> None:
+        """Persist possible execution as UNKNOWN; never convert uncertainty to retry."""
+        self._assert_generation(expected_generation)
+        if call.status is not ToolCallStatus.EXECUTING:
+            raise ValueError("UNKNOWN persistence requires EXECUTING ToolCall")
+        if action.status is not ExternalActionStatus.EXECUTING:
+            raise ValueError("UNKNOWN persistence requires EXECUTING ExternalAction")
+        if action.current_attempt_id != attempt.id:
+            raise ValueError("UNKNOWN persistence attempt is not current")
+
+        async with self._sessions() as session, session.begin():
+            await _lock_owned_run(
+                session,
+                run_id=call.run_id,
+                expected_generation=expected_generation,
+            )
+            action_row = (
+                await session.execute(
+                    select(ExternalActionRow)
+                    .where(
+                        ExternalActionRow.id == action.id,
+                        ExternalActionRow.run_id == call.run_id,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one()
+            call_row = (
+                await session.execute(
+                    select(ToolCallRow)
+                    .where(
+                        ToolCallRow.id == call.id,
+                        ToolCallRow.run_id == call.run_id,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one()
+            attempt_row = (
+                await session.execute(
+                    select(ToolExecutionAttemptRow)
+                    .where(
+                        ToolExecutionAttemptRow.id == attempt.id,
+                        ToolExecutionAttemptRow.tool_call_id == call.id,
+                        ToolExecutionAttemptRow.external_action_id == action.id,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one()
+            if (
+                action_row.status is not ExternalActionStatus.EXECUTING
+                or action_row.current_attempt_id != attempt.id
+                or call_row.status is not ToolCallStatus.EXECUTING
+                or attempt_row.status is not ToolExecutionAttemptStatus.STARTED
+            ):
+                raise RuntimeError("side-effect UNKNOWN result lost current-attempt authorization")
+
+            attempt_row.status = ToolExecutionAttemptStatus.UNKNOWN
+            attempt_row.error = error
+            attempt_row.error_class = error_class
+            attempt_row.definite_not_executed = False
+            attempt_row.outcome_reason = outcome_reason
+            attempt_row.finished_at = func.clock_timestamp()
+            call_row.status = ToolCallStatus.UNRESOLVED
+            call_row.error = error
+            action_row.status = ExternalActionStatus.UNKNOWN
+            action_row.current_attempt_id = None
+            action_row.updated_at = func.clock_timestamp()
+
+            seq = next(iter(await _allocate_event_sequences(session, call.run_id, 1)))
+            session.add(
+                DomainEventRow(
+                    id=uuid4(),
+                    run_id=call.run_id,
+                    sequence=seq,
+                    event_type=EventType.ACTION_UNKNOWN.value,
+                    payload={
+                        "tool_call_id": str(call.id),
+                        "external_action_id": str(action.id),
+                        "operation_id": str(action.operation_id),
+                        "attempt_id": str(attempt.id),
+                        "attempt_number": attempt.attempt_number,
+                        "error_class": error_class,
+                        "outcome_reason": outcome_reason,
+                    },
+                )
+            )
+            await session.flush()
+
+        attempt.mark_unknown(
+            outcome_reason,
+            error=error,
+            error_class=error_class,
+        )
+        call.unresolve(error)
+        action.mark_unknown()
+
+    async def record_side_effect_definite_failure_and_fail_run(
+        self,
+        call: ToolCall,
+        action: ExternalAction,
+        attempt: ToolExecutionAttempt,
+        run: Run,
+        *,
+        error: str,
+        error_class: str,
+        expected_generation: int,
+    ) -> None:
+        """Persist proven non-execution as FAILED; retry policy is deferred to D2."""
+        self._assert_generation(expected_generation)
+        if run.status is not RunStatus.FAILED:
+            raise ValueError("definite side-effect failure requires FAILED Run")
+        if call.status is not ToolCallStatus.EXECUTING:
+            raise ValueError("definite side-effect failure requires EXECUTING ToolCall")
+        if action.status is not ExternalActionStatus.EXECUTING:
+            raise ValueError("definite side-effect failure requires EXECUTING ExternalAction")
+        if action.current_attempt_id != attempt.id:
+            raise ValueError("definite side-effect failure attempt is not current")
+
+        async with self._sessions() as session, session.begin():
+            run_row = await _lock_owned_run(
+                session,
+                run_id=call.run_id,
+                expected_generation=expected_generation,
+            )
+            action_row = (
+                await session.execute(
+                    select(ExternalActionRow)
+                    .where(
+                        ExternalActionRow.id == action.id,
+                        ExternalActionRow.run_id == call.run_id,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one()
+            call_row = (
+                await session.execute(
+                    select(ToolCallRow)
+                    .where(
+                        ToolCallRow.id == call.id,
+                        ToolCallRow.run_id == call.run_id,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one()
+            attempt_row = (
+                await session.execute(
+                    select(ToolExecutionAttemptRow)
+                    .where(
+                        ToolExecutionAttemptRow.id == attempt.id,
+                        ToolExecutionAttemptRow.tool_call_id == call.id,
+                        ToolExecutionAttemptRow.external_action_id == action.id,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one()
+            if (
+                action_row.status is not ExternalActionStatus.EXECUTING
+                or action_row.current_attempt_id != attempt.id
+                or call_row.status is not ToolCallStatus.EXECUTING
+                or attempt_row.status is not ToolExecutionAttemptStatus.STARTED
+            ):
+                raise RuntimeError(
+                    "side-effect definite failure lost current-attempt authorization"
+                )
+
+            attempt_row.status = ToolExecutionAttemptStatus.FAILED
+            attempt_row.error = error
+            attempt_row.error_class = error_class
+            attempt_row.definite_not_executed = True
+            attempt_row.outcome_reason = "SIDE_EFFECT_DEFINITE_NOT_EXECUTED"
+            attempt_row.finished_at = func.clock_timestamp()
+            call_row.status = ToolCallStatus.FAILED
+            call_row.error = error
+            action_row.status = ExternalActionStatus.FAILED
+            action_row.current_attempt_id = None
+            action_row.updated_at = func.clock_timestamp()
+            run_row.status = RunStatus.FAILED
+            run_row.failure_reason = run.failure_reason
+            run_row.completed_at = func.clock_timestamp()
+            run_row.owner_worker_id = None
+            run_row.lease_expires_at = None
+
+            seqs = list(await _allocate_event_sequences(session, call.run_id, 3))
+            session.add_all(
+                [
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=call.run_id,
+                        sequence=seqs[0],
+                        event_type=EventType.ACTION_FAILED.value,
+                        payload={
+                            "tool_call_id": str(call.id),
+                            "external_action_id": str(action.id),
+                            "operation_id": str(action.operation_id),
+                            "attempt_id": str(attempt.id),
+                            "attempt_number": attempt.attempt_number,
+                            "error_class": error_class,
+                            "definite_not_executed": True,
+                        },
+                    ),
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=call.run_id,
+                        sequence=seqs[1],
+                        event_type=EventType.TOOL_FAILED.value,
+                        payload={
+                            "tool_call_id": str(call.id),
+                            "tool_name": call.tool_name,
+                            "attempt_id": str(attempt.id),
+                            "attempt_number": attempt.attempt_number,
+                            "error_class": error_class,
+                            "definite_not_executed": True,
+                            "error": error,
+                        },
+                    ),
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=call.run_id,
+                        sequence=seqs[2],
+                        event_type=EventType.RUN_FAILED.value,
+                        payload={"reason": run.failure_reason},
+                    ),
+                ]
+            )
+            await session.flush()
+
+        attempt.fail(
+            error,
+            error_class=error_class,
+            definite_not_executed=True,
+            outcome_reason="SIDE_EFFECT_DEFINITE_NOT_EXECUTED",
+        )
+        call.fail(error)
+        action.fail_definite_not_executed()
 
     async def record_recovered_read_started(
         self,

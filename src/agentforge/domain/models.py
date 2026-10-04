@@ -278,6 +278,12 @@ class ToolCall:
         self.status = ToolCallStatus.NOT_EXECUTED
         self.error = reason
 
+    def unresolve(self, reason: str) -> None:
+        if self.status is not ToolCallStatus.EXECUTING:
+            raise ValueError("tool call can only become UNRESOLVED from EXECUTING")
+        self.status = ToolCallStatus.UNRESOLVED
+        self.error = reason
+
     def retry_after_failure(self, reason: str) -> None:
         if self.status is not ToolCallStatus.FAILED:
             raise ValueError("tool call can only retry from FAILED")
@@ -338,10 +344,19 @@ class ToolExecutionAttempt:
         self.outcome_reason = outcome_reason
         self.finished_at = utcnow()
 
-    def mark_unknown(self, reason: str) -> None:
+    def mark_unknown(
+        self,
+        reason: str,
+        *,
+        error: str | None = None,
+        error_class: str | None = None,
+    ) -> None:
         if self.status is not ToolExecutionAttemptStatus.STARTED:
             raise ValueError("tool attempt can only become UNKNOWN from STARTED")
         self.status = ToolExecutionAttemptStatus.UNKNOWN
+        self.error = error
+        self.error_class = error_class
+        self.definite_not_executed = False
         self.outcome_reason = reason
         self.finished_at = utcnow()
 

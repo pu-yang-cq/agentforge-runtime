@@ -147,6 +147,18 @@ class ExternalAction:
         self.status = ExternalActionStatus.SUCCEEDED
         self.current_attempt_id = None
 
+    def mark_unknown(self) -> None:
+        if self.status is not ExternalActionStatus.EXECUTING or self.current_attempt_id is None:
+            raise ValueError("external action can only become UNKNOWN from EXECUTING")
+        self.status = ExternalActionStatus.UNKNOWN
+        self.current_attempt_id = None
+
+    def fail_definite_not_executed(self) -> None:
+        if self.status is not ExternalActionStatus.EXECUTING or self.current_attempt_id is None:
+            raise ValueError("external action can only fail from EXECUTING")
+        self.status = ExternalActionStatus.FAILED
+        self.current_attempt_id = None
+
     def abort(self) -> None:
         if self.status is not ExternalActionStatus.READY or self.current_attempt_id is not None:
             raise ValueError("external action can only abort before Action Commit")

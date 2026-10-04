@@ -68,6 +68,11 @@ class ExecutionRecorder(Protocol):
         run_id: UUID,
     ) -> tuple[ToolCall, ActionSnapshot, ExternalAction] | None: ...
 
+    async def load_unknown_external_action(
+        self,
+        run_id: UUID,
+    ) -> tuple[ToolCall, ActionSnapshot, ExternalAction] | None: ...
+
     async def record_side_effect_attempt_started(
         self,
         call: ToolCall,
@@ -93,6 +98,30 @@ class ExecutionRecorder(Protocol):
         attempt: ToolExecutionAttempt,
         message: RunMessage,
         *,
+        expected_generation: int,
+    ) -> None: ...
+
+    async def record_side_effect_unknown(
+        self,
+        call: ToolCall,
+        action: ExternalAction,
+        attempt: ToolExecutionAttempt,
+        *,
+        error: str,
+        error_class: str,
+        outcome_reason: str,
+        expected_generation: int,
+    ) -> None: ...
+
+    async def record_side_effect_definite_failure_and_fail_run(
+        self,
+        call: ToolCall,
+        action: ExternalAction,
+        attempt: ToolExecutionAttempt,
+        run: Run,
+        *,
+        error: str,
+        error_class: str,
         expected_generation: int,
     ) -> None: ...
 

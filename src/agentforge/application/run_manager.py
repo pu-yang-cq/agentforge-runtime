@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 from agentforge.application.errors import (
     BusinessProgressionBlockedError,
     RunExecutionFailedError,
+    ToolAdapterError,
     ToolTransientError,
 )
 from agentforge.application.ports import ExecutionRecorder
@@ -221,6 +222,30 @@ class ExecutionJournal(ExecutionRecorder):
             raise RuntimeError("READY ExternalAction does not project to READY ToolCall")
         return call, snapshot, action
 
+    async def load_unknown_external_action(
+        self,
+        run_id: UUID,
+    ) -> tuple[ToolCall, ActionSnapshot, ExternalAction] | None:
+        actions = [
+            action
+            for action in self.external_actions
+            if action.run_id == run_id and action.status is ExternalActionStatus.UNKNOWN
+        ]
+        if len(actions) > 1:
+            raise RuntimeError("found multiple UNKNOWN ExternalActions for one Run")
+        if not actions:
+            return None
+        action = actions[0]
+        call = next(item for item in self.tool_calls if item.id == action.tool_call_id)
+        snapshot = next(
+            item for item in self.action_snapshots if item.id == action.action_snapshot_id
+        )
+        if action.current_attempt_id is not None:
+            raise RuntimeError("UNKNOWN ExternalAction cannot retain current_attempt_id")
+        if call.status is not ToolCallStatus.UNRESOLVED:
+            raise RuntimeError("UNKNOWN ExternalAction does not project to UNRESOLVED ToolCall")
+        return call, snapshot, action
+
     async def record_side_effect_attempt_started(
         self,
         call: ToolCall,
@@ -365,6 +390,108 @@ class ExecutionJournal(ExecutionRecorder):
                 },
             )
         )
+
+    async def record_side_effect_unknown(
+        self,
+        call: ToolCall,
+        action: ExternalAction,
+        attempt: ToolExecutionAttempt,
+        *,
+        error: str,
+        error_class: str,
+        outcome_reason: str,
+        expected_generation: int,
+    ) -> None:
+        if call.status is not ToolCallStatus.EXECUTING:
+            raise ValueError("UNKNOWN persistence requires EXECUTING ToolCall")
+        if action.status is not ExternalActionStatus.EXECUTING:
+            raise ValueError("UNKNOWN persistence requires EXECUTING ExternalAction")
+        if action.current_attempt_id != attempt.id:
+            raise ValueError("UNKNOWN persistence attempt is not current")
+        durable_attempt = self._started_tool_attempt(call.id)
+        if durable_attempt.id != attempt.id or durable_attempt.external_action_id != action.id:
+            raise RuntimeError("UNKNOWN durable attempt mismatch")
+        durable_attempt.mark_unknown(
+            outcome_reason,
+            error=error,
+            error_class=error_class,
+        )
+        call.unresolve(error)
+        action.mark_unknown()
+        self.events.append(
+            DomainEvent(
+                call.run_id,
+                len(self.events) + 1,
+                EventType.ACTION_UNKNOWN,
+                {
+                    "tool_call_id": str(call.id),
+                    "external_action_id": str(action.id),
+                    "operation_id": str(action.operation_id),
+                    "attempt_id": str(attempt.id),
+                    "attempt_number": attempt.attempt_number,
+                    "error_class": error_class,
+                    "outcome_reason": outcome_reason,
+                },
+            )
+        )
+
+    async def record_side_effect_definite_failure_and_fail_run(
+        self,
+        call: ToolCall,
+        action: ExternalAction,
+        attempt: ToolExecutionAttempt,
+        run: Run,
+        *,
+        error: str,
+        error_class: str,
+        expected_generation: int,
+    ) -> None:
+        if run.status is not RunStatus.FAILED:
+            raise ValueError("definite side-effect failure requires FAILED Run")
+        if call.status is not ToolCallStatus.EXECUTING:
+            raise ValueError("definite side-effect failure requires EXECUTING ToolCall")
+        if action.status is not ExternalActionStatus.EXECUTING:
+            raise ValueError("definite side-effect failure requires EXECUTING ExternalAction")
+        if action.current_attempt_id != attempt.id:
+            raise ValueError("definite side-effect failure attempt is not current")
+        durable_attempt = self._started_tool_attempt(call.id)
+        if durable_attempt.id != attempt.id or durable_attempt.external_action_id != action.id:
+            raise RuntimeError("definite side-effect durable attempt mismatch")
+        durable_attempt.fail(
+            error,
+            error_class=error_class,
+            definite_not_executed=True,
+            outcome_reason="SIDE_EFFECT_DEFINITE_NOT_EXECUTED",
+        )
+        call.fail(error)
+        action.fail_definite_not_executed()
+        self._append_event(
+            run,
+            EventType.ACTION_FAILED,
+            {
+                "tool_call_id": str(call.id),
+                "external_action_id": str(action.id),
+                "operation_id": str(action.operation_id),
+                "attempt_id": str(attempt.id),
+                "attempt_number": attempt.attempt_number,
+                "error_class": error_class,
+                "definite_not_executed": True,
+            },
+        )
+        self._append_event(
+            run,
+            EventType.TOOL_FAILED,
+            {
+                "tool_call_id": str(call.id),
+                "tool_name": call.tool_name,
+                "attempt_id": str(attempt.id),
+                "attempt_number": attempt.attempt_number,
+                "error_class": error_class,
+                "definite_not_executed": True,
+                "error": error,
+            },
+        )
+        self._append_event(run, EventType.RUN_FAILED, {"reason": run.failure_reason})
 
     async def record_recovered_read_started(
         self,
@@ -913,7 +1040,7 @@ class RunManager:
         prepared: PreparedExternalAction,
         recorder: ExecutionRecorder,
         expected_generation: int,
-    ) -> RunMessage:
+    ) -> RunMessage | None:
         try:
             attempt = await recorder.record_side_effect_attempt_started(
                 prepared.call,
@@ -931,7 +1058,46 @@ class RunManager:
             )
             raise RunExecutionFailedError(run.failure_reason) from exc
 
-        call = await self._tools.execute_side_effect(prepared, attempt)
+        try:
+            call = await self._tools.execute_side_effect(prepared, attempt)
+        except ToolAdapterError as exc:
+            if exc.definite_not_executed:
+                reason = (
+                    f"side-effect tool {prepared.call.tool_name} definitely did not execute: {exc}"
+                )
+                run.fail(reason)
+                await recorder.record_side_effect_definite_failure_and_fail_run(
+                    prepared.call,
+                    prepared.action,
+                    attempt,
+                    run,
+                    error=str(exc),
+                    error_class=exc.error_class,
+                    expected_generation=expected_generation,
+                )
+                raise RunExecutionFailedError(run.failure_reason) from exc
+            await recorder.record_side_effect_unknown(
+                prepared.call,
+                prepared.action,
+                attempt,
+                error=str(exc),
+                error_class=exc.error_class,
+                outcome_reason="SIDE_EFFECT_POSSIBLE_EXECUTION",
+                expected_generation=expected_generation,
+            )
+            return None
+        except Exception as exc:
+            await recorder.record_side_effect_unknown(
+                prepared.call,
+                prepared.action,
+                attempt,
+                error=str(exc),
+                error_class=type(exc).__name__,
+                outcome_reason="SIDE_EFFECT_UNCLASSIFIED_EXCEPTION_AFTER_COMMIT",
+                expected_generation=expected_generation,
+            )
+            return None
+
         message = RunMessage(
             run.id,
             0,
@@ -973,6 +1139,12 @@ class RunManager:
         progression_steps = 0
         prepared: PreparedToolCall | PreparedExternalAction
 
+        # D1 safety stop: unresolved external truth outranks new model reasoning.
+        # D2/D3 will add takeover/reconciliation continuation from this durable fact.
+        unknown_action = await recorder.load_unknown_external_action(run.id)
+        if unknown_action is not None:
+            return None
+
         ready_action = await recorder.load_ready_external_action(run.id)
         if ready_action is not None:
             ready_call, ready_snapshot, external_action = ready_action
@@ -988,6 +1160,8 @@ class RunManager:
                 recorder=recorder,
                 expected_generation=expected_generation,
             )
+            if recovered_message is None:
+                return None
             messages.append(recovered_message)
             progression_steps += 1
 
@@ -1179,6 +1353,8 @@ class RunManager:
                     recorder=recorder,
                     expected_generation=expected_generation,
                 )
+                if side_effect_message is None:
+                    return None
                 messages.append(side_effect_message)
                 progression_steps += 1
                 continue

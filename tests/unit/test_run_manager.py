@@ -3,7 +3,11 @@ from uuid import uuid4
 
 import pytest
 
-from agentforge.application.errors import RunExecutionFailedError, ToolTransientError
+from agentforge.application.errors import (
+    RunExecutionFailedError,
+    ToolAdapterError,
+    ToolTransientError,
+)
 from agentforge.application.run_manager import ExecutionJournal, RunManager
 from agentforge.domain.enums import (
     EventType,
@@ -1297,3 +1301,224 @@ async def test_action_commit_budget_block_aborts_ready_action_without_external_i
     assert journal.tool_calls[0].status is ToolCallStatus.NOT_EXECUTED
     assert journal.tool_attempts == []
     assert state.tool_attempts_used == 1
+
+
+@pytest.mark.asyncio
+async def test_side_effect_possible_execution_becomes_unknown_and_stops_reasoning() -> None:
+    from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode, ToolEffectType
+
+    version_id = uuid4()
+    calls = 0
+
+    async def ambiguous(_invocation):
+        nonlocal calls
+        calls += 1
+        raise ToolAdapterError(
+            "provider timed out after request write",
+            error_class="TIMEOUT",
+            definite_not_executed=False,
+        )
+
+    registry = InMemoryToolRegistry(
+        [
+            SideEffectFunctionTool(
+                version_id=version_id,
+                name="create_ticket_unknown",
+                description="create ticket",
+                input_schema={"type": "object"},
+                func=ambiguous,
+            )
+        ]
+    )
+    model = ScriptedFakeModel(
+        [
+            ToolStep("create_ticket_unknown", {"summary": "ambiguous"}),
+            FinalStep("must not be reached"),
+        ]
+    )
+    manager = RunManager(NativeRunner(model, registry), ToolCoordinator(registry))
+    av = AgentVersion(
+        uuid4(),
+        uuid4(),
+        1,
+        "unknown boundary",
+        (
+            ToolBinding(
+                version_id,
+                "create_ticket_unknown",
+                effect_type=ToolEffectType.EXTERNAL_SIDE_EFFECT,
+                allow_no_approval_execution=True,
+                idempotency_supported=False,
+                reconciliation_mode=ReconciliationMode.AUTHORITATIVE,
+            ),
+        ),
+    )
+    run = Run(uuid4(), av.id, "create ticket")
+    run.queue()
+    state = RunState(run.id)
+    journal = ExecutionJournal()
+
+    result = await manager.execute(
+        run=run,
+        run_state=state,
+        agent_version=av,
+        recorder=journal,
+    )
+
+    assert result is None
+    assert calls == 1
+    assert run.status is RunStatus.RUNNING
+    assert state.model_invocations_used == 1
+    assert state.tool_attempts_used == 1
+    assert journal.tool_calls[0].status is ToolCallStatus.UNRESOLVED
+    assert journal.tool_attempts[0].status is ToolExecutionAttemptStatus.UNKNOWN
+    assert journal.tool_attempts[0].definite_not_executed is False
+    assert journal.tool_attempts[0].error_class == "TIMEOUT"
+    assert journal.external_actions[0].status is ExternalActionStatus.UNKNOWN
+    assert journal.external_actions[0].current_attempt_id is None
+    assert EventType.ACTION_UNKNOWN in [event.type for event in journal.events]
+
+    # A second execution pass observes durable UNKNOWN first and must not ask
+    # the model for a replacement proposal.
+    second = await manager.execute(
+        run=run,
+        run_state=state,
+        agent_version=av,
+        recorder=journal,
+    )
+    assert second is None
+    assert state.model_invocations_used == 1
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_unclassified_side_effect_exception_is_conservatively_unknown() -> None:
+    from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode, ToolEffectType
+
+    version_id = uuid4()
+
+    async def ambiguous(_invocation):
+        raise TimeoutError("socket closed after request may have been accepted")
+
+    registry = InMemoryToolRegistry(
+        [
+            SideEffectFunctionTool(
+                version_id=version_id,
+                name="unclassified_write",
+                description="write",
+                input_schema={"type": "object"},
+                func=ambiguous,
+            )
+        ]
+    )
+    manager = RunManager(
+        NativeRunner(
+            ScriptedFakeModel([ToolStep("unclassified_write", {"value": "x"})]),
+            registry,
+        ),
+        ToolCoordinator(registry),
+    )
+    av = AgentVersion(
+        uuid4(),
+        uuid4(),
+        1,
+        "conservative unknown",
+        (
+            ToolBinding(
+                version_id,
+                "unclassified_write",
+                effect_type=ToolEffectType.WRITE,
+                allow_no_approval_execution=True,
+                reconciliation_mode=ReconciliationMode.NONE,
+            ),
+        ),
+    )
+    run = Run(uuid4(), av.id, "write")
+    run.queue()
+    state = RunState(run.id)
+    journal = ExecutionJournal()
+
+    assert (
+        await manager.execute(
+            run=run,
+            run_state=state,
+            agent_version=av,
+            recorder=journal,
+        )
+        is None
+    )
+    assert journal.tool_attempts[0].status is ToolExecutionAttemptStatus.UNKNOWN
+    assert journal.tool_attempts[0].error_class == "TimeoutError"
+    assert journal.tool_calls[0].status is ToolCallStatus.UNRESOLVED
+    assert journal.external_actions[0].status is ExternalActionStatus.UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_definite_not_executed_side_effect_failure_is_not_unknown() -> None:
+    from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode, ToolEffectType
+
+    version_id = uuid4()
+
+    async def rejected_before_send(_invocation):
+        raise ToolAdapterError(
+            "credential lookup failed before request",
+            error_class="CREDENTIAL",
+            definite_not_executed=True,
+        )
+
+    registry = InMemoryToolRegistry(
+        [
+            SideEffectFunctionTool(
+                version_id=version_id,
+                name="definite_write_failure",
+                description="write",
+                input_schema={"type": "object"},
+                func=rejected_before_send,
+            )
+        ]
+    )
+    manager = RunManager(
+        NativeRunner(
+            ScriptedFakeModel([ToolStep("definite_write_failure", {})]),
+            registry,
+        ),
+        ToolCoordinator(registry),
+    )
+    av = AgentVersion(
+        uuid4(),
+        uuid4(),
+        1,
+        "definite nonexecution",
+        (
+            ToolBinding(
+                version_id,
+                "definite_write_failure",
+                effect_type=ToolEffectType.WRITE,
+                allow_no_approval_execution=True,
+                reconciliation_mode=ReconciliationMode.NONE,
+            ),
+        ),
+    )
+    run = Run(uuid4(), av.id, "write")
+    run.queue()
+    state = RunState(run.id)
+    journal = ExecutionJournal()
+
+    with pytest.raises(RunExecutionFailedError, match="definitely did not execute"):
+        await manager.execute(
+            run=run,
+            run_state=state,
+            agent_version=av,
+            recorder=journal,
+        )
+
+    assert run.status is RunStatus.FAILED
+    assert journal.tool_attempts[0].status is ToolExecutionAttemptStatus.FAILED
+    assert journal.tool_attempts[0].definite_not_executed is True
+    assert journal.tool_attempts[0].error_class == "CREDENTIAL"
+    assert journal.tool_calls[0].status is ToolCallStatus.FAILED
+    assert journal.external_actions[0].status is ExternalActionStatus.FAILED
+    assert journal.external_actions[0].current_attempt_id is None
+    event_types = [event.type for event in journal.events]
+    assert EventType.ACTION_FAILED in event_types
+    assert EventType.ACTION_UNKNOWN not in event_types
