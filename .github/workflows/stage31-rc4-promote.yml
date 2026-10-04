@@ -196,17 +196,21 @@ jobs:
 
           runtime_store = root / "src/agentforge/infrastructure/db/runtime_store.py"
           runtime_text = runtime_store.read_text()
-          old_create_boundary = """            session.add_all(
-                [
-                    row,
-                    RunStateRow(run_id=run_id, state_version=0, turn_count=0, tool_call_count=0),
-"""
-          new_create_boundary = """            session.add(row)
-            await session.flush()
-            session.add_all(
-                [
-                    RunStateRow(run_id=run_id, state_version=0, turn_count=0, tool_call_count=0),
-"""
+          old_create_lines = [
+              '            session.add_all(',
+              '                [',
+              '                    row,',
+              '                    RunStateRow(run_id=run_id, state_version=0, turn_count=0, tool_call_count=0),',
+          ]
+          new_create_lines = [
+              '            session.add(row)',
+              '            await session.flush()',
+              '            session.add_all(',
+              '                [',
+              '                    RunStateRow(run_id=run_id, state_version=0, turn_count=0, tool_call_count=0),',
+          ]
+          old_create_boundary = "\n".join(old_create_lines) + "\n"
+          new_create_boundary = "\n".join(new_create_lines) + "\n"
           if runtime_text.count(old_create_boundary) != 1:
               raise SystemExit(
                   "create_run parent/child flush boundary changed; refusing blind replacement"
