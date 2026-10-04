@@ -1,0 +1,39 @@
+name: Stage 3.2-D3 Exact Gate Diagnostic
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/RUN_STAGE32_D3_EXACT_DIAG
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: stage32-d3-debug
+          persist-credentials: true
+
+      - name: Run exact target gate and capture output
+        shell: bash
+        run: |
+          set +e
+          ./scripts/validate_stage31_containerized.sh > /tmp/d3-exact-gate.log 2>&1
+          code=$?
+          set -e
+          mkdir -p diagnostics
+          {
+            echo "exit_code=$code"
+            cat /tmp/d3-exact-gate.log
+          } > diagnostics/stage32-d3-exact-gate.log
+          git config user.name "agentforge-stage32-bot"
+          git config user.email "agentforge-stage32-bot@users.noreply.github.com"
+          git add diagnostics/stage32-d3-exact-gate.log
+          git commit -m "debug: capture Stage 3.2-D3 exact gate output" || true
+          git push origin HEAD:stage32-d3-debug
+          exit 0
