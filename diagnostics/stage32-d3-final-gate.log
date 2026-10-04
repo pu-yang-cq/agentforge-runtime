@@ -1,4 +1,4 @@
-exit_code=1
+exit_code=0
 ==> Stage 3.1 acceptance: isolated Python 3.14 + PostgreSQL 18 environment
  postgres Pulling 
  774043ccc8cc Pulling fs layer 
@@ -14,16 +14,16 @@ exit_code=1
  5178c10d12ba Pulling fs layer 
  9dd6e8795674 Pulling fs layer 
  ddda533f81f8 Pulling fs layer 
- a9bacfc8d232 Waiting 
+ 5178c10d12ba Waiting 
+ d1c18bcbca3a Waiting 
  c043c1caa591 Waiting 
+ 0e6c3beb32b1 Waiting 
  6bd876b3b38f Waiting 
  bdbb8057313b Waiting 
- d1c18bcbca3a Waiting 
- 0e6c3beb32b1 Waiting 
  980abddbe295 Waiting 
- 5178c10d12ba Waiting 
- 9dd6e8795674 Waiting 
+ a9bacfc8d232 Waiting 
  ddda533f81f8 Waiting 
+ 9dd6e8795674 Waiting 
  211cec8da20e Downloading [==================================================>]  1.169kB/1.169kB
  211cec8da20e Verifying Checksum 
  211cec8da20e Download complete 
@@ -31,51 +31,53 @@ exit_code=1
  774043ccc8cc Downloading [>                                                  ]  294.3kB/28.24MB
  c56d732b49fe Verifying Checksum 
  c56d732b49fe Download complete 
+ 774043ccc8cc Downloading [================================>                  ]  18.28MB/28.24MB
+ 774043ccc8cc Verifying Checksum 
+ 774043ccc8cc Download complete 
+ 774043ccc8cc Extracting [>                                                  ]  294.9kB/28.24MB
  a9bacfc8d232 Downloading [>                                                  ]  15.79kB/1.25MB
  a9bacfc8d232 Verifying Checksum 
  a9bacfc8d232 Download complete 
+ 774043ccc8cc Extracting [==========>                                        ]  5.898MB/28.24MB
  c043c1caa591 Downloading [>                                                  ]  81.32kB/8.066MB
  6bd876b3b38f Downloading [>                                                  ]  15.79kB/1.196MB
- 6bd876b3b38f Verifying Checksum 
- 6bd876b3b38f Download complete 
  c043c1caa591 Verifying Checksum 
  c043c1caa591 Download complete 
+ 774043ccc8cc Extracting [================>                                  ]  9.437MB/28.24MB
+ 6bd876b3b38f Verifying Checksum 
+ 6bd876b3b38f Download complete 
+ 774043ccc8cc Extracting [========================>                          ]  13.86MB/28.24MB
  bdbb8057313b Downloading [==================================================>]     116B/116B
  bdbb8057313b Verifying Checksum 
  bdbb8057313b Download complete 
- 774043ccc8cc Downloading [=================================================> ]  27.72MB/28.24MB
- 774043ccc8cc Verifying Checksum 
- 774043ccc8cc Download complete 
+ 774043ccc8cc Extracting [========================================>          ]  22.71MB/28.24MB
  d1c18bcbca3a Downloading [==================================================>]  3.138kB/3.138kB
  d1c18bcbca3a Verifying Checksum 
  d1c18bcbca3a Download complete 
+ 0e6c3beb32b1 Downloading [>                                                  ]  525.5kB/113.9MB
  980abddbe295 Downloading [=========>                                         ]    3.5kB/19.32kB
  980abddbe295 Downloading [==================================================>]  19.32kB/19.32kB
  980abddbe295 Verifying Checksum 
  980abddbe295 Download complete 
- 774043ccc8cc Extracting [>                                                  ]  294.9kB/28.24MB
+ 774043ccc8cc Extracting [==========================================>        ]  23.89MB/28.24MB
+ 0e6c3beb32b1 Downloading [===>                                               ]  8.958MB/113.9MB
  5178c10d12ba Downloading [==================================================>]     128B/128B
  5178c10d12ba Verifying Checksum 
  5178c10d12ba Download complete 
- 0e6c3beb32b1 Downloading [>                                                  ]  533.8kB/113.9MB
+ 0e6c3beb32b1 Downloading [==========>                                        ]  23.36MB/113.9MB
+ 774043ccc8cc Extracting [===============================================>   ]  26.84MB/28.24MB
  9dd6e8795674 Downloading [============================>                      ]  3.501kB/6.109kB
  9dd6e8795674 Downloading [==================================================>]  6.109kB/6.109kB
  9dd6e8795674 Verifying Checksum 
  9dd6e8795674 Download complete 
+ 0e6c3beb32b1 Downloading [======================>                            ]  51.19MB/113.9MB
  ddda533f81f8 Downloading [==================================================>]     184B/184B
  ddda533f81f8 Verifying Checksum 
  ddda533f81f8 Download complete 
- 774043ccc8cc Extracting [========>                                          ]  4.719MB/28.24MB
- 0e6c3beb32b1 Downloading [===========>                                       ]  26.14MB/113.9MB
- 0e6c3beb32b1 Downloading [=========================>                         ]  57.06MB/113.9MB
- 774043ccc8cc Extracting [================>                                  ]  9.142MB/28.24MB
- 0e6c3beb32b1 Downloading [======================================>            ]  88.58MB/113.9MB
- 774043ccc8cc Extracting [===================>                               ]  11.21MB/28.24MB
+ 0e6c3beb32b1 Downloading [===================================>               ]   80.6MB/113.9MB
+ 0e6c3beb32b1 Downloading [================================================>  ]  109.4MB/113.9MB
  0e6c3beb32b1 Verifying Checksum 
  0e6c3beb32b1 Download complete 
- 774043ccc8cc Extracting [================================>                  ]  18.28MB/28.24MB
- 774043ccc8cc Extracting [==========================================>        ]  23.89MB/28.24MB
- 774043ccc8cc Extracting [===============================================>   ]  26.84MB/28.24MB
  774043ccc8cc Extracting [================================================>  ]  27.43MB/28.24MB
  774043ccc8cc Extracting [==================================================>]  28.24MB/28.24MB
  774043ccc8cc Pull complete 
@@ -89,8 +91,8 @@ exit_code=1
  a9bacfc8d232 Extracting [==================================================>]   1.25MB/1.25MB
  a9bacfc8d232 Pull complete 
  c043c1caa591 Extracting [>                                                  ]   98.3kB/8.066MB
- c043c1caa591 Extracting [=======================>                           ]  3.834MB/8.066MB
- c043c1caa591 Extracting [====================================>              ]  5.898MB/8.066MB
+ c043c1caa591 Extracting [========================>                          ]  3.932MB/8.066MB
+ c043c1caa591 Extracting [======================================>            ]  6.193MB/8.066MB
  c043c1caa591 Extracting [==================================================>]  8.066MB/8.066MB
  c043c1caa591 Pull complete 
  6bd876b3b38f Extracting [=>                                                 ]  32.77kB/1.196MB
@@ -106,23 +108,22 @@ exit_code=1
  0e6c3beb32b1 Extracting [>                                                  ]  557.1kB/113.9MB
  0e6c3beb32b1 Extracting [===>                                               ]  8.356MB/113.9MB
  0e6c3beb32b1 Extracting [====>                                              ]  11.14MB/113.9MB
- 0e6c3beb32b1 Extracting [======>                                            ]   15.6MB/113.9MB
- 0e6c3beb32b1 Extracting [========>                                          ]   19.5MB/113.9MB
- 0e6c3beb32b1 Extracting [===========>                                       ]  25.62MB/113.9MB
- 0e6c3beb32b1 Extracting [===============>                                   ]  34.54MB/113.9MB
- 0e6c3beb32b1 Extracting [===================>                               ]  44.01MB/113.9MB
- 0e6c3beb32b1 Extracting [=======================>                           ]  52.92MB/113.9MB
- 0e6c3beb32b1 Extracting [=========================>                         ]  57.93MB/113.9MB
- 0e6c3beb32b1 Extracting [============================>                      ]  65.18MB/113.9MB
- 0e6c3beb32b1 Extracting [=================================>                 ]  75.76MB/113.9MB
- 0e6c3beb32b1 Extracting [====================================>              ]  84.12MB/113.9MB
- 0e6c3beb32b1 Extracting [========================================>          ]  93.03MB/113.9MB
- 0e6c3beb32b1 Extracting [==========================================>        ]  97.48MB/113.9MB
- 0e6c3beb32b1 Extracting [============================================>      ]  101.4MB/113.9MB
- 0e6c3beb32b1 Extracting [=============================================>     ]  104.7MB/113.9MB
- 0e6c3beb32b1 Extracting [===============================================>   ]  108.1MB/113.9MB
- 0e6c3beb32b1 Extracting [================================================>  ]  109.7MB/113.9MB
- 0e6c3beb32b1 Extracting [================================================>  ]  111.4MB/113.9MB
+ 0e6c3beb32b1 Extracting [=======>                                           ]  16.15MB/113.9MB
+ 0e6c3beb32b1 Extracting [=========>                                         ]  21.73MB/113.9MB
+ 0e6c3beb32b1 Extracting [============>                                      ]  27.85MB/113.9MB
+ 0e6c3beb32b1 Extracting [================>                                  ]  37.32MB/113.9MB
+ 0e6c3beb32b1 Extracting [====================>                              ]  46.24MB/113.9MB
+ 0e6c3beb32b1 Extracting [========================>                          ]  55.15MB/113.9MB
+ 0e6c3beb32b1 Extracting [==========================>                        ]  60.72MB/113.9MB
+ 0e6c3beb32b1 Extracting [==============================>                    ]  69.63MB/113.9MB
+ 0e6c3beb32b1 Extracting [==================================>                ]  79.66MB/113.9MB
+ 0e6c3beb32b1 Extracting [======================================>            ]  88.57MB/113.9MB
+ 0e6c3beb32b1 Extracting [==========================================>        ]  96.37MB/113.9MB
+ 0e6c3beb32b1 Extracting [===========================================>       ]  99.71MB/113.9MB
+ 0e6c3beb32b1 Extracting [============================================>      ]  102.5MB/113.9MB
+ 0e6c3beb32b1 Extracting [==============================================>    ]  106.4MB/113.9MB
+ 0e6c3beb32b1 Extracting [===============================================>   ]  108.6MB/113.9MB
+ 0e6c3beb32b1 Extracting [================================================>  ]  110.3MB/113.9MB
  0e6c3beb32b1 Extracting [=================================================> ]  112.5MB/113.9MB
  0e6c3beb32b1 Extracting [==================================================>]  113.9MB/113.9MB
  0e6c3beb32b1 Pull complete 
@@ -152,25 +153,25 @@ validator-1  | Using CPython 3.14.7 interpreter at: /usr/local/bin/python3.14
 validator-1  | Resolved 52 packages in 1ms
 validator-1  | Using CPython 3.14.7 interpreter at: /usr/local/bin/python3.14
 validator-1  | Creating virtual environment at: /tmp/agentforge-venv
-validator-1  | Resolved 52 packages in 0.94ms
+validator-1  | Resolved 52 packages in 0.86ms
 validator-1  |    Building agentforge @ file:///workspace
 validator-1  |       Built agentforge @ file:///workspace
-validator-1  | Downloading pydantic-core (2.0MiB)
-validator-1  | Downloading sqlalchemy (3.2MiB)
-validator-1  | Downloading psycopg-binary (5.0MiB)
 validator-1  | Downloading uvloop (4.2MiB)
+validator-1  | Downloading sqlalchemy (3.2MiB)
+validator-1  | Downloading pydantic-core (2.0MiB)
 validator-1  | Downloading ruff (9.9MiB)
 validator-1  | Downloading mypy (14.0MiB)
 validator-1  | Downloading pygments (1.2MiB)
-validator-1  |  Downloaded pydantic-core
+validator-1  | Downloading psycopg-binary (5.0MiB)
 validator-1  |  Downloaded pygments
+validator-1  |  Downloaded pydantic-core
 validator-1  |  Downloaded sqlalchemy
-validator-1  |  Downloaded psycopg-binary
 validator-1  |  Downloaded uvloop
+validator-1  |  Downloaded psycopg-binary
 validator-1  |  Downloaded ruff
 validator-1  |  Downloaded mypy
-validator-1  | Prepared 49 packages in 470ms
-validator-1  | Installed 49 packages in 79ms
+validator-1  | Prepared 49 packages in 607ms
+validator-1  | Installed 49 packages in 69ms
 validator-1  |  + agentforge==0.1.0 (from file:///workspace)
 validator-1  |  + alembic==1.20.0
 validator-1  |  + annotated-doc==0.0.5
@@ -225,10 +226,43 @@ validator-1  | agentforge import: /workspace/src/agentforge/__init__.py
 validator-1  | ==> Stage 3.1 container acceptance: quality gates
 validator-1  | All checks passed!
 validator-1  | 59 files already formatted
-validator-1  | src/agentforge/application/run_manager.py:1683: error: Non-overlapping identity check (left operand type: "Literal[RunStatus.QUEUED, RunStatus.RUNNING]", right operand type: "Literal[RunStatus.FAILED]")  [comparison-overlap]
-validator-1  | Found 1 error in 1 file (checked 28 source files)
-[Kvalidator-1 exited with code 1
+validator-1  | Success: no issues found in 28 source files
+validator-1  | ==> Stage 3.1 container acceptance: database identity
+validator-1  | PostgreSQL major validated: 18
+validator-1  | ==> Stage 3.1 container acceptance: Alembic online migration
+validator-1  | INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+validator-1  | INFO  [alembic.runtime.migration] Will assume transactional DDL.
+validator-1  | INFO  [alembic.runtime.migration] Running upgrade  -> 0001_core_runtime, core runtime schema
+validator-1  | INFO  [alembic.runtime.migration] Running upgrade 0001_core_runtime -> 0002_model_invocation_lifecycle, durable model invocation lifecycle
+validator-1  | INFO  [alembic.runtime.migration] Running upgrade 0002_model_invocation_lifecycle -> 0003_denied_tool_calls, persist denied tool calls without a bound tool version
+validator-1  | INFO  [alembic.runtime.migration] Running upgrade 0003_denied_tool_calls -> 0004_active_progression, enforce one active Wave-1 progression boundary per Run
+validator-1  | INFO  [alembic.runtime.migration] Running upgrade 0004_active_progression -> 0005_run_terminal_shape, enforce Wave-1 Run terminal row shape
+validator-1  | INFO  [alembic.runtime.migration] Running upgrade 0005_run_terminal_shape -> 0006_tool_attempts, add durable tool execution attempts
+validator-1  | INFO  [alembic.runtime.migration] Running upgrade 0006_tool_attempts -> 0007_run_limits, add durable run budgets and deadline
+validator-1  | INFO  [alembic.runtime.migration] Running upgrade 0007_run_limits -> 0008_read_retry_policy, add versioned READ retry policy
+validator-1  | INFO  [alembic.runtime.migration] Running upgrade 0008_read_retry_policy -> 0009_external_action_intent, add ActionSnapshot V1 and ExternalAction durable intent
+validator-1  | INFO  [alembic.runtime.migration] Running upgrade 0009_external_action_intent -> 0010_side_effect_preparation, add Stage 3.2 side-effect preparation capability
+validator-1  | INFO  [alembic.runtime.migration] Running upgrade 0010_side_effect_preparation -> 0011_side_effect_unknown, add side-effect UNKNOWN ToolCall projection
+validator-1  | INFO  [alembic.runtime.migration] Running upgrade 0011_side_effect_unknown -> 0012_side_effect_retry, add versioned side-effect safe retry policy
+validator-1  | INFO  [alembic.runtime.migration] Running upgrade 0012_side_effect_retry -> 0013_reconciliation, add Stage 3.2-D3 reconciliation lifecycle and safety policy
+validator-1  | ==> Stage 3.1 container acceptance: full test suite with mandatory PostgreSQL integration
+validator-1  | ........................................................................ [ 56%]
+validator-1  | ........................................................                 [100%]
+validator-1  | =============================== warnings summary ===============================
+validator-1  | ../tmp/agentforge-venv/lib/python3.14/site-packages/fastapi/testclient.py:1
+validator-1  |   /tmp/agentforge-venv/lib/python3.14/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+validator-1  |     from starlette.testclient import TestClient as TestClient  # noqa
+validator-1  | 
+validator-1  | tests/integration/test_postgres_runtime.py: 74 warnings
+validator-1  |   /tmp/agentforge-venv/lib/python3.14/site-packages/alembic/config.py:604: DeprecationWarning: No path_separator found in configuration; falling back to legacy splitting on spaces, commas, and colons for prepend_sys_path.  Consider adding path_separator=os to Alembic config.
+validator-1  |     util.warn_deprecated(
+validator-1  | 
+validator-1  | -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+validator-1  | 128 passed, 75 warnings in 30.68s
+validator-1  | ==> Stage 3.1 container acceptance: acceptance complete
+validator-1  | Stage 3.1 container acceptance PASSED
+[Kvalidator-1 exited with code 0
 Aborting on container exit...
  Container agentforge_stage31_acceptance-validator-1  Stopping
  Container agentforge_stage31_acceptance-validator-1  Stopped
-
+Stage 3.1 containerized target acceptance PASSED
