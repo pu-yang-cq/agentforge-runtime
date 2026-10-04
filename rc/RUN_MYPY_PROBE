@@ -1,0 +1,2 @@
+Probe the real Stage 3.1 mypy gate on exact RC2 plus package-boundary __init__.py markers.
+No source promotion is authorized by this marker.
