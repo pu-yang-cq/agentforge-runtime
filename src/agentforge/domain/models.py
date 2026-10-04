@@ -15,7 +15,6 @@ from .enums import (
     ToolExecutionAttemptStatus,
 )
 
-
 DEFAULT_MAX_MODEL_INVOCATIONS = 16
 DEFAULT_MAX_TOOL_ATTEMPTS = 32
 DEFAULT_RUN_DEADLINE_SECONDS = 15 * 60

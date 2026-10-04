@@ -151,22 +151,17 @@ def test_run_schema_enforces_terminal_row_shape() -> None:
     }.issubset(checks)
 
 
-
 def test_run_limits_have_positive_and_nonnegative_database_guards() -> None:
     run_table = Base.metadata.tables["runs"]
     run_checks = {
-        constraint.name
-        for constraint in run_table.constraints
-        if constraint.name is not None
+        constraint.name for constraint in run_table.constraints if constraint.name is not None
     }
     assert "ck_runs_positive_model_budget" in run_checks
     assert "ck_runs_positive_tool_budget" in run_checks
 
     state_table = Base.metadata.tables["run_states"]
     state_checks = {
-        constraint.name
-        for constraint in state_table.constraints
-        if constraint.name is not None
+        constraint.name for constraint in state_table.constraints if constraint.name is not None
     }
     assert "ck_run_states_nonnegative_model_usage" in state_checks
     assert "ck_run_states_nonnegative_tool_usage" in state_checks

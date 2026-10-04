@@ -65,7 +65,6 @@ def test_alembic_online_url_supports_environment_with_explicit_caller_precedence
     assert 'config.set_main_option("sqlalchemy.url", str(database_url))' in env_py
 
 
-
 def test_stage32_a2_run_limit_migration_is_forward_only_from_attempt_head() -> None:
     migration = (ROOT / "migrations" / "versions" / "0007_run_limits.py").read_text()
     assert 'revision: str = "0007_run_limits"' in migration

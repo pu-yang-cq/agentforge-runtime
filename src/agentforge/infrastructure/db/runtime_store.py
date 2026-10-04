@@ -81,9 +81,7 @@ def _lease_deadline_expr(lease_seconds: int) -> Any:
 
 
 def _run_deadline_expr() -> Any:
-    return func.clock_timestamp() + text(
-        f"INTERVAL '{int(DEFAULT_RUN_DEADLINE_SECONDS)} seconds'"
-    )
+    return func.clock_timestamp() + text(f"INTERVAL '{int(DEFAULT_RUN_DEADLINE_SECONDS)} seconds'")
 
 
 async def _allocate_event_sequences(session: AsyncSession, run_id: UUID, count: int) -> range:

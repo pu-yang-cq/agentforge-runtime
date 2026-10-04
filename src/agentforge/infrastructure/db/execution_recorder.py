@@ -999,7 +999,6 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                 )
             )
 
-
     async def record_run_yielded(
         self,
         run: Run,

@@ -430,7 +430,6 @@ async def test_non_json_read_result_durably_fails_run_instead_of_retry_loop() ->
     assert all(message.role.value != "TOOL" for message in journal.messages)
 
 
-
 @pytest.mark.asyncio
 async def test_durable_model_budget_stops_before_extra_invocation() -> None:
     version_id = uuid4()

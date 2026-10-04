@@ -1099,7 +1099,6 @@ async def test_database_rejects_invalid_completed_run_shape() -> None:
     await engine.dispose()
 
 
-
 @pytest.mark.asyncio
 async def test_run_creation_persists_database_derived_limits_and_zero_usage() -> None:
     from agentforge.domain.models import (

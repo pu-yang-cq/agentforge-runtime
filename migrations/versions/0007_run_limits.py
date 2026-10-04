@@ -29,11 +29,7 @@ def upgrade() -> None:
         "YIELD",
         "RESCHEDULED",
     ):
-        op.execute(
-            sa.text(
-                f"ALTER TYPE queue_reason ADD VALUE IF NOT EXISTS '{value}'"
-            )
-        )
+        op.execute(sa.text(f"ALTER TYPE queue_reason ADD VALUE IF NOT EXISTS '{value}'"))
 
     op.add_column(
         "runs",
