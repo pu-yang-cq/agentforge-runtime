@@ -5,3 +5,5 @@ Evidence: mypy probe run 37180341817
 Scope: apps package markers + SQLAlchemy typing narrowing only
 
 Retry after aligning promotion formatter with validated probe.
+
+Retry after moving root-owned cleanup into the validator container.
