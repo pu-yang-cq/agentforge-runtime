@@ -772,7 +772,10 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.execute("ALTER TYPE run_status ADD VALUE IF NOT EXISTS 'WAITING_ACTION_RESOLUTION'")
+    # PostgreSQL requires a newly added enum value to commit before it can be
+    # referenced by later DDL such as the Run-state CHECK constraint below.
+    with op.get_context().autocommit_block():
+        op.execute("ALTER TYPE run_status ADD VALUE IF NOT EXISTS 'WAITING_ACTION_RESOLUTION'")
 
     reconciliation_attempt_status = postgresql.ENUM(
         "STARTED",
