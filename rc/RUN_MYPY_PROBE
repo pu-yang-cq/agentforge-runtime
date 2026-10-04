@@ -1,3 +1,3 @@
-Probe exact RC2 plus apps package markers and explicit SQLAlchemy CursorResult/Select typing boundary candidate.
+Probe exact RC2 plus RC3 package/type-boundary candidate through Ruff check, Ruff format --check, and mypy strict.
 Patch SHA-256: 5c48cb711196dbc180ae055574bfe6a815e9b6e71d03a384a79d462ab727b32f
 No source promotion is authorized by this marker.
