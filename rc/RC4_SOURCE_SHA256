@@ -1,0 +1,6 @@
+Stage 3.1 V1.0-RC4 acceptance payload
+
+696a889a86fc35ea127f6fde803818269427df978d2268345ea614af56d847b7  agentforge-stage3.1-v1.0-rc4-clean.tar.gz
+
+Derived from RC3 by PostgreSQL-confirmed migration and parent-before-child persistence repairs, plus test-harness corrections from the same target gate.
+No dependency change; reviewed uv.lock remains unchanged.
