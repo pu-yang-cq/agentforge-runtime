@@ -1,0 +1,55 @@
+name: Stage 3.2-B1 Snapshot Persistence
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/RUN_STAGE32_B1
+
+permissions:
+  contents: write
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: true
+
+      - name: Apply Stage 3.2-B1 implementation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python scripts/stage32_b1_patch.py
+
+      - name: Canonically format Stage 3.2-B1 candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            -e UV_PROJECT_ENVIRONMENT=/tmp/agentforge-b1-venv \
+            -e UV_CACHE_DIR=/tmp/agentforge-b1-cache \
+            ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim \
+            sh -lc "uv sync --locked --all-groups >/dev/null && uv run --locked ruff format src migrations tests"
+
+      - name: Run Stage 3.2-B1 target gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ./scripts/validate_stage31_containerized.sh
+
+      - name: Commit Stage 3.2-B1 only if green
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "agentforge-stage32-bot"
+          git config user.email "agentforge-stage32-bot@users.noreply.github.com"
+          git rm scripts/stage32_b1_patch.py
+          git add src migrations tests
+          git diff --cached --check
+          git commit -m "feat(runtime): add ActionSnapshot V1 and ExternalAction intent schema"
+          git push origin HEAD:main
