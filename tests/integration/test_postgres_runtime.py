@@ -31,9 +31,11 @@ if not DATABASE_URL:
 from agentforge.application.errors import (
     BusinessProgressionBlockedError,
     IdempotencyConflictError,
+    RunExecutionFailedError,
     StaleExecutorError,
     ToolTransientError,
 )
+from agentforge.application.run_manager import RunManager
 from agentforge.application.worker import CoreWorker
 from agentforge.demo import (
     DEMO_AGENT_ID,
@@ -65,13 +67,15 @@ from agentforge.infrastructure.db.models import (
     ToolCallRow,
     ToolDefinitionRow,
     ToolExecutionAttemptRow,
+    ToolProposalRow,
     ToolVersionRow,
 )
 from agentforge.infrastructure.db.runtime_store import PostgresRuntimeStore
 from agentforge.infrastructure.db.session import create_engine, create_session_factory
 from agentforge.runtime.fake_model import FinalStep, ScriptedFakeModel, ToolStep
+from agentforge.runtime.native_runner import NativeRunner
 from agentforge.runtime.tool_coordinator import ToolCoordinator
-from agentforge.runtime.tools import FunctionTool, InMemoryToolRegistry
+from agentforge.runtime.tools import FunctionTool, InMemoryToolRegistry, SideEffectFunctionTool
 
 
 def reset_schema() -> None:
@@ -1770,12 +1774,14 @@ async def test_side_effect_preparation_commits_intent_without_attempt_or_externa
                 input_schema={"type": "object"},
                 func=lambda text: {"echo": text},
             ),
-            FunctionTool(
+            SideEffectFunctionTool(
                 version_id=side_version_id,
                 name="create_ticket",
                 description="external side effect",
                 input_schema={"type": "object"},
-                func=forbidden_external_call,
+                func=lambda invocation: forbidden_external_call(
+                    str(invocation.arguments["summary"])
+                ),
             ),
         ]
     )
@@ -1786,18 +1792,37 @@ async def test_side_effect_preparation_commits_intent_without_attempt_or_externa
         idempotency_key="integration-side-effect-preparation-1",
         principal_scope="test-user",
     )
-    worker = CoreWorker(
-        runtime_store=store,
-        recorder_factory=PostgresExecutionRecorderFactory(sessions),
-        tool_registry=registry,
-        model_factory=lambda _: ScriptedFakeModel(
-            [ToolStep("create_ticket", {"summary": "durable intent"})]
-        ),
-        worker_id="worker-side-effect-b2",
-        lease_seconds=30,
+    claimed = await store.claim_next_run(worker_id="worker-side-effect-b2", lease_seconds=30)
+    assert claimed is not None
+    recorder = PostgresExecutionRecorder(
+        sessions,
+        run_id=created.id,
+        generation=claimed.execution_generation,
     )
-
-    assert await worker.run_once() is True
+    _, invocation = await recorder.begin_model_invocation(
+        run_id=created.id,
+        invocation_id=uuid4(),
+        expected_generation=claimed.execution_generation,
+    )
+    invocation.complete("TOOL_PROPOSAL")
+    proposal = ToolProposal.create(
+        run_id=created.id,
+        model_invocation_id=invocation.id,
+        tool_name="create_ticket",
+        arguments={"summary": "durable intent"},
+    )
+    prepared = ToolCoordinator(registry).prepare_side_effect(
+        proposal=proposal,
+        agent_version=await store.load_agent_version(DEMO_AGENT_VERSION_ID),
+    )
+    await recorder.record_model_side_effect_prepared(
+        invocation,
+        proposal,
+        prepared.call,
+        prepared.snapshot,
+        prepared.action,
+        expected_generation=claimed.execution_generation,
+    )
     assert physical_calls == 0
 
     refreshed = await store.get_run(created.id)
@@ -1902,12 +1927,12 @@ async def test_side_effect_preparation_stale_lease_creates_no_intent() -> None:
                 input_schema={"type": "object"},
                 func=lambda text: {"echo": text},
             ),
-            FunctionTool(
+            SideEffectFunctionTool(
                 version_id=side_version_id,
                 name="write_stale",
                 description="write",
                 input_schema={"type": "object"},
-                func=lambda: {"must": "not run"},
+                func=lambda invocation: {"must": "not run"},
             ),
         ]
     )
@@ -2014,12 +2039,12 @@ async def test_side_effect_preparation_rechecks_durable_toolversion_eligibility(
                 input_schema={"type": "object"},
                 func=lambda text: {"echo": text},
             ),
-            FunctionTool(
+            SideEffectFunctionTool(
                 version_id=side_version_id,
                 name="write_policy",
                 description="write",
                 input_schema={"type": "object"},
-                func=lambda: {"must": "not run"},
+                func=lambda invocation: {"must": "not run"},
             ),
         ]
     )
@@ -2073,4 +2098,454 @@ async def test_side_effect_preparation_rechecks_durable_toolversion_eligibility(
     async with sessions() as session:
         assert await session.scalar(select(func.count()).select_from(ExternalActionRow)) == 0
         assert await session.scalar(select(func.count()).select_from(ActionSnapshotRow)) == 0
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_action_commit_is_visible_before_physical_side_effect() -> None:
+    from agentforge.application.ports import SideEffectInvocation
+    from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode
+    from agentforge.infrastructure.db.models import (
+        ActionSnapshotRow,
+        ExternalActionRow,
+        RunStateRow,
+    )
+
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+
+    side_tool_id = uuid4()
+    side_version_id = uuid4()
+    async with sessions() as session, session.begin():
+        session.add(
+            ToolDefinitionRow(id=side_tool_id, name="create_commit_ticket", description="write")
+        )
+        await session.flush()
+        session.add(
+            ToolVersionRow(
+                id=side_version_id,
+                tool_id=side_tool_id,
+                version_number=1,
+                input_schema={"type": "object"},
+                effect_type=ToolEffectType.EXTERNAL_SIDE_EFFECT,
+                implementation_ref="tests:create_commit_ticket",
+                allow_no_approval_execution=True,
+                credential_ref="credential://jira/c1-integration",
+                idempotency_supported=True,
+                reconciliation_mode=ReconciliationMode.AUTHORITATIVE,
+            )
+        )
+        await session.flush()
+        session.add(
+            AgentVersionToolRow(
+                agent_version_id=DEMO_AGENT_VERSION_ID,
+                tool_version_id=side_version_id,
+                tool_alias="create_commit_ticket",
+            )
+        )
+
+    physical_calls = 0
+
+    async def external_effect(invocation: SideEffectInvocation):
+        nonlocal physical_calls
+        # A fresh transaction must see the full authorization tuple before effect.
+        async with sessions() as observer:
+            action = (
+                await observer.execute(
+                    select(ExternalActionRow).where(
+                        ExternalActionRow.operation_id == invocation.operation_id
+                    )
+                )
+            ).scalar_one()
+            call = await observer.get(ToolCallRow, action.tool_call_id)
+            snapshot = await observer.get(ActionSnapshotRow, action.action_snapshot_id)
+            attempt = await observer.get(ToolExecutionAttemptRow, action.current_attempt_id)
+            state = await observer.get(RunStateRow, action.run_id)
+            assert call is not None and call.status is ToolCallStatus.EXECUTING
+            assert snapshot is not None and snapshot.digest
+            assert snapshot.operation_id == invocation.operation_id
+            assert action.status is ExternalActionStatus.EXECUTING
+            assert action.current_attempt_id is not None
+            assert attempt is not None
+            assert attempt.status is ToolExecutionAttemptStatus.STARTED
+            assert attempt.external_action_id == action.id
+            assert state is not None and state.tool_attempts_used == 1
+        physical_calls += 1
+        return {"ticket_id": "T-C1", "operation_id": str(invocation.operation_id)}
+
+    registry = InMemoryToolRegistry(
+        [
+            FunctionTool(
+                version_id=DEMO_TOOL_VERSION_ID,
+                name="echo_read",
+                description="read",
+                input_schema={"type": "object"},
+                func=lambda text: {"echo": text},
+            ),
+            SideEffectFunctionTool(
+                version_id=side_version_id,
+                name="create_commit_ticket",
+                description="write",
+                input_schema={"type": "object"},
+                func=external_effect,
+            ),
+        ]
+    )
+    store = PostgresRuntimeStore(sessions)
+    created = await store.create_run(
+        agent_version_id=DEMO_AGENT_VERSION_ID,
+        input_text="commit before effect",
+        idempotency_key="integration-action-commit-visible-1",
+        principal_scope="test-user",
+    )
+    worker = CoreWorker(
+        runtime_store=store,
+        recorder_factory=PostgresExecutionRecorderFactory(sessions),
+        tool_registry=registry,
+        model_factory=lambda _: ScriptedFakeModel(
+            [
+                ToolStep("create_commit_ticket", {"summary": "commit first"}),
+                FinalStep("ticket created"),
+            ]
+        ),
+        worker_id="worker-action-commit",
+        lease_seconds=30,
+    )
+
+    assert await worker.run_once() is True
+    assert physical_calls == 1
+
+    durable = await store.get_run(created.id)
+    assert durable is not None and durable.status is RunStatus.COMPLETED
+    state = await store.load_run_state(created.id)
+    assert state.tool_attempts_used == 1
+
+    async with sessions() as session:
+        action = (
+            (
+                await session.execute(
+                    select(ExternalActionRow).where(ExternalActionRow.run_id == created.id)
+                )
+            )
+            .scalars()
+            .one()
+        )
+        call = await session.get(ToolCallRow, action.tool_call_id)
+        attempt = (
+            (
+                await session.execute(
+                    select(ToolExecutionAttemptRow).where(
+                        ToolExecutionAttemptRow.external_action_id == action.id
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
+        event_types = (
+            (
+                await session.execute(
+                    select(DomainEventRow.event_type)
+                    .where(DomainEventRow.run_id == created.id)
+                    .order_by(DomainEventRow.sequence)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert action.status is ExternalActionStatus.SUCCEEDED
+    assert action.current_attempt_id is None
+    assert call is not None and call.status is ToolCallStatus.SUCCEEDED
+    assert attempt.status is ToolExecutionAttemptStatus.SUCCEEDED
+    assert EventType.ACTION_PREPARED.value in event_types
+    assert EventType.ACTION_COMMITTED.value in event_types
+    assert EventType.ACTION_SUCCEEDED.value in event_types
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ready_action_recovery_uses_same_operation_id_without_model_reproposal() -> None:
+    from agentforge.application.ports import SideEffectInvocation
+    from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode
+    from agentforge.infrastructure.db.models import ExternalActionRow
+
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+
+    side_tool_id = uuid4()
+    side_version_id = uuid4()
+    async with sessions() as session, session.begin():
+        session.add(ToolDefinitionRow(id=side_tool_id, name="recover_write", description="write"))
+        await session.flush()
+        session.add(
+            ToolVersionRow(
+                id=side_version_id,
+                tool_id=side_tool_id,
+                version_number=1,
+                input_schema={"type": "object"},
+                effect_type=ToolEffectType.WRITE,
+                implementation_ref="tests:recover_write",
+                allow_no_approval_execution=True,
+                idempotency_supported=True,
+                reconciliation_mode=ReconciliationMode.NONE,
+            )
+        )
+        await session.flush()
+        session.add(
+            AgentVersionToolRow(
+                agent_version_id=DEMO_AGENT_VERSION_ID,
+                tool_version_id=side_version_id,
+                tool_alias="recover_write",
+            )
+        )
+
+    observed_operation_ids = []
+
+    async def external_effect(invocation: SideEffectInvocation):
+        observed_operation_ids.append(invocation.operation_id)
+        return {"resource_id": "R-RECOVERED"}
+
+    registry = InMemoryToolRegistry(
+        [
+            FunctionTool(
+                version_id=DEMO_TOOL_VERSION_ID,
+                name="echo_read",
+                description="read",
+                input_schema={"type": "object"},
+                func=lambda text: {"echo": text},
+            ),
+            SideEffectFunctionTool(
+                version_id=side_version_id,
+                name="recover_write",
+                description="write",
+                input_schema={"type": "object"},
+                func=external_effect,
+            ),
+        ]
+    )
+    store = PostgresRuntimeStore(sessions)
+    created = await store.create_run(
+        agent_version_id=DEMO_AGENT_VERSION_ID,
+        input_text="recover ready action",
+        idempotency_key="integration-ready-action-recovery-1",
+        principal_scope="test-user",
+    )
+    claimed_a = await store.claim_next_run(worker_id="worker-ready-a", lease_seconds=1)
+    assert claimed_a is not None
+    recorder_a = PostgresExecutionRecorder(
+        sessions,
+        run_id=created.id,
+        generation=claimed_a.execution_generation,
+    )
+    _, invocation = await recorder_a.begin_model_invocation(
+        run_id=created.id,
+        invocation_id=uuid4(),
+        expected_generation=claimed_a.execution_generation,
+    )
+    invocation.complete("TOOL_PROPOSAL")
+    proposal = ToolProposal.create(
+        run_id=created.id,
+        model_invocation_id=invocation.id,
+        tool_name="recover_write",
+        arguments={"value": "same intent"},
+    )
+    prepared = ToolCoordinator(registry).prepare_side_effect(
+        proposal=proposal,
+        agent_version=await store.load_agent_version(DEMO_AGENT_VERSION_ID),
+    )
+    await recorder_a.record_model_side_effect_prepared(
+        invocation,
+        proposal,
+        prepared.call,
+        prepared.snapshot,
+        prepared.action,
+        expected_generation=claimed_a.execution_generation,
+    )
+    original_operation_id = prepared.action.operation_id
+
+    await asyncio.sleep(1.2)
+    worker_b = CoreWorker(
+        runtime_store=store,
+        recorder_factory=PostgresExecutionRecorderFactory(sessions),
+        tool_registry=registry,
+        model_factory=lambda _: ScriptedFakeModel([FinalStep("recovered and complete")]),
+        worker_id="worker-ready-b",
+        lease_seconds=30,
+    )
+    assert await worker_b.run_once() is True
+
+    assert observed_operation_ids == [original_operation_id]
+    durable = await store.get_run(created.id)
+    assert durable is not None and durable.status is RunStatus.COMPLETED
+    assert durable.execution_generation == 2
+    async with sessions() as session:
+        action = (
+            (
+                await session.execute(
+                    select(ExternalActionRow).where(ExternalActionRow.run_id == created.id)
+                )
+            )
+            .scalars()
+            .one()
+        )
+        proposals = await session.scalar(
+            select(func.count())
+            .select_from(ToolProposalRow)
+            .where(ToolProposalRow.run_id == created.id)
+        )
+    assert action.operation_id == original_operation_id
+    assert action.status is ExternalActionStatus.SUCCEEDED
+    assert proposals == 1
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_action_commit_deadline_block_aborts_ready_action_without_external_call() -> None:
+    from agentforge.application.ports import SideEffectInvocation
+    from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode
+    from agentforge.infrastructure.db.models import ExternalActionRow, RunRow
+
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+
+    side_tool_id = uuid4()
+    side_version_id = uuid4()
+    async with sessions() as session, session.begin():
+        session.add(ToolDefinitionRow(id=side_tool_id, name="deadline_write", description="write"))
+        await session.flush()
+        session.add(
+            ToolVersionRow(
+                id=side_version_id,
+                tool_id=side_tool_id,
+                version_number=1,
+                input_schema={"type": "object"},
+                effect_type=ToolEffectType.WRITE,
+                implementation_ref="tests:deadline_write",
+                allow_no_approval_execution=True,
+                idempotency_supported=False,
+                reconciliation_mode=ReconciliationMode.NONE,
+            )
+        )
+        await session.flush()
+        session.add(
+            AgentVersionToolRow(
+                agent_version_id=DEMO_AGENT_VERSION_ID,
+                tool_version_id=side_version_id,
+                tool_alias="deadline_write",
+            )
+        )
+
+    calls = 0
+
+    async def forbidden(invocation: SideEffectInvocation):
+        nonlocal calls
+        calls += 1
+        return {"unexpected": True}
+
+    registry = InMemoryToolRegistry(
+        [
+            FunctionTool(
+                version_id=DEMO_TOOL_VERSION_ID,
+                name="echo_read",
+                description="read",
+                input_schema={"type": "object"},
+                func=lambda text: {"echo": text},
+            ),
+            SideEffectFunctionTool(
+                version_id=side_version_id,
+                name="deadline_write",
+                description="write",
+                input_schema={"type": "object"},
+                func=forbidden,
+            ),
+        ]
+    )
+    store = PostgresRuntimeStore(sessions)
+    created = await store.create_run(
+        agent_version_id=DEMO_AGENT_VERSION_ID,
+        input_text="deadline after ready",
+        idempotency_key="integration-action-commit-deadline-1",
+        principal_scope="test-user",
+    )
+    claimed = await store.claim_next_run(worker_id="worker-deadline-a", lease_seconds=30)
+    assert claimed is not None
+    recorder = PostgresExecutionRecorder(
+        sessions,
+        run_id=created.id,
+        generation=claimed.execution_generation,
+    )
+    _, invocation = await recorder.begin_model_invocation(
+        run_id=created.id,
+        invocation_id=uuid4(),
+        expected_generation=claimed.execution_generation,
+    )
+    invocation.complete("TOOL_PROPOSAL")
+    proposal = ToolProposal.create(
+        run_id=created.id,
+        model_invocation_id=invocation.id,
+        tool_name="deadline_write",
+        arguments={},
+    )
+    prepared = ToolCoordinator(registry).prepare_side_effect(
+        proposal=proposal,
+        agent_version=await store.load_agent_version(DEMO_AGENT_VERSION_ID),
+    )
+    await recorder.record_model_side_effect_prepared(
+        invocation,
+        proposal,
+        prepared.call,
+        prepared.snapshot,
+        prepared.action,
+        expected_generation=claimed.execution_generation,
+    )
+    async with sessions() as session, session.begin():
+        await session.execute(
+            update(RunRow)
+            .where(RunRow.id == created.id)
+            .values(deadline_at=func.clock_timestamp() - text("INTERVAL '1 second'"))
+        )
+
+    manager = RunManager(
+        NativeRunner(ScriptedFakeModel([FinalStep("must not reason")]), registry),
+        ToolCoordinator(registry),
+    )
+    with pytest.raises(RunExecutionFailedError, match="DEADLINE_EXCEEDED"):
+        await manager.execute(
+            run=claimed,
+            run_state=await store.load_run_state(created.id),
+            agent_version=await store.load_agent_version(DEMO_AGENT_VERSION_ID),
+            recorder=recorder,
+        )
+
+    assert calls == 0
+    durable = await store.get_run(created.id)
+    assert durable is not None and durable.status is RunStatus.FAILED
+    state = await store.load_run_state(created.id)
+    assert state.tool_attempts_used == 0
+    async with sessions() as session:
+        action = (
+            (
+                await session.execute(
+                    select(ExternalActionRow).where(ExternalActionRow.run_id == created.id)
+                )
+            )
+            .scalars()
+            .one()
+        )
+        call = await session.get(ToolCallRow, action.tool_call_id)
+        attempts = await session.scalar(
+            select(func.count())
+            .select_from(ToolExecutionAttemptRow)
+            .where(ToolExecutionAttemptRow.run_id == created.id)
+        )
+    assert action.status is ExternalActionStatus.ABORTED
+    assert action.current_attempt_id is None
+    assert call is not None and call.status is ToolCallStatus.NOT_EXECUTED
+    assert attempts == 0
     await engine.dispose()

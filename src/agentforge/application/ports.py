@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Protocol
+from dataclasses import dataclass
+from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
 from agentforge.domain.actions import ActionSnapshot, ExternalAction
@@ -13,6 +14,7 @@ from agentforge.domain.models import (
     RunState,
     ToolBinding,
     ToolCall,
+    ToolExecutionAttempt,
     ToolProposal,
 )
 
@@ -31,6 +33,25 @@ class Tool(Protocol):
     async def invoke(self, arguments: dict[str, Any]) -> Any: ...
 
 
+@dataclass(frozen=True, slots=True)
+class SideEffectInvocation:
+    operation_id: UUID
+    arguments: dict[str, Any]
+    credential_ref: str | None
+    idempotency_key: str | None
+
+
+@runtime_checkable
+class SideEffectTool(Protocol):
+    @property
+    def version_id(self) -> UUID: ...
+
+    @property
+    def spec(self) -> ModelToolSpec: ...
+
+    async def invoke_side_effect(self, invocation: SideEffectInvocation) -> Any: ...
+
+
 class ToolRegistry(Protocol):
     def specs(self, bindings: tuple[ToolBinding, ...]) -> tuple[ModelToolSpec, ...]: ...
 
@@ -41,6 +62,39 @@ class ExecutionRecorder(Protocol):
     async def list_messages(self, run_id: UUID) -> list[RunMessage]: ...
 
     async def load_recoverable_read_call(self, run_id: UUID) -> ToolCall | None: ...
+
+    async def load_ready_external_action(
+        self,
+        run_id: UUID,
+    ) -> tuple[ToolCall, ActionSnapshot, ExternalAction] | None: ...
+
+    async def record_side_effect_attempt_started(
+        self,
+        call: ToolCall,
+        action: ExternalAction,
+        *,
+        expected_generation: int,
+    ) -> ToolExecutionAttempt: ...
+
+    async def record_ready_side_effect_blocked_and_fail_run(
+        self,
+        call: ToolCall,
+        action: ExternalAction,
+        run: Run,
+        reason: str,
+        *,
+        expected_generation: int,
+    ) -> None: ...
+
+    async def record_side_effect_succeeded(
+        self,
+        call: ToolCall,
+        action: ExternalAction,
+        attempt: ToolExecutionAttempt,
+        message: RunMessage,
+        *,
+        expected_generation: int,
+    ) -> None: ...
 
     async def record_recovered_read_started(
         self,

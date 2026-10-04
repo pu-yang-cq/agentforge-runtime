@@ -2,9 +2,17 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from agentforge.domain.actions import ActionSnapshot, ExternalAction
 from agentforge.domain.enums import ReconciliationMode, ToolEffectType
 from agentforge.domain.models import AgentVersion, Run, RunMessage, RunState, ToolBinding, ToolCall
-from agentforge.infrastructure.db.models import RunMessageRow, RunRow, RunStateRow, ToolCallRow
+from agentforge.infrastructure.db.models import (
+    ActionSnapshotRow,
+    ExternalActionRow,
+    RunMessageRow,
+    RunRow,
+    RunStateRow,
+    ToolCallRow,
+)
 
 
 def run_from_row(row: RunRow) -> Run:
@@ -122,4 +130,30 @@ def tool_call_from_row(row: ToolCallRow) -> ToolCall:
         status=row.status,
         result=row.result,
         error=row.error,
+    )
+
+
+def action_snapshot_from_row(row: ActionSnapshotRow) -> ActionSnapshot:
+    return ActionSnapshot(
+        id=row.id,
+        format_version=row.format_version,
+        operation_id=row.operation_id,
+        tool_version_id=row.tool_version_id,
+        effect_type=row.effect_type,
+        credential_ref=row.credential_ref,
+        arguments=dict(row.arguments),
+        canonical_json=row.canonical_json,
+        digest=row.digest,
+    )
+
+
+def external_action_from_row(row: ExternalActionRow) -> ExternalAction:
+    return ExternalAction(
+        id=row.id,
+        run_id=row.run_id,
+        tool_call_id=row.tool_call_id,
+        action_snapshot_id=row.action_snapshot_id,
+        operation_id=row.operation_id,
+        status=row.status,
+        current_attempt_id=row.current_attempt_id,
     )

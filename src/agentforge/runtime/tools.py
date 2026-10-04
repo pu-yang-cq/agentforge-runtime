@@ -66,3 +66,43 @@ class InMemoryToolRegistry:
         if tool.spec.name != binding.name:
             raise ValueError("tool binding name/version mismatch")
         return tool
+
+
+class SideEffectFunctionTool:
+    """Explicit adapter wrapper for physical side effects.
+
+    The wrapped callable receives a SideEffectInvocation so stable operation
+    identity is never reconstructed from model text or mutable ToolCall state.
+    """
+
+    def __init__(
+        self,
+        *,
+        version_id: UUID,
+        name: str,
+        description: str,
+        input_schema: dict[str, Any],
+        func: Callable[[object], Any],
+    ) -> None:
+        self._version_id = version_id
+        self._spec = ModelToolSpec(name, description, input_schema)
+        self._func = func
+
+    @property
+    def version_id(self) -> UUID:
+        return self._version_id
+
+    @property
+    def spec(self) -> ModelToolSpec:
+        return self._spec
+
+    async def invoke(self, arguments: dict[str, Any]) -> Any:
+        raise RuntimeError("side-effect tools must cross the Action Commit Boundary")
+
+    async def invoke_side_effect(self, invocation: object) -> Any:
+        if inspect.iscoroutinefunction(self._func):
+            return await self._func(invocation)
+        value = await asyncio.to_thread(self._func, invocation)
+        if inspect.isawaitable(value):
+            return await value
+        return value

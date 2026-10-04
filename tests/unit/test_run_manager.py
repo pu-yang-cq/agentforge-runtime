@@ -26,7 +26,7 @@ from agentforge.domain.models import (
 from agentforge.runtime.fake_model import FinalStep, ScriptedFakeModel, ToolStep
 from agentforge.runtime.native_runner import NativeRunner
 from agentforge.runtime.tool_coordinator import ToolCoordinator
-from agentforge.runtime.tools import FunctionTool, InMemoryToolRegistry
+from agentforge.runtime.tools import FunctionTool, InMemoryToolRegistry, SideEffectFunctionTool
 
 
 @pytest.mark.asyncio
@@ -828,17 +828,17 @@ async def test_side_effect_proposal_prepares_durable_intent_without_external_io(
 
     registry = InMemoryToolRegistry(
         [
-            FunctionTool(
+            SideEffectFunctionTool(
                 version_id=version_id,
                 name="create_ticket",
                 description="create external ticket",
                 input_schema={"type": "object"},
-                func=forbidden_external_call,
+                func=lambda invocation: forbidden_external_call(
+                    str(invocation.arguments["summary"])
+                ),
             )
         ]
     )
-    model = ScriptedFakeModel([ToolStep("create_ticket", {"summary": "intent only"})])
-    manager = RunManager(NativeRunner(model, registry), ToolCoordinator(registry))
     av = AgentVersion(
         uuid4(),
         uuid4(),
@@ -858,17 +858,36 @@ async def test_side_effect_proposal_prepares_durable_intent_without_external_io(
     )
     run = Run(uuid4(), av.id, "create a ticket")
     run.queue()
+    run.start()
     state = RunState(run.id)
     journal = ExecutionJournal()
 
-    result = await manager.execute(
-        run=run,
-        run_state=state,
+    journal.seed(run, state)
+    _, invocation = await journal.begin_model_invocation(
+        run_id=run.id,
+        invocation_id=uuid4(),
+        expected_generation=run.execution_generation,
+    )
+    invocation.complete("TOOL_PROPOSAL")
+    proposal = ToolProposal.create(
+        run_id=run.id,
+        model_invocation_id=invocation.id,
+        tool_name="create_ticket",
+        arguments={"summary": "intent only"},
+    )
+    prepared = ToolCoordinator(registry).prepare_side_effect(
+        proposal=proposal,
         agent_version=av,
-        recorder=journal,
+    )
+    await journal.record_model_side_effect_prepared(
+        invocation,
+        proposal,
+        prepared.call,
+        prepared.snapshot,
+        prepared.action,
+        expected_generation=run.execution_generation,
     )
 
-    assert result is None
     assert physical_calls == 0
     assert run.status is RunStatus.RUNNING
     assert state.model_invocations_used == 1
@@ -976,12 +995,12 @@ async def test_side_effect_preparation_respects_tool_budget_without_reserving_at
 
     registry = InMemoryToolRegistry(
         [
-            FunctionTool(
+            SideEffectFunctionTool(
                 version_id=version_id,
                 name="write_once",
                 description="side effect",
                 input_schema={"type": "object"},
-                func=forbidden_external_call,
+                func=lambda invocation: forbidden_external_call(),
             )
         ]
     )
@@ -1020,3 +1039,261 @@ async def test_side_effect_preparation_respects_tool_budget_without_reserving_at
     assert journal.action_snapshots == []
     assert journal.tool_attempts == []
     assert journal.tool_calls == []
+
+
+@pytest.mark.asyncio
+async def test_action_commit_is_durable_before_side_effect_adapter_call() -> None:
+    from agentforge.application.ports import SideEffectInvocation
+    from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode, ToolEffectType
+
+    version_id = uuid4()
+    state = RunState(uuid4())
+    journal = ExecutionJournal()
+    observed_calls = 0
+
+    async def create_ticket(invocation: SideEffectInvocation):
+        nonlocal observed_calls
+        observed_calls += 1
+        assert invocation.idempotency_key == str(invocation.operation_id)
+        assert invocation.credential_ref == "credential://jira/c1"
+        assert journal.external_actions[0].status is ExternalActionStatus.EXECUTING
+        assert journal.external_actions[0].current_attempt_id is not None
+        assert journal.tool_calls[0].status is ToolCallStatus.EXECUTING
+        assert journal.tool_attempts[0].status is ToolExecutionAttemptStatus.STARTED
+        assert journal.tool_attempts[0].external_action_id == journal.external_actions[0].id
+        assert state.tool_attempts_used == 1
+        return {"ticket_id": "T-1"}
+
+    registry = InMemoryToolRegistry(
+        [
+            SideEffectFunctionTool(
+                version_id=version_id,
+                name="create_ticket",
+                description="create ticket",
+                input_schema={"type": "object"},
+                func=create_ticket,
+            )
+        ]
+    )
+    model = ScriptedFakeModel(
+        [ToolStep("create_ticket", {"summary": "commit first"}), FinalStep("created")]
+    )
+    manager = RunManager(NativeRunner(model, registry), ToolCoordinator(registry))
+    av = AgentVersion(
+        uuid4(),
+        uuid4(),
+        1,
+        "create one ticket",
+        (
+            ToolBinding(
+                version_id,
+                "create_ticket",
+                effect_type=ToolEffectType.EXTERNAL_SIDE_EFFECT,
+                allow_no_approval_execution=True,
+                credential_ref="credential://jira/c1",
+                idempotency_supported=True,
+                reconciliation_mode=ReconciliationMode.AUTHORITATIVE,
+            ),
+        ),
+    )
+    run = Run(state.run_id, av.id, "create ticket")
+    run.queue()
+
+    result = await manager.execute(
+        run=run,
+        run_state=state,
+        agent_version=av,
+        recorder=journal,
+    )
+
+    assert result == "created"
+    assert observed_calls == 1
+    assert run.status is RunStatus.COMPLETED
+    assert state.tool_attempts_used == 1
+    assert journal.external_actions[0].status is ExternalActionStatus.SUCCEEDED
+    assert journal.external_actions[0].current_attempt_id is None
+    assert journal.tool_calls[0].status is ToolCallStatus.SUCCEEDED
+    assert journal.tool_attempts[0].status is ToolExecutionAttemptStatus.SUCCEEDED
+    event_types = [event.type for event in journal.events]
+    assert EventType.ACTION_PREPARED in event_types
+    assert EventType.ACTION_COMMITTED in event_types
+    assert EventType.ACTION_SUCCEEDED in event_types
+
+
+@pytest.mark.asyncio
+async def test_ready_external_action_is_recovered_before_new_model_reasoning() -> None:
+    from agentforge.application.ports import SideEffectInvocation
+    from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode, ToolEffectType
+
+    version_id = uuid4()
+    calls = 0
+
+    async def create_ticket(invocation: SideEffectInvocation):
+        nonlocal calls
+        calls += 1
+        return {"ticket_id": str(invocation.operation_id)}
+
+    registry = InMemoryToolRegistry(
+        [
+            SideEffectFunctionTool(
+                version_id=version_id,
+                name="create_ticket",
+                description="create ticket",
+                input_schema={"type": "object"},
+                func=create_ticket,
+            )
+        ]
+    )
+    av = AgentVersion(
+        uuid4(),
+        uuid4(),
+        1,
+        "recover",
+        (
+            ToolBinding(
+                version_id,
+                "create_ticket",
+                effect_type=ToolEffectType.WRITE,
+                allow_no_approval_execution=True,
+                idempotency_supported=True,
+                reconciliation_mode=ReconciliationMode.NONE,
+            ),
+        ),
+    )
+    run = Run(uuid4(), av.id, "recover ready action")
+    run.queue()
+    run.start()
+    state = RunState(run.id)
+    journal = ExecutionJournal()
+    journal.seed(run, state)
+    _, invocation = await journal.begin_model_invocation(
+        run_id=run.id,
+        invocation_id=uuid4(),
+        expected_generation=run.execution_generation,
+    )
+    invocation.complete("TOOL_PROPOSAL")
+    proposal = ToolProposal.create(
+        run_id=run.id,
+        model_invocation_id=invocation.id,
+        tool_name="create_ticket",
+        arguments={"summary": "recover me"},
+    )
+    prepared = ToolCoordinator(registry).prepare_side_effect(
+        proposal=proposal,
+        agent_version=av,
+    )
+    await journal.record_model_side_effect_prepared(
+        invocation,
+        proposal,
+        prepared.call,
+        prepared.snapshot,
+        prepared.action,
+        expected_generation=run.execution_generation,
+    )
+    assert prepared.action.status is ExternalActionStatus.READY
+    assert state.tool_attempts_used == 0
+
+    manager = RunManager(
+        NativeRunner(ScriptedFakeModel([FinalStep("recovered")]), registry),
+        ToolCoordinator(registry),
+    )
+    result = await manager.execute(
+        run=run,
+        run_state=state,
+        agent_version=av,
+        recorder=journal,
+    )
+
+    assert result == "recovered"
+    assert calls == 1
+    assert state.model_invocations_used == 2
+    assert state.tool_attempts_used == 1
+    assert journal.external_actions[0].status is ExternalActionStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_action_commit_budget_block_aborts_ready_action_without_external_io() -> None:
+    from agentforge.application.ports import SideEffectInvocation
+    from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode, ToolEffectType
+
+    version_id = uuid4()
+    calls = 0
+
+    async def forbidden(invocation: SideEffectInvocation):
+        nonlocal calls
+        calls += 1
+        return {"unexpected": True}
+
+    registry = InMemoryToolRegistry(
+        [
+            SideEffectFunctionTool(
+                version_id=version_id,
+                name="write_once",
+                description="write",
+                input_schema={"type": "object"},
+                func=forbidden,
+            )
+        ]
+    )
+    av = AgentVersion(
+        uuid4(),
+        uuid4(),
+        1,
+        "budget block",
+        (
+            ToolBinding(
+                version_id,
+                "write_once",
+                effect_type=ToolEffectType.WRITE,
+                allow_no_approval_execution=True,
+                reconciliation_mode=ReconciliationMode.NONE,
+            ),
+        ),
+    )
+    run = Run(uuid4(), av.id, "blocked", max_tool_attempts=1)
+    run.queue()
+    run.start()
+    state = RunState(run.id)
+    journal = ExecutionJournal()
+    journal.seed(run, state)
+    _, invocation = await journal.begin_model_invocation(
+        run_id=run.id,
+        invocation_id=uuid4(),
+        expected_generation=run.execution_generation,
+    )
+    invocation.complete("TOOL_PROPOSAL")
+    proposal = ToolProposal.create(
+        run_id=run.id,
+        model_invocation_id=invocation.id,
+        tool_name="write_once",
+        arguments={},
+    )
+    prepared = ToolCoordinator(registry).prepare_side_effect(proposal=proposal, agent_version=av)
+    await journal.record_model_side_effect_prepared(
+        invocation,
+        proposal,
+        prepared.call,
+        prepared.snapshot,
+        prepared.action,
+        expected_generation=run.execution_generation,
+    )
+    state.tool_attempts_used = 1
+
+    manager = RunManager(
+        NativeRunner(ScriptedFakeModel([FinalStep("must not run")]), registry),
+        ToolCoordinator(registry),
+    )
+    with pytest.raises(RunExecutionFailedError, match="BUDGET_EXCEEDED"):
+        await manager.execute(
+            run=run,
+            run_state=state,
+            agent_version=av,
+            recorder=journal,
+        )
+
+    assert calls == 0
+    assert journal.external_actions[0].status is ExternalActionStatus.ABORTED
+    assert journal.external_actions[0].current_attempt_id is None
+    assert journal.tool_calls[0].status is ToolCallStatus.NOT_EXECUTED
+    assert journal.tool_attempts == []
+    assert state.tool_attempts_used == 1

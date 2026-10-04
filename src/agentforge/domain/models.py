@@ -272,6 +272,12 @@ class ToolCall:
         self.status = ToolCallStatus.EXECUTING
         self.error = None
 
+    def not_executed(self, reason: str) -> None:
+        if self.status is not ToolCallStatus.READY:
+            raise ValueError("tool call can only become NOT_EXECUTED from READY")
+        self.status = ToolCallStatus.NOT_EXECUTED
+        self.error = reason
+
     def retry_after_failure(self, reason: str) -> None:
         if self.status is not ToolCallStatus.FAILED:
             raise ValueError("tool call can only retry from FAILED")
@@ -306,6 +312,7 @@ class ToolExecutionAttempt:
     definite_not_executed: bool | None = None
     started_at: datetime = field(default_factory=utcnow)
     finished_at: datetime | None = None
+    external_action_id: UUID | None = None
 
     def succeed(self, result: Any) -> None:
         if self.status is not ToolExecutionAttemptStatus.STARTED:

@@ -199,6 +199,173 @@ class ExecutionJournal(ExecutionRecorder):
             raise RuntimeError("Wave-1 recovery found multiple READY ToolCalls")
         return calls[0] if calls else None
 
+    async def load_ready_external_action(
+        self,
+        run_id: UUID,
+    ) -> tuple[ToolCall, ActionSnapshot, ExternalAction] | None:
+        actions = [
+            action
+            for action in self.external_actions
+            if action.run_id == run_id and action.status is ExternalActionStatus.READY
+        ]
+        if len(actions) > 1:
+            raise RuntimeError("found multiple READY ExternalActions for one Run")
+        if not actions:
+            return None
+        action = actions[0]
+        call = next(item for item in self.tool_calls if item.id == action.tool_call_id)
+        snapshot = next(
+            item for item in self.action_snapshots if item.id == action.action_snapshot_id
+        )
+        if call.status is not ToolCallStatus.READY:
+            raise RuntimeError("READY ExternalAction does not project to READY ToolCall")
+        return call, snapshot, action
+
+    async def record_side_effect_attempt_started(
+        self,
+        call: ToolCall,
+        action: ExternalAction,
+        *,
+        expected_generation: int,
+    ) -> ToolExecutionAttempt:
+        if call.status is not ToolCallStatus.READY:
+            raise ValueError("Action Commit requires READY ToolCall")
+        if action.status is not ExternalActionStatus.READY or action.current_attempt_id is not None:
+            raise ValueError("Action Commit requires READY ExternalAction")
+        if action.tool_call_id != call.id:
+            raise ValueError("ExternalAction does not reference ToolCall")
+        self._assert_deadline_not_expired(call.run_id)
+        self._assert_tool_budget(call.run_id)
+        self._assert_no_started_model_invocations(call.run_id)
+        self._assert_no_started_tool_attempts(call.run_id)
+        assert self.run_state is not None
+        attempt = ToolExecutionAttempt(
+            uuid4(),
+            call.run_id,
+            call.id,
+            self._next_tool_attempt_number(call.id),
+            expected_generation,
+            external_action_id=action.id,
+        )
+        self.run_state.tool_attempts_used += 1
+        self.run_state.state_version += 1
+        self.tool_attempts.append(attempt)
+        call.start()
+        action.start(attempt.id)
+        self.events.append(
+            DomainEvent(
+                call.run_id,
+                len(self.events) + 1,
+                EventType.ACTION_COMMITTED,
+                {
+                    "tool_call_id": str(call.id),
+                    "external_action_id": str(action.id),
+                    "operation_id": str(action.operation_id),
+                    "attempt_id": str(attempt.id),
+                    "attempt_number": attempt.attempt_number,
+                },
+            )
+        )
+        self.events.append(
+            DomainEvent(
+                call.run_id,
+                len(self.events) + 1,
+                EventType.TOOL_STARTED,
+                {
+                    "tool_call_id": str(call.id),
+                    "tool_name": call.tool_name,
+                    "external_action_id": str(action.id),
+                    "attempt_id": str(attempt.id),
+                    "attempt_number": attempt.attempt_number,
+                },
+            )
+        )
+        return attempt
+
+    async def record_ready_side_effect_blocked_and_fail_run(
+        self,
+        call: ToolCall,
+        action: ExternalAction,
+        run: Run,
+        reason: str,
+        *,
+        expected_generation: int,
+    ) -> None:
+        if call.status is not ToolCallStatus.READY:
+            raise ValueError("blocked action stabilization requires READY ToolCall")
+        if action.status is not ExternalActionStatus.READY:
+            raise ValueError("blocked action stabilization requires READY ExternalAction")
+        self._assert_no_started_tool_attempts(run.id)
+        call.not_executed(reason)
+        action.abort()
+        self._append_event(
+            run,
+            EventType.ACTION_ABORTED,
+            {
+                "tool_call_id": str(call.id),
+                "external_action_id": str(action.id),
+                "operation_id": str(action.operation_id),
+                "reason": reason,
+            },
+        )
+        self._append_event(run, EventType.RUN_FAILED, {"reason": run.failure_reason})
+
+    async def record_side_effect_succeeded(
+        self,
+        call: ToolCall,
+        action: ExternalAction,
+        attempt: ToolExecutionAttempt,
+        message: RunMessage,
+        *,
+        expected_generation: int,
+    ) -> None:
+        if call.status is not ToolCallStatus.SUCCEEDED:
+            raise ValueError("side-effect success requires SUCCEEDED ToolCall")
+        if action.status is not ExternalActionStatus.EXECUTING:
+            raise ValueError("side-effect success requires EXECUTING ExternalAction")
+        if action.current_attempt_id != attempt.id:
+            raise ValueError("side-effect success attempt is not current")
+        durable_attempt = self._started_tool_attempt(call.id)
+        if durable_attempt.id != attempt.id or durable_attempt.external_action_id != action.id:
+            raise RuntimeError("side-effect durable attempt mismatch")
+        durable_attempt.succeed(call.result)
+        action.succeed()
+        self.messages.append(
+            RunMessage(
+                message.run_id,
+                len(self.messages) + 1,
+                message.role,
+                message.content,
+                message.source_id,
+            )
+        )
+        self.events.append(
+            DomainEvent(
+                call.run_id,
+                len(self.events) + 1,
+                EventType.ACTION_SUCCEEDED,
+                {
+                    "tool_call_id": str(call.id),
+                    "external_action_id": str(action.id),
+                    "operation_id": str(action.operation_id),
+                    "attempt_id": str(attempt.id),
+                },
+            )
+        )
+        self.events.append(
+            DomainEvent(
+                call.run_id,
+                len(self.events) + 1,
+                EventType.TOOL_SUCCEEDED,
+                {
+                    "tool_call_id": str(call.id),
+                    "tool_name": call.tool_name,
+                    "attempt_id": str(attempt.id),
+                    "attempt_number": attempt.attempt_number,
+                },
+            )
+        )
+
     async def record_recovered_read_started(
         self,
         call: ToolCall,
@@ -739,6 +906,48 @@ class RunManager:
         self._tools = tools
         self._max_progression_steps_per_claim = max_progression_steps_per_claim
 
+    async def _execute_side_effect_action(
+        self,
+        *,
+        run: Run,
+        prepared: PreparedExternalAction,
+        recorder: ExecutionRecorder,
+        expected_generation: int,
+    ) -> RunMessage:
+        try:
+            attempt = await recorder.record_side_effect_attempt_started(
+                prepared.call,
+                prepared.action,
+                expected_generation=expected_generation,
+            )
+        except BusinessProgressionBlockedError as exc:
+            run.fail(exc.failure_reason)
+            await recorder.record_ready_side_effect_blocked_and_fail_run(
+                prepared.call,
+                prepared.action,
+                run,
+                exc.failure_reason,
+                expected_generation=expected_generation,
+            )
+            raise RunExecutionFailedError(run.failure_reason) from exc
+
+        call = await self._tools.execute_side_effect(prepared, attempt)
+        message = RunMessage(
+            run.id,
+            0,
+            MessageRole.TOOL,
+            tool_result_message_content(call.result),
+            call.id,
+        )
+        await recorder.record_side_effect_succeeded(
+            call,
+            prepared.action,
+            attempt,
+            message,
+            expected_generation=expected_generation,
+        )
+        return message
+
     async def execute(
         self,
         *,
@@ -763,6 +972,25 @@ class RunManager:
 
         progression_steps = 0
         prepared: PreparedToolCall | PreparedExternalAction
+
+        ready_action = await recorder.load_ready_external_action(run.id)
+        if ready_action is not None:
+            ready_call, ready_snapshot, external_action = ready_action
+            prepared_action = self._tools.prepare_recovered_side_effect(
+                call=ready_call,
+                snapshot=ready_snapshot,
+                action=external_action,
+                agent_version=agent_version,
+            )
+            recovered_message = await self._execute_side_effect_action(
+                run=run,
+                prepared=prepared_action,
+                recorder=recorder,
+                expected_generation=expected_generation,
+            )
+            messages.append(recovered_message)
+            progression_steps += 1
+
         recoverable_call = await recorder.load_recoverable_read_call(run.id)
         if recoverable_call is not None:
             prepared = self._tools.prepare_recovered_read(
@@ -945,9 +1173,15 @@ class RunManager:
                         expected_generation=expected_generation,
                     )
                     raise RunExecutionFailedError(run.failure_reason) from exc
-                # B2 stops at durable intent. Action Commit and physical side-effect
-                # execution remain locked for Stage 3.2-C.
-                return None
+                side_effect_message = await self._execute_side_effect_action(
+                    run=run,
+                    prepared=prepared,
+                    recorder=recorder,
+                    expected_generation=expected_generation,
+                )
+                messages.append(side_effect_message)
+                progression_steps += 1
+                continue
 
             call = prepared.call
             try:

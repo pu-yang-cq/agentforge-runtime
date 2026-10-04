@@ -132,3 +132,22 @@ class ExternalAction:
             action_snapshot_id=action_snapshot_id,
             operation_id=operation_id,
         )
+
+    def start(self, attempt_id: UUID) -> None:
+        if self.status is not ExternalActionStatus.READY or self.current_attempt_id is not None:
+            raise ValueError(
+                "external action can only execute from READY without an active attempt"
+            )
+        self.status = ExternalActionStatus.EXECUTING
+        self.current_attempt_id = attempt_id
+
+    def succeed(self) -> None:
+        if self.status is not ExternalActionStatus.EXECUTING or self.current_attempt_id is None:
+            raise ValueError("external action can only succeed from EXECUTING")
+        self.status = ExternalActionStatus.SUCCEEDED
+        self.current_attempt_id = None
+
+    def abort(self) -> None:
+        if self.status is not ExternalActionStatus.READY or self.current_attempt_id is not None:
+            raise ValueError("external action can only abort before Action Commit")
+        self.status = ExternalActionStatus.ABORTED
