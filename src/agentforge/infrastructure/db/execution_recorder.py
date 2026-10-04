@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -914,6 +914,156 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                 )
             )
 
+    async def record_read_transient_failure(
+        self,
+        call: ToolCall,
+        run: Run,
+        *,
+        max_attempts: int,
+        initial_backoff_seconds: int,
+        max_backoff_seconds: int,
+        expected_generation: int,
+    ) -> bool:
+        self._assert_generation(expected_generation)
+        if call.status is not ToolCallStatus.FAILED:
+            raise ValueError("transient READ persistence requires FAILED ToolCall")
+        if run.status is not RunStatus.RUNNING:
+            raise ValueError("transient READ persistence requires RUNNING Run")
+        if max_attempts <= 0:
+            raise ValueError("max_attempts must be positive")
+        if initial_backoff_seconds < 0:
+            raise ValueError("retry initial backoff cannot be negative")
+        if max_backoff_seconds < initial_backoff_seconds:
+            raise ValueError("retry max backoff cannot be below initial backoff")
+
+        async with self._sessions() as session, session.begin():
+            row = await _lock_owned_run(
+                session, run_id=call.run_id, expected_generation=expected_generation
+            )
+            tool_call = (
+                await session.execute(
+                    select(ToolCallRow)
+                    .where(
+                        ToolCallRow.id == call.id,
+                        ToolCallRow.run_id == call.run_id,
+                        ToolCallRow.status == ToolCallStatus.EXECUTING,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if tool_call is None:
+                raise RuntimeError("tool call no longer EXECUTING")
+            attempt = await _lock_started_tool_attempt(session, call.id)
+            state = await _lock_run_state(session, run.id)
+            db_now = await _database_now(session)
+            delay_seconds = min(
+                initial_backoff_seconds * (2 ** (attempt.attempt_number - 1)),
+                max_backoff_seconds,
+            )
+            due_at = db_now + timedelta(seconds=delay_seconds)
+
+            attempt.status = ToolExecutionAttemptStatus.FAILED
+            attempt.error = call.error
+            attempt.error_class = "TRANSIENT"
+            attempt.outcome_reason = "READ_TRANSIENT_FAILURE"
+            attempt.definite_not_executed = True
+            attempt.finished_at = db_now
+
+            retry_allowed = (
+                attempt.attempt_number < max_attempts
+                and state.tool_attempts_used < row.max_tool_attempts
+                and due_at < row.deadline_at
+            )
+            if retry_allowed:
+                tool_call.status = ToolCallStatus.READY
+                tool_call.error = call.error
+                row.status = RunStatus.QUEUED
+                row.queue_reason = QueueReason.RETRY
+                row.available_at = due_at
+                row.owner_worker_id = None
+                row.lease_expires_at = None
+                seqs = list(await _allocate_event_sequences(session, run.id, 2))
+                session.add_all(
+                    [
+                        DomainEventRow(
+                            id=uuid4(),
+                            run_id=run.id,
+                            sequence=seqs[0],
+                            event_type=EventType.TOOL_FAILED.value,
+                            payload={
+                                "tool_call_id": str(call.id),
+                                "attempt_id": str(attempt.id),
+                                "attempt_number": attempt.attempt_number,
+                                "error_class": "TRANSIENT",
+                                "definite_not_executed": True,
+                                "error": call.error,
+                            },
+                        ),
+                        DomainEventRow(
+                            id=uuid4(),
+                            run_id=run.id,
+                            sequence=seqs[1],
+                            event_type=EventType.TOOL_RETRY_SCHEDULED.value,
+                            payload={
+                                "tool_call_id": str(call.id),
+                                "attempt_number": attempt.attempt_number,
+                                "delay_seconds": delay_seconds,
+                            },
+                        ),
+                    ]
+                )
+                run.status = RunStatus.QUEUED
+                run.queue_reason = QueueReason.RETRY
+                run.owner_worker_id = None
+                run.lease_expires_at = None
+                run.available_at = due_at
+                return True
+
+            if attempt.attempt_number >= max_attempts:
+                failure_reason = "READ_RETRY_EXHAUSTED: versioned READ retry attempts exhausted"
+            elif state.tool_attempts_used >= row.max_tool_attempts:
+                failure_reason = "BUDGET_EXCEEDED: max_tool_attempts exhausted"
+            else:
+                failure_reason = "DEADLINE_EXCEEDED: READ retry due time reaches run deadline"
+
+            tool_call.status = ToolCallStatus.FAILED
+            tool_call.error = call.error
+            row.status = RunStatus.FAILED
+            row.failure_reason = failure_reason
+            row.completed_at = db_now
+            row.owner_worker_id = None
+            row.lease_expires_at = None
+            seqs = list(await _allocate_event_sequences(session, run.id, 2))
+            session.add_all(
+                [
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[0],
+                        event_type=EventType.TOOL_FAILED.value,
+                        payload={
+                            "tool_call_id": str(call.id),
+                            "attempt_id": str(attempt.id),
+                            "attempt_number": attempt.attempt_number,
+                            "error_class": "TRANSIENT",
+                            "definite_not_executed": True,
+                            "error": call.error,
+                        },
+                    ),
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[1],
+                        event_type=EventType.RUN_FAILED.value,
+                        payload={"reason": failure_reason},
+                    ),
+                ]
+            )
+            run.status = RunStatus.FAILED
+            run.failure_reason = failure_reason
+            run.completed_at = db_now
+            return False
+
     async def record_tool_failed_and_fail_run(
         self,
         call: ToolCall,
@@ -943,6 +1093,9 @@ class PostgresExecutionRecorder(ExecutionRecorder):
             attempt = await _lock_started_tool_attempt(session, call.id)
             attempt.status = ToolExecutionAttemptStatus.FAILED
             attempt.error = call.error
+            attempt.error_class = "PERMANENT"
+            attempt.outcome_reason = "READ_NON_RETRYABLE_FAILURE"
+            attempt.definite_not_executed = True
             attempt.finished_at = func.clock_timestamp()
             await _assert_no_active_tool_calls(session, run.id)
             await session.flush()

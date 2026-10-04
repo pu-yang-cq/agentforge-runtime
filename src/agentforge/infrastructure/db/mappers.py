@@ -58,7 +58,7 @@ def agent_version_from_parts(
     agent_id: UUID,
     version_number: int,
     instructions: str,
-    bindings: list[tuple[UUID, str]],
+    bindings: list[tuple[UUID, str, int, int, int]],
 ) -> AgentVersion:
     return AgentVersion(
         id=version_id,
@@ -66,7 +66,20 @@ def agent_version_from_parts(
         version_number=version_number,
         instructions=instructions,
         tool_bindings=tuple(
-            ToolBinding(tool_version_id, alias) for tool_version_id, alias in bindings
+            ToolBinding(
+                tool_version_id,
+                alias,
+                retry_max_attempts,
+                retry_initial_backoff,
+                retry_max_backoff,
+            )
+            for (
+                tool_version_id,
+                alias,
+                retry_max_attempts,
+                retry_initial_backoff,
+                retry_max_backoff,
+            ) in bindings
         ),
     )
 

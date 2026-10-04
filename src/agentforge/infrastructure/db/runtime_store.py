@@ -431,6 +431,13 @@ class PostgresRuntimeStore(RuntimeStore):
                     select(
                         AgentVersionToolRow.tool_version_id,
                         AgentVersionToolRow.tool_alias,
+                        ToolVersionRow.read_retry_max_attempts,
+                        ToolVersionRow.read_retry_initial_backoff_seconds,
+                        ToolVersionRow.read_retry_max_backoff_seconds,
+                    )
+                    .join(
+                        ToolVersionRow,
+                        ToolVersionRow.id == AgentVersionToolRow.tool_version_id,
                     )
                     .where(AgentVersionToolRow.agent_version_id == agent_version_id)
                     .order_by(AgentVersionToolRow.tool_alias)
@@ -441,5 +448,20 @@ class PostgresRuntimeStore(RuntimeStore):
                 agent_id=version.agent_id,
                 version_number=version.version_number,
                 instructions=version.instructions,
-                bindings=[(tool_version_id, alias) for tool_version_id, alias in rows],
+                bindings=[
+                    (
+                        tool_version_id,
+                        alias,
+                        retry_max_attempts,
+                        retry_initial_backoff,
+                        retry_max_backoff,
+                    )
+                    for (
+                        tool_version_id,
+                        alias,
+                        retry_max_attempts,
+                        retry_initial_backoff,
+                        retry_max_backoff,
+                    ) in rows
+                ],
             )

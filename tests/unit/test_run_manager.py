@@ -3,7 +3,7 @@ from uuid import uuid4
 
 import pytest
 
-from agentforge.application.errors import RunExecutionFailedError
+from agentforge.application.errors import RunExecutionFailedError, ToolTransientError
 from agentforge.application.run_manager import ExecutionJournal, RunManager
 from agentforge.domain.enums import (
     EventType,
@@ -665,3 +665,146 @@ async def test_denied_tool_result_after_deadline_is_discarded_not_persisted() ->
     assert journal.tool_calls == []
     assert EventType.TOOL_DENIED not in [event.type for event in journal.events]
     assert EventType.MODEL_RESULT_DISCARDED in [event.type for event in journal.events]
+
+
+@pytest.mark.asyncio
+async def test_read_transient_failure_durably_schedules_retry_without_new_model_reasoning() -> None:
+    version_id = uuid4()
+    invocations = 0
+
+    async def flaky_read():
+        nonlocal invocations
+        invocations += 1
+        if invocations == 1:
+            raise ToolTransientError("temporary upstream timeout")
+        return {"ok": True}
+
+    registry = InMemoryToolRegistry(
+        [
+            FunctionTool(
+                version_id=version_id,
+                name="flaky_read",
+                description="retryable read",
+                input_schema={"type": "object"},
+                func=flaky_read,
+            )
+        ]
+    )
+    model = ScriptedFakeModel(
+        [
+            ToolStep("flaky_read", {}),
+            FinalStep("done after retry"),
+        ]
+    )
+    manager = RunManager(NativeRunner(model, registry), ToolCoordinator(registry))
+    av = AgentVersion(
+        uuid4(),
+        uuid4(),
+        1,
+        "retry",
+        (
+            ToolBinding(
+                version_id,
+                "flaky_read",
+                read_retry_max_attempts=3,
+                read_retry_initial_backoff_seconds=0,
+                read_retry_max_backoff_seconds=4,
+            ),
+        ),
+    )
+    run = Run(uuid4(), av.id, "retry")
+    run.queue()
+    state = RunState(run.id)
+    journal = ExecutionJournal()
+
+    first = await manager.execute(
+        run=run,
+        run_state=state,
+        agent_version=av,
+        recorder=journal,
+    )
+    assert first is None
+    assert run.status is RunStatus.QUEUED
+    assert run.queue_reason is QueueReason.RETRY
+    assert len(model.requests) == 1
+    assert len(journal.tool_calls) == 1
+    assert journal.tool_calls[0].status is ToolCallStatus.READY
+    assert journal.tool_attempts[0].status is ToolExecutionAttemptStatus.FAILED
+    assert journal.tool_attempts[0].error_class == "TRANSIENT"
+    assert journal.tool_attempts[0].definite_not_executed is True
+    assert EventType.TOOL_RETRY_SCHEDULED in [event.type for event in journal.events]
+
+    second = await manager.execute(
+        run=run,
+        run_state=state,
+        agent_version=av,
+        recorder=journal,
+    )
+    assert second == "done after retry"
+    assert invocations == 2
+    assert len(model.requests) == 2
+    assert [attempt.attempt_number for attempt in journal.tool_attempts] == [1, 2]
+    assert [attempt.status for attempt in journal.tool_attempts] == [
+        ToolExecutionAttemptStatus.FAILED,
+        ToolExecutionAttemptStatus.SUCCEEDED,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unknown_read_exception_is_not_implicitly_retried() -> None:
+    version_id = uuid4()
+    registry = InMemoryToolRegistry(
+        [
+            FunctionTool(
+                version_id=version_id,
+                name="broken_read",
+                description="nonretryable read",
+                input_schema={"type": "object"},
+                func=lambda: (_ for _ in ()).throw(RuntimeError("bad response")),
+            )
+        ]
+    )
+    model = ScriptedFakeModel([ToolStep("broken_read", {})])
+    manager = RunManager(NativeRunner(model, registry), ToolCoordinator(registry))
+    av = AgentVersion(
+        uuid4(),
+        uuid4(),
+        1,
+        "do not blind retry",
+        (
+            ToolBinding(
+                version_id,
+                "broken_read",
+                read_retry_max_attempts=3,
+                read_retry_initial_backoff_seconds=0,
+                read_retry_max_backoff_seconds=4,
+            ),
+        ),
+    )
+    run = Run(uuid4(), av.id, "fail")
+    run.queue()
+    journal = ExecutionJournal()
+
+    with pytest.raises(RunExecutionFailedError):
+        await manager.execute(
+            run=run,
+            run_state=RunState(run.id),
+            agent_version=av,
+            recorder=journal,
+        )
+
+    assert run.status is RunStatus.FAILED
+    assert journal.tool_calls[0].status is ToolCallStatus.FAILED
+    assert journal.tool_attempts[0].error_class == "PERMANENT"
+    assert EventType.TOOL_RETRY_SCHEDULED not in [event.type for event in journal.events]
+
+
+def test_versioned_read_retry_backoff_is_bounded_exponential() -> None:
+    binding = ToolBinding(
+        uuid4(),
+        "read",
+        read_retry_max_attempts=5,
+        read_retry_initial_backoff_seconds=2,
+        read_retry_max_backoff_seconds=5,
+    )
+    assert [binding.read_retry_delay_seconds(n) for n in (1, 2, 3, 4)] == [2, 4, 5, 5]

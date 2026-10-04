@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
 from agentforge.application.errors import (
     BusinessProgressionBlockedError,
     RunExecutionFailedError,
+    ToolTransientError,
 )
 from agentforge.application.ports import ExecutionRecorder
 from agentforge.domain.enums import (
@@ -505,6 +507,79 @@ class ExecutionJournal(ExecutionRecorder):
             )
         )
 
+    async def record_read_transient_failure(
+        self,
+        call: ToolCall,
+        run: Run,
+        *,
+        max_attempts: int,
+        initial_backoff_seconds: int,
+        max_backoff_seconds: int,
+        expected_generation: int,
+    ) -> bool:
+        if call.status is not ToolCallStatus.FAILED:
+            raise ValueError("transient READ persistence requires FAILED ToolCall")
+        if run.status is not RunStatus.RUNNING:
+            raise ValueError("transient READ persistence requires RUNNING Run")
+        if initial_backoff_seconds < 0:
+            raise ValueError("retry initial backoff cannot be negative")
+        if max_backoff_seconds < initial_backoff_seconds:
+            raise ValueError("retry max backoff cannot be below initial backoff")
+        attempt = self._started_tool_attempt(call.id)
+        delay_seconds = min(
+            initial_backoff_seconds * (2 ** (attempt.attempt_number - 1)),
+            max_backoff_seconds,
+        )
+        attempt.fail(
+            call.error or "transient READ failure",
+            error_class="TRANSIENT",
+            definite_not_executed=True,
+            outcome_reason="READ_TRANSIENT_FAILURE",
+        )
+        self._assert_no_started_tool_attempts(run.id)
+        assert self.run_state is not None
+        retry_allowed = (
+            attempt.attempt_number < max_attempts
+            and self.run_state.tool_attempts_used < run.max_tool_attempts
+            and utcnow() + timedelta(seconds=delay_seconds) < run.deadline_at
+        )
+        self._append_event(
+            run,
+            EventType.TOOL_FAILED,
+            {
+                "tool_call_id": str(call.id),
+                "attempt_id": str(attempt.id),
+                "attempt_number": attempt.attempt_number,
+                "error_class": "TRANSIENT",
+                "definite_not_executed": True,
+                "error": call.error,
+            },
+        )
+        if retry_allowed:
+            call.retry_after_failure(call.error or "transient READ failure")
+            run.yield_to_queue(QueueReason.RETRY)
+            run.available_at = utcnow() + timedelta(seconds=delay_seconds)
+            self._append_event(
+                run,
+                EventType.TOOL_RETRY_SCHEDULED,
+                {
+                    "tool_call_id": str(call.id),
+                    "attempt_number": attempt.attempt_number,
+                    "delay_seconds": delay_seconds,
+                },
+            )
+            return True
+
+        if attempt.attempt_number >= max_attempts:
+            failure_reason = "READ_RETRY_EXHAUSTED: versioned READ retry attempts exhausted"
+        elif self.run_state.tool_attempts_used >= run.max_tool_attempts:
+            failure_reason = "BUDGET_EXCEEDED: max_tool_attempts exhausted"
+        else:
+            failure_reason = "DEADLINE_EXCEEDED: READ retry due time reaches run deadline"
+        run.fail(failure_reason)
+        self._append_event(run, EventType.RUN_FAILED, {"reason": failure_reason})
+        return False
+
     async def record_tool_failed_and_fail_run(
         self,
         call: ToolCall,
@@ -517,7 +592,12 @@ class ExecutionJournal(ExecutionRecorder):
         if call.status is not ToolCallStatus.FAILED:
             raise ValueError("tool failure persistence requires a FAILED ToolCall")
         attempt = self._started_tool_attempt(call.id)
-        attempt.fail(call.error or "tool failed")
+        attempt.fail(
+            call.error or "tool failed",
+            error_class="PERMANENT",
+            definite_not_executed=True,
+            outcome_reason="READ_NON_RETRYABLE_FAILURE",
+        )
         self._assert_no_active_tool_calls(run.id)
         self._assert_no_started_tool_attempts(run.id)
         self._assert_no_started_model_invocations(run.id)
@@ -621,6 +701,18 @@ class RunManager:
                 raise RunExecutionFailedError(run.failure_reason) from exc
             try:
                 recovered_call = await self._tools.execute_prepared(prepared)
+            except ToolTransientError as exc:
+                scheduled = await recorder.record_read_transient_failure(
+                    recoverable_call,
+                    run,
+                    max_attempts=prepared.binding.read_retry_max_attempts,
+                    initial_backoff_seconds=prepared.binding.read_retry_initial_backoff_seconds,
+                    max_backoff_seconds=prepared.binding.read_retry_max_backoff_seconds,
+                    expected_generation=expected_generation,
+                )
+                if scheduled:
+                    return None
+                raise RunExecutionFailedError(run.failure_reason or str(exc)) from exc
             except Exception as exc:
                 run.fail(f"recovered READ tool {recoverable_call.tool_name} failed: {exc}")
                 await recorder.record_tool_failed_and_fail_run(
@@ -767,6 +859,18 @@ class RunManager:
                 raise RunExecutionFailedError(run.failure_reason) from exc
             try:
                 call = await self._tools.execute_prepared(prepared)
+            except ToolTransientError as exc:
+                scheduled = await recorder.record_read_transient_failure(
+                    call,
+                    run,
+                    max_attempts=prepared.binding.read_retry_max_attempts,
+                    initial_backoff_seconds=prepared.binding.read_retry_initial_backoff_seconds,
+                    max_backoff_seconds=prepared.binding.read_retry_max_backoff_seconds,
+                    expected_generation=expected_generation,
+                )
+                if scheduled:
+                    return None
+                raise RunExecutionFailedError(run.failure_reason or str(exc)) from exc
             except Exception as exc:
                 run.fail(f"tool {proposal.tool_name} failed: {exc}")
                 await recorder.record_tool_failed_and_fail_run(

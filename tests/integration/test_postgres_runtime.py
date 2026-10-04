@@ -32,6 +32,7 @@ from agentforge.application.errors import (
     BusinessProgressionBlockedError,
     IdempotencyConflictError,
     StaleExecutorError,
+    ToolTransientError,
 )
 from agentforge.application.worker import CoreWorker
 from agentforge.demo import (
@@ -70,6 +71,7 @@ from agentforge.infrastructure.db.runtime_store import PostgresRuntimeStore
 from agentforge.infrastructure.db.session import create_engine, create_session_factory
 from agentforge.runtime.fake_model import FinalStep, ScriptedFakeModel, ToolStep
 from agentforge.runtime.tool_coordinator import ToolCoordinator
+from agentforge.runtime.tools import FunctionTool, InMemoryToolRegistry
 
 
 def reset_schema() -> None:
@@ -1544,3 +1546,156 @@ async def test_expired_deadline_blocks_recovered_read_without_new_attempt_or_usa
     assert attempts[0].status is ToolExecutionAttemptStatus.UNKNOWN
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_read_transient_retry_uses_db_time_and_survives_worker_restart() -> None:
+    from agentforge.infrastructure.db.models import ToolExecutionAttemptRow
+
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+
+    async with sessions() as session, session.begin():
+        tool_version = await session.get(ToolVersionRow, DEMO_TOOL_VERSION_ID)
+        assert tool_version is not None
+        tool_version.read_retry_max_attempts = 3
+        tool_version.read_retry_initial_backoff_seconds = 1
+        tool_version.read_retry_max_backoff_seconds = 4
+
+    invocations = 0
+
+    async def flaky_echo(text: str):
+        nonlocal invocations
+        invocations += 1
+        if invocations == 1:
+            raise ToolTransientError("temporary read outage")
+        return {"echo": text}
+
+    registry = InMemoryToolRegistry(
+        [
+            FunctionTool(
+                version_id=DEMO_TOOL_VERSION_ID,
+                name="echo_read",
+                description="retryable read",
+                input_schema={"type": "object"},
+                func=flaky_echo,
+            )
+        ]
+    )
+    store = PostgresRuntimeStore(sessions)
+    run = await store.create_run(
+        agent_version_id=DEMO_AGENT_VERSION_ID,
+        input_text="durable read retry",
+        idempotency_key="integration-read-transient-retry-1",
+        principal_scope="test-user",
+    )
+
+    worker_a = CoreWorker(
+        runtime_store=store,
+        recorder_factory=PostgresExecutionRecorderFactory(sessions),
+        tool_registry=registry,
+        model_factory=lambda _: ScriptedFakeModel(
+            [ToolStep("echo_read", {"text": "durable read retry"})]
+        ),
+        worker_id="worker-a",
+        lease_seconds=30,
+    )
+    assert await worker_a.run_once() is True
+
+    scheduled = await store.get_run(run.id)
+    assert scheduled is not None
+    assert scheduled.status is RunStatus.QUEUED
+    assert scheduled.queue_reason is QueueReason.RETRY
+    assert scheduled.available_at is not None
+
+    async with sessions() as session:
+        calls = (
+            (await session.execute(select(ToolCallRow).where(ToolCallRow.run_id == run.id)))
+            .scalars()
+            .all()
+        )
+        attempts = (
+            (
+                await session.execute(
+                    select(ToolExecutionAttemptRow)
+                    .where(ToolExecutionAttemptRow.run_id == run.id)
+                    .order_by(ToolExecutionAttemptRow.attempt_number)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(calls) == 1
+    original_call_id = calls[0].id
+    assert calls[0].status is ToolCallStatus.READY
+    assert len(attempts) == 1
+    assert attempts[0].status is ToolExecutionAttemptStatus.FAILED
+    assert attempts[0].error_class == "TRANSIENT"
+    assert attempts[0].definite_not_executed is True
+
+    # The DB available_at gate, not lease expiry, blocks an early claim.
+    assert await store.claim_next_run(worker_id="too-early", lease_seconds=30) is None
+
+    await engine.dispose()
+    await asyncio.sleep(1.2)
+
+    restarted_engine = create_engine(DATABASE_URL)
+    restarted_sessions = create_session_factory(restarted_engine)
+    restarted_store = PostgresRuntimeStore(restarted_sessions)
+    worker_b = CoreWorker(
+        runtime_store=restarted_store,
+        recorder_factory=PostgresExecutionRecorderFactory(restarted_sessions),
+        tool_registry=registry,
+        model_factory=lambda _: ScriptedFakeModel([FinalStep("done after retry")]),
+        worker_id="worker-b",
+        lease_seconds=30,
+    )
+    assert await worker_b.run_once() is True
+
+    completed = await restarted_store.get_run(run.id)
+    assert completed is not None
+    assert completed.status is RunStatus.COMPLETED
+    assert completed.execution_generation == 2
+
+    async with restarted_sessions() as session:
+        calls = (
+            (await session.execute(select(ToolCallRow).where(ToolCallRow.run_id == run.id)))
+            .scalars()
+            .all()
+        )
+        attempts = (
+            (
+                await session.execute(
+                    select(ToolExecutionAttemptRow)
+                    .where(ToolExecutionAttemptRow.run_id == run.id)
+                    .order_by(ToolExecutionAttemptRow.attempt_number)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        event_types = (
+            (
+                await session.execute(
+                    select(DomainEventRow.event_type)
+                    .where(DomainEventRow.run_id == run.id)
+                    .order_by(DomainEventRow.sequence)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert len(calls) == 1
+    assert calls[0].id == original_call_id
+    assert calls[0].status is ToolCallStatus.SUCCEEDED
+    assert [attempt.attempt_number for attempt in attempts] == [1, 2]
+    assert [attempt.status for attempt in attempts] == [
+        ToolExecutionAttemptStatus.FAILED,
+        ToolExecutionAttemptStatus.SUCCEEDED,
+    ]
+    assert EventType.TOOL_RETRY_SCHEDULED.value in event_types
+    assert invocations == 2
+    await restarted_engine.dispose()

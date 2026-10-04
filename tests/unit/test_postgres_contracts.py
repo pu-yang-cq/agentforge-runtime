@@ -93,6 +93,21 @@ def test_only_denied_tool_calls_may_omit_tool_version_binding() -> None:
     assert "ck_tool_calls_bound_version_unless_denied" in checks
 
 
+def test_tool_version_has_bounded_read_retry_policy() -> None:
+    table = Base.metadata.tables["tool_versions"]
+    assert {
+        "read_retry_max_attempts",
+        "read_retry_initial_backoff_seconds",
+        "read_retry_max_backoff_seconds",
+    }.issubset(table.c.keys())
+    checks = {constraint.name for constraint in table.constraints if constraint.name}
+    assert {
+        "ck_tool_versions_positive_read_retry_attempts",
+        "ck_tool_versions_nonnegative_read_retry_initial_backoff",
+        "ck_tool_versions_read_retry_backoff_order",
+    }.issubset(checks)
+
+
 def test_agent_version_tool_binding_remains_non_nullable() -> None:
     table = Base.metadata.tables["agent_version_tools"]
     assert table.c.tool_version_id.nullable is False

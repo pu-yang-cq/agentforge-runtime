@@ -57,7 +57,21 @@ class ToolDefinitionRow(Base):
 
 class ToolVersionRow(Base):
     __tablename__ = "tool_versions"
-    __table_args__ = (UniqueConstraint("tool_id", "version_number"),)
+    __table_args__ = (
+        UniqueConstraint("tool_id", "version_number"),
+        CheckConstraint(
+            "read_retry_max_attempts > 0",
+            name="ck_tool_versions_positive_read_retry_attempts",
+        ),
+        CheckConstraint(
+            "read_retry_initial_backoff_seconds >= 0",
+            name="ck_tool_versions_nonnegative_read_retry_initial_backoff",
+        ),
+        CheckConstraint(
+            "read_retry_max_backoff_seconds >= read_retry_initial_backoff_seconds",
+            name="ck_tool_versions_read_retry_backoff_order",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
     tool_id: Mapped[UUID] = mapped_column(
@@ -69,6 +83,11 @@ class ToolVersionRow(Base):
         Enum(ToolEffectType, name="tool_effect_type"), nullable=False
     )
     implementation_ref: Mapped[str] = mapped_column(String(300), nullable=False)
+    read_retry_max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    read_retry_initial_backoff_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1
+    )
+    read_retry_max_backoff_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
     )

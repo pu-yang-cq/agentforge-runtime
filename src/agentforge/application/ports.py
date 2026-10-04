@@ -119,6 +119,17 @@ class ExecutionRecorder(Protocol):
         expected_generation: int,
     ) -> None: ...
 
+    async def record_read_transient_failure(
+        self,
+        call: ToolCall,
+        run: Run,
+        *,
+        max_attempts: int,
+        initial_backoff_seconds: int,
+        max_backoff_seconds: int,
+        expected_generation: int,
+    ) -> bool: ...
+
     async def record_tool_failed_and_fail_run(
         self,
         call: ToolCall,

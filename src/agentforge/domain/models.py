@@ -39,6 +39,23 @@ class Agent:
 class ToolBinding:
     tool_version_id: UUID
     name: str
+    read_retry_max_attempts: int = 1
+    read_retry_initial_backoff_seconds: int = 1
+    read_retry_max_backoff_seconds: int = 30
+
+    def __post_init__(self) -> None:
+        if self.read_retry_max_attempts <= 0:
+            raise ValueError("read_retry_max_attempts must be positive")
+        if self.read_retry_initial_backoff_seconds < 0:
+            raise ValueError("read retry initial backoff cannot be negative")
+        if self.read_retry_max_backoff_seconds < self.read_retry_initial_backoff_seconds:
+            raise ValueError("read retry max backoff cannot be below initial backoff")
+
+    def read_retry_delay_seconds(self, failed_attempt_number: int) -> int:
+        if failed_attempt_number <= 0:
+            raise ValueError("failed_attempt_number must be positive")
+        delay: int = self.read_retry_initial_backoff_seconds * (2 ** (failed_attempt_number - 1))
+        return min(delay, self.read_retry_max_backoff_seconds)
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,6 +244,12 @@ class ToolCall:
         self.status = ToolCallStatus.EXECUTING
         self.error = None
 
+    def retry_after_failure(self, reason: str) -> None:
+        if self.status is not ToolCallStatus.FAILED:
+            raise ValueError("tool call can only retry from FAILED")
+        self.status = ToolCallStatus.READY
+        self.error = reason
+
     def succeed(self, result: Any) -> None:
         if self.status is not ToolCallStatus.EXECUTING:
             raise ValueError("tool call can only succeed from EXECUTING")
@@ -250,6 +273,7 @@ class ToolExecutionAttempt:
     status: ToolExecutionAttemptStatus = ToolExecutionAttemptStatus.STARTED
     result: Any = None
     error: str | None = None
+    error_class: str | None = None
     outcome_reason: str | None = None
     definite_not_executed: bool | None = None
     started_at: datetime = field(default_factory=utcnow)
@@ -266,6 +290,7 @@ class ToolExecutionAttempt:
         self,
         error: str,
         *,
+        error_class: str | None = None,
         definite_not_executed: bool | None = None,
         outcome_reason: str | None = None,
     ) -> None:
@@ -273,6 +298,7 @@ class ToolExecutionAttempt:
             raise ValueError("tool attempt can only fail from STARTED")
         self.status = ToolExecutionAttemptStatus.FAILED
         self.error = error
+        self.error_class = error_class
         self.definite_not_executed = definite_not_executed
         self.outcome_reason = outcome_reason
         self.finished_at = utcnow()
