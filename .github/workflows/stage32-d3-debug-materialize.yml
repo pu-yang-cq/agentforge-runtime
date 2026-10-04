@@ -1,0 +1,48 @@
+name: Stage 3.2-D3 Debug Materialize
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/RUN_STAGE32_D3_DEBUG
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: true
+
+      - name: Apply D3 candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python scripts/stage32_d3_patch.py
+
+      - name: Format candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            -e UV_PROJECT_ENVIRONMENT=/tmp/agentforge-d3-debug-venv \
+            -e UV_CACHE_DIR=/tmp/agentforge-d3-debug-cache \
+            ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim \
+            sh -lc "uv sync --locked --all-groups >/dev/null && uv run --locked ruff format src migrations tests"
+
+      - name: Push materialized candidate to debug branch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "agentforge-stage32-bot"
+          git config user.email "agentforge-stage32-bot@users.noreply.github.com"
+          git rm scripts/stage32_d3_patch.py
+          git add src migrations tests
+          git commit -m "debug: materialize Stage 3.2-D3 candidate"
+          git push --force origin HEAD:stage32-d3-debug
