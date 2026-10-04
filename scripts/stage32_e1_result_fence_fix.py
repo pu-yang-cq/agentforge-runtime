@@ -485,7 +485,7 @@ for old_block, new_block in [
 ''',
 '''            if scheduled:
                 return None
-            if run.status is RunStatus.CANCELLED:
+            if run.cancel_requested:
                 return None
             raise RunExecutionFailedError(run.failure_reason or str(exc)) from exc
 ''',
@@ -497,14 +497,14 @@ for old_block, new_block in [
 ''',
 '''                if scheduled:
                     return None
-                if run.status is RunStatus.CANCELLED:
+                if run.cancel_requested:
                     return None
                 raise RunExecutionFailedError(run.failure_reason or str(exc)) from exc
 ''',
     ),
 ]:
     text = text.replace(old_block, new_block)
-if text.count("run.status is RunStatus.CANCELLED") < 3:
+if text.count("run.cancel_requested") < 3:
     raise SystemExit("expected cancellation handling on side-effect and READ transient paths")
 text = text.replace(
 '''                await recorder.record_side_effect_definite_failure_and_fail_run(
@@ -527,7 +527,7 @@ text = text.replace(
                     error_class=exc.error_class,
                     expected_generation=expected_generation,
                 )
-                if run.status is RunStatus.CANCELLED:
+                if run.cancel_requested:
                     return None
                 raise RunExecutionFailedError(run.failure_reason) from exc
 ''',
