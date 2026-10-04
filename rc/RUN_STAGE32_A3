@@ -7,3 +7,5 @@ Retry after migration-contract anchor fix.
 Retry after integration import-anchor fix.
 
 Retry after Ruff import fixes.
+
+Retry after A3 mypy fixes.
