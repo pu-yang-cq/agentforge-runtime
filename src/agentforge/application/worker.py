@@ -33,6 +33,7 @@ class CoreWorker:
         model_factory: Callable[[str], ModelGateway],
         worker_id: str,
         lease_seconds: int,
+        max_progression_steps_per_claim: int = 8,
     ) -> None:
         self._runtime_store = runtime_store
         self._recorder_factory = recorder_factory
@@ -41,7 +42,10 @@ class CoreWorker:
         self._worker_id = worker_id
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
+        if max_progression_steps_per_claim <= 0:
+            raise ValueError("max_progression_steps_per_claim must be positive")
         self._lease_seconds = lease_seconds
+        self._max_progression_steps_per_claim = max_progression_steps_per_claim
 
     async def _heartbeat(self, *, run_id: UUID, generation: int) -> None:
         interval = max(0.1, self._lease_seconds / 3)
@@ -82,6 +86,7 @@ class CoreWorker:
             manager = RunManager(
                 NativeRunner(self._model_factory(run.input_text), self._tool_registry),
                 ToolCoordinator(self._tool_registry),
+                max_progression_steps_per_claim=self._max_progression_steps_per_claim,
             )
             try:
                 await manager.execute(
