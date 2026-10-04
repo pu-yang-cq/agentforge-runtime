@@ -1,3 +1,3 @@
-Probe exact RC2 plus RC3 package/type-boundary candidate through Ruff check, Ruff format --check, and mypy strict.
-Patch SHA-256: 5c48cb711196dbc180ae055574bfe6a815e9b6e71d03a384a79d462ab727b32f
-No source promotion is authorized by this marker.
+Strict probe exact RC2 plus final RC3 package/type-boundary candidate through Ruff check, Ruff format --check, and mypy strict.
+Patch SHA-256: d345462a812b68d9a3e7b82fee5d162492face325a7b110877ae16741a9f9490
+This run must fail if any static gate fails. No source promotion is authorized by this marker.
