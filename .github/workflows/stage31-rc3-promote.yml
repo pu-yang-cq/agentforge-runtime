@@ -174,10 +174,10 @@ jobs:
               uv run --locked ruff format --check src apps tests migrations; \
               uv run --locked mypy --cache-dir /tmp/mypy-cache; \
               PYTHONPATH=src uv run --locked pytest -q tests/unit; \
-              python -m compileall -q src apps tests"
-          find . -type f -name '*.pyc' -delete
-          find . -type d -name '__pycache__' -empty -delete
-          rm -rf .venv .ruff_cache .pytest_cache .mypy_cache
+              python -m compileall -q src apps tests; \
+              find . -type f -name '*.pyc' -delete; \
+              find . -type d -name '__pycache__' -prune -exec rm -rf {} +; \
+              rm -rf .venv .ruff_cache .pytest_cache .mypy_cache"
 
       - name: Build deterministic RC3 source twice
         shell: bash
