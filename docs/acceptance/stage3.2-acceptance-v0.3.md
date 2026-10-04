@@ -163,7 +163,9 @@ Mandatory golden vectors include:
 - Unicode strings;
 - quote/backslash/control characters;
 - arrays;
-- negative and positive integers;
+- negative and positive integers at the exact safe-range boundaries
+  -9007199254740991 and 9007199254740991;
+- rejection just outside those boundaries;
 - null/boolean;
 - operation_id/tool_version/effect/credential_ref changes.
 
@@ -380,9 +382,16 @@ Required:
 
 If takeover/fencing makes the invocation result stale:
 
+- expired lease / stale generation follows the frozen Stage 3.1 stale-executor
+  rejection path;
+- stale executor cannot finalize authoritative ModelInvocation lifecycle;
 - stale result cannot create consequence;
-- Stage 3.1 stale-result guarantees remain intact;
-- no new RunMessage/ToolProposal/ToolCall/Action from stale invocation.
+- no new RunMessage/ToolProposal/ToolCall/Action from stale invocation;
+- no progression is queued.
+
+A separate case must prove that a still-authorized invocation whose result
+arrives after cancellation/deadline may record its invocation outcome while its
+business consequence is discarded.
 
 ---
 
@@ -627,7 +636,11 @@ Required:
 - Run-row lock serializes them;
 - only the state-valid transition commits;
 - no conflicting active progression survives;
-- independent partial indexes are not the only defense.
+- independent partial indexes are not the only defense;
+- multi-row paths obey the global lock order
+  Run -> ExternalAction -> ToolCall -> Attempt/ReconciliationAttempt where
+  those objects participate;
+- stress tests must not contain a reversed ToolCall -> ExternalAction lock path.
 
 ---
 
