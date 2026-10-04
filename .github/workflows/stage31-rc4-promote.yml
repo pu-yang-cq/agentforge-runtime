@@ -194,6 +194,27 @@ jobs:
               contract_text = contract_text.replace(old_contract, new_contract)
           migration_contract.write_text(contract_text)
 
+          runtime_store = root / "src/agentforge/infrastructure/db/runtime_store.py"
+          runtime_text = runtime_store.read_text()
+          old_create_boundary = """            session.add_all(
+                [
+                    row,
+                    RunStateRow(run_id=run_id, state_version=0, turn_count=0, tool_call_count=0),
+"""
+          new_create_boundary = """            session.add(row)
+            await session.flush()
+            session.add_all(
+                [
+                    RunStateRow(run_id=run_id, state_version=0, turn_count=0, tool_call_count=0),
+"""
+          if runtime_text.count(old_create_boundary) != 1:
+              raise SystemExit(
+                  "create_run parent/child flush boundary changed; refusing blind replacement"
+              )
+          runtime_store.write_text(
+              runtime_text.replace(old_create_boundary, new_create_boundary)
+          )
+
           readme = root / "README.md"
           readme.write_text(readme.read_text().replace("V1.0-RC3", "V1.0-RC4"))
 
@@ -215,9 +236,12 @@ jobs:
               "the default 32-character version column;\n"
               "- make the integration seed fixture flush parent config rows before "
               "the association row so PostgreSQL FK ordering is explicit;\n"
-              "- update migration-contract expectations to the shortened revision id.\n\n"
-              "The fixture/contract changes are test-only corrections revealed after "
-              "the online migration began passing. No migration operation, "
+              "- update migration-contract expectations to the shortened revision id;\n"
+              "- explicitly flush RunRow before RunState/Counter/Message/Event children "
+              "inside the same create_run transaction.\n\n"
+              "The fixture/contract changes are test-only corrections. The create_run "
+              "flush is a production persistence repair revealed by PostgreSQL FK "
+              "enforcement and preserves the same ACID transaction. No migration operation, "
               "table/index/check definition, runtime state "
               "transition, SQL predicate, transaction boundary, lease/fencing rule, "
               "recovery rule, tool/model semantic, or dependency was changed.\n\n"
@@ -285,7 +309,7 @@ jobs:
             echo
             echo "$digest  agentforge-stage3.1-v1.0-rc4-clean.tar.gz"
             echo
-            echo "Derived from RC3 by the PostgreSQL-confirmed revision-width repair and test-harness corrections revealed by the same target gate."
+            echo "Derived from RC3 by PostgreSQL-confirmed migration and parent-before-child persistence repairs, plus test-harness corrections from the same target gate."
             echo "No dependency change; reviewed uv.lock remains unchanged."
           } > rc/RC4_SOURCE_SHA256
           git config user.name "agentforge-stage31-bot"
