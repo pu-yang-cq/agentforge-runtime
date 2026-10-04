@@ -74,7 +74,9 @@ class ToolBinding:
     def read_retry_delay_seconds(self, failed_attempt_number: int) -> int:
         if failed_attempt_number <= 0:
             raise ValueError("failed_attempt_number must be positive")
-        delay = self.read_retry_initial_backoff_seconds * (2 ** (failed_attempt_number - 1))
+        delay: int = self.read_retry_initial_backoff_seconds * (
+            2 ** (failed_attempt_number - 1)
+        )
         return min(delay, self.read_retry_max_backoff_seconds)
 ''',
 )
@@ -587,7 +589,8 @@ replace_once(
                     recoverable_call,
                     run,
                     max_attempts=prepared.binding.read_retry_max_attempts,
-                    delay_seconds=prepared.binding.read_retry_initial_backoff_seconds,
+                    initial_backoff_seconds=prepared.binding.read_retry_initial_backoff_seconds,
+                    max_backoff_seconds=prepared.binding.read_retry_max_backoff_seconds,
 ''',
 )
 
