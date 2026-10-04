@@ -49,7 +49,7 @@ jobs:
           git config user.name "agentforge-stage32-bot"
           git config user.email "agentforge-stage32-bot@users.noreply.github.com"
           git rm scripts/stage32_a1_patch.py
-          git add src migrations tests scripts/stage32_a1_patch.py
+          git add src migrations tests
           git diff --cached --check
           git commit -m "feat(runtime): add durable READ tool execution attempts"
           git push origin HEAD:main
