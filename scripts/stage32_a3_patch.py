@@ -807,10 +807,9 @@ replace_once(
 # datetime timedelta import for due time.
 replace_once(
     "src/agentforge/infrastructure/db/execution_recorder.py",
-    '''from typing import Any, cast
+    '''from datetime import datetime
 ''',
-    '''from datetime import timedelta
-from typing import Any, cast
+    '''from datetime import datetime, timedelta
 ''',
 )
 
@@ -1134,6 +1133,15 @@ replace_once(
     StaleExecutorError,
     ToolTransientError,
 )
+''',
+)
+
+replace_once(
+    "tests/integration/test_postgres_runtime.py",
+    '''from agentforge.runtime.tool_coordinator import ToolCoordinator
+''',
+    '''from agentforge.runtime.tool_coordinator import ToolCoordinator
+from agentforge.runtime.tools import FunctionTool, InMemoryToolRegistry
 ''',
 )
 
