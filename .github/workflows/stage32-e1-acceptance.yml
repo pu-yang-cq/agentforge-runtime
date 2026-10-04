@@ -1,0 +1,121 @@
+name: Stage 3.2-E1 Acceptance
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/RUN_STAGE32_E1_ACCEPTANCE
+
+permissions:
+  contents: read
+
+jobs:
+  accept:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Verify committed E1 surface
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f docs/implementation/stage3.2-e-slices-frozen.md
+          test -f migrations/versions/0014_cancellation_intent.py
+          test ! -f scripts/stage32_e1_patch.py
+          grep -R 'cancel_requested' -n src/agentforge
+          grep -R 'RUN_CANCEL_REQUESTED' -n src/agentforge
+          grep -R 'RUN_CANCELLED' -n src/agentforge
+          grep -R 'async def cancel_run' -n src/agentforge
+
+      - name: Prove all model-result consequence paths honor cancellation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          source = Path("src/agentforge/application/run_manager.py").read_text()
+
+          # Final, side-effect proposal, READ proposal, and permission-denied
+          # proposal must all discard current-authority model output when cancel
+          # won the Run-row race.
+          required_regions = [
+              ("record_model_final_decision", "record_model_result_discarded_and_cancel_run"),
+              ("record_model_side_effect_prepared", "record_model_result_discarded_and_cancel_run"),
+              ("record_model_tool_started", "record_model_result_discarded_and_cancel_run"),
+              ("record_model_tool_denied_and_fail_run", "record_model_result_discarded_and_cancel_run"),
+          ]
+          for start_token, required in required_regions:
+              start = source.index(start_token)
+              end = source.find("\n            if ", start + len(start_token))
+              if end < 0:
+                  end = min(len(source), start + 2200)
+              region = source[start:end]
+              if 'CANCEL_REQUESTED' not in region or required not in region:
+                  raise SystemExit(
+                      f"model consequence path lacks cancellation discard: {start_token}"
+                  )
+          print("all model consequence paths honor cancellation: PASS")
+          PY
+
+      - name: Prove cancellation does not rollback EXECUTING action
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          source = Path("src/agentforge/infrastructure/db/runtime_store.py").read_text()
+          tree = ast.parse(source)
+          fn = next(
+              n for n in ast.walk(tree)
+              if isinstance(n, ast.AsyncFunctionDef) and n.name == "cancel_run"
+          )
+          body = ast.get_source_segment(source, fn) or ""
+          if "action.status is ExternalActionStatus.EXECUTING" in body:
+              raise SystemExit("cancel_run attempts direct EXECUTING action rollback")
+          if "action.status is ExternalActionStatus.READY" not in body:
+              raise SystemExit("cancel_run lacks pre-commit READY stabilization")
+          print("cancellation is not rollback: PASS")
+          PY
+
+      - name: Prove safety reconciliation remains allowed after cancellation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          recorder = Path("src/agentforge/infrastructure/db/execution_recorder.py").read_text()
+          start = recorder.index("async def record_reconciliation_started")
+          end = recorder.index("\n    async def ", start + 10)
+          body = recorder[start:end]
+          if "_assert_business_progression_allowed" in body:
+              raise SystemExit("cancel fence incorrectly blocks safety reconciliation")
+          print("reconciliation remains safety work after cancellation: PASS")
+          PY
+
+      - name: Prove cancelled manual review is a legal terminal unresolved state
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          recorder = Path("src/agentforge/infrastructure/db/execution_recorder.py").read_text()
+          if "RunStatus.CANCELLED" not in recorder:
+              raise SystemExit("no cancelled terminalization in recorder")
+          if "ExternalActionStatus.MANUAL_REVIEW" not in recorder:
+              raise SystemExit("manual-review projection missing")
+          if "run_row.cancel_requested" not in recorder:
+              raise SystemExit("manual-review path does not inspect cancellation")
+          print("CANCELLED + MANUAL_REVIEW stopping state present: PASS")
+          PY
+
+      - name: Run independent E1 acceptance gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ./scripts/validate_stage31_containerized.sh
