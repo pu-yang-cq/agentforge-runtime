@@ -29,6 +29,7 @@ if not DATABASE_URL:
     )
 
 from agentforge.application.errors import (
+    ActionResolutionConflictError,
     BusinessProgressionBlockedError,
     IdempotencyConflictError,
     RunExecutionFailedError,
@@ -49,7 +50,9 @@ from agentforge.demo import (
     build_demo_registry,
 )
 from agentforge.domain.enums import (
+    ActionResolutionOutcome,
     EventType,
+    ExternalActionStatus,
     QueueReason,
     ReconciliationAttemptStatus,
     ReconciliationBusinessResult,
@@ -64,10 +67,12 @@ from agentforge.infrastructure.db.execution_recorder import (
     PostgresExecutionRecorderFactory,
 )
 from agentforge.infrastructure.db.models import (
+    ActionResolutionRow,
     AgentRow,
     AgentVersionRow,
     AgentVersionToolRow,
     DomainEventRow,
+    ExternalActionRow,
     ReconciliationAttemptRow,
     RunMessageRow,
     ToolCallRow,
@@ -3816,5 +3821,376 @@ async def test_cancel_requested_fences_new_model_business_progression() -> None:
             run_id=created.id,
             invocation_id=uuid4(),
             expected_generation=claimed.execution_generation,
+        )
+    await engine.dispose()
+
+
+async def _build_manual_review_run_for_e2(sessions, *, key: str, tool_name: str):
+    from agentforge.domain.enums import ReconciliationMode
+
+    side_tool_id = uuid4()
+    side_version_id = uuid4()
+    async with sessions() as session, session.begin():
+        session.add(
+            ToolDefinitionRow(
+                id=side_tool_id,
+                name=tool_name,
+                description="manual-review side effect",
+            )
+        )
+        await session.flush()
+        session.add(
+            ToolVersionRow(
+                id=side_version_id,
+                tool_id=side_tool_id,
+                version_number=1,
+                input_schema={"type": "object"},
+                effect_type=ToolEffectType.WRITE,
+                implementation_ref=f"tests:{tool_name}",
+                allow_no_approval_execution=True,
+                reconciliation_mode=ReconciliationMode.NONE,
+            )
+        )
+        await session.flush()
+        session.add(
+            AgentVersionToolRow(
+                agent_version_id=DEMO_AGENT_VERSION_ID,
+                tool_version_id=side_version_id,
+                tool_alias=tool_name,
+            )
+        )
+
+    async def ambiguous(_invocation):
+        raise ToolAdapterError(
+            "provider truth unavailable",
+            error_class="RESPONSE_LOST",
+            definite_not_executed=False,
+        )
+
+    registry = InMemoryToolRegistry(
+        [
+            FunctionTool(
+                version_id=DEMO_TOOL_VERSION_ID,
+                name="echo_read",
+                description="read",
+                input_schema={"type": "object"},
+                func=lambda text: {"echo": text},
+            ),
+            SideEffectFunctionTool(
+                version_id=side_version_id,
+                name=tool_name,
+                description="write",
+                input_schema={"type": "object"},
+                func=ambiguous,
+            ),
+        ]
+    )
+    store = PostgresRuntimeStore(sessions)
+    created = await store.create_run(
+        agent_version_id=DEMO_AGENT_VERSION_ID,
+        input_text="manual review",
+        idempotency_key=key,
+        principal_scope="test-user",
+    )
+    claimed = await store.claim_next_run(worker_id=f"{tool_name}-worker", lease_seconds=30)
+    assert claimed is not None
+    version = await store.load_agent_version(DEMO_AGENT_VERSION_ID)
+    recorder = PostgresExecutionRecorder(
+        sessions,
+        run_id=created.id,
+        generation=claimed.execution_generation,
+    )
+    manager = RunManager(
+        NativeRunner(ScriptedFakeModel([ToolStep(tool_name, {"v": 1})]), registry),
+        ToolCoordinator(registry),
+    )
+    assert (
+        await manager.execute(
+            run=claimed,
+            run_state=await store.load_run_state(created.id),
+            agent_version=version,
+            recorder=recorder,
+        )
+        is None
+    )
+    # Second pass observes UNKNOWN and mode NONE, producing MANUAL_REVIEW.
+    assert (
+        await manager.execute(
+            run=claimed,
+            run_state=await store.load_run_state(created.id),
+            agent_version=version,
+            recorder=recorder,
+        )
+        is None
+    )
+    durable = await store.get_run(created.id)
+    assert durable is not None
+    assert durable.status is RunStatus.WAITING_ACTION_RESOLUTION
+    async with sessions() as session:
+        action = (
+            await session.execute(
+                select(ExternalActionRow).where(ExternalActionRow.run_id == created.id)
+            )
+        ).scalar_one()
+    assert action.status is ExternalActionStatus.MANUAL_REVIEW
+    return store, created.id, action.id, registry
+
+
+@pytest.mark.asyncio
+async def test_manual_success_resolution_requeues_action_resolved_and_continues() -> None:
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+    store, run_id, action_id, registry = await _build_manual_review_run_for_e2(
+        sessions,
+        key="integration-e2-success",
+        tool_name="manual_success",
+    )
+
+    run, resolution = await store.resolve_action(
+        run_id=run_id,
+        action_id=action_id,
+        outcome=ActionResolutionOutcome.SUCCEEDED,
+        evidence={"ticket": "T-42"},
+        reason="operator verified success",
+        resolver_identity="operator:e2",
+    )
+
+    assert run.status is RunStatus.QUEUED
+    assert run.queue_reason is QueueReason.ACTION_RESOLVED
+    assert run.cancel_requested is False
+    assert resolution.action_id == action_id
+    assert resolution.outcome is ActionResolutionOutcome.SUCCEEDED
+
+    async with sessions() as session:
+        action = await session.get(ExternalActionRow, action_id)
+        call = await session.get(ToolCallRow, action.tool_call_id if action else uuid4())
+        resolution_row = (
+            await session.execute(
+                select(ActionResolutionRow).where(
+                    ActionResolutionRow.external_action_id == action_id
+                )
+            )
+        ).scalar_one()
+        tool_messages = (
+            (
+                await session.execute(
+                    select(RunMessageRow).where(
+                        RunMessageRow.run_id == run_id,
+                        RunMessageRow.role == "TOOL",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert action is not None and action.status is ExternalActionStatus.SUCCEEDED
+    assert call is not None and call.status is ToolCallStatus.SUCCEEDED
+    assert resolution_row.outcome is ActionResolutionOutcome.SUCCEEDED
+    assert len(tool_messages) == 1
+    assert '"manual_resolution":"SUCCEEDED"' in tool_messages[0].content
+
+    claimed = await store.claim_next_run(worker_id="e2-continuation", lease_seconds=30)
+    assert claimed is not None and claimed.id == run_id
+    manager = RunManager(
+        NativeRunner(ScriptedFakeModel([FinalStep("manual resolution continued")]), registry),
+        ToolCoordinator(registry),
+    )
+    recorder = PostgresExecutionRecorder(
+        sessions,
+        run_id=run_id,
+        generation=claimed.execution_generation,
+    )
+    assert (
+        await manager.execute(
+            run=claimed,
+            run_state=await store.load_run_state(run_id),
+            agent_version=await store.load_agent_version(DEMO_AGENT_VERSION_ID),
+            recorder=recorder,
+        )
+        == "manual resolution continued"
+    )
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_manual_success_after_deadline_finalizes_action_but_fails_run() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from agentforge.infrastructure.db.models import RunRow
+
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+    store, run_id, action_id, _ = await _build_manual_review_run_for_e2(
+        sessions,
+        key="integration-e2-deadline",
+        tool_name="manual_deadline",
+    )
+
+    async with sessions() as session, session.begin():
+        row = await session.get(RunRow, run_id)
+        assert row is not None
+        row.deadline_at = datetime.now(UTC) - timedelta(seconds=1)
+
+    run, _ = await store.resolve_action(
+        run_id=run_id,
+        action_id=action_id,
+        outcome=ActionResolutionOutcome.SUCCEEDED,
+        evidence={"provider": "success"},
+        reason="verified after deadline",
+        resolver_identity="operator:e2",
+    )
+    assert run.status is RunStatus.FAILED
+    assert run.failure_reason is not None
+    assert run.failure_reason.startswith("DEADLINE_EXCEEDED_AFTER_ACTION_RESOLUTION")
+    async with sessions() as session:
+        action = await session.get(ExternalActionRow, action_id)
+        assert action is not None
+        call = await session.get(ToolCallRow, action.tool_call_id)
+    assert action.status is ExternalActionStatus.SUCCEEDED
+    assert call is not None and call.status is ToolCallStatus.SUCCEEDED
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("outcome", "expected_action", "expected_call", "failure_reason"),
+    [
+        (
+            ActionResolutionOutcome.FAILED,
+            ExternalActionStatus.FAILED,
+            ToolCallStatus.FAILED,
+            "MANUAL_ACTION_RESOLUTION_FAILED",
+        ),
+        (
+            ActionResolutionOutcome.ABORTED,
+            ExternalActionStatus.ABORTED,
+            ToolCallStatus.NOT_EXECUTED,
+            "MANUAL_ACTION_RESOLUTION_ABORTED",
+        ),
+    ],
+)
+async def test_manual_failed_or_aborted_resolution_terminalizes_failed_run(
+    outcome,
+    expected_action,
+    expected_call,
+    failure_reason,
+) -> None:
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+    store, run_id, action_id, _ = await _build_manual_review_run_for_e2(
+        sessions,
+        key=f"integration-e2-{outcome.value.lower()}",
+        tool_name=f"manual_{outcome.value.lower()}",
+    )
+
+    run, _ = await store.resolve_action(
+        run_id=run_id,
+        action_id=action_id,
+        outcome=outcome,
+        evidence={"operator": "checked"},
+        reason="manual final outcome",
+        resolver_identity="operator:e2",
+    )
+    assert run.status is RunStatus.FAILED
+    assert run.failure_reason == failure_reason
+    async with sessions() as session:
+        action = await session.get(ExternalActionRow, action_id)
+        assert action is not None
+        call = await session.get(ToolCallRow, action.tool_call_id)
+    assert action.status is expected_action
+    assert call is not None and call.status is expected_call
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_manual_review_resolution_never_reopens_run_and_is_idempotent() -> None:
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+    store, run_id, action_id, _ = await _build_manual_review_run_for_e2(
+        sessions,
+        key="integration-e2-cancelled",
+        tool_name="manual_cancelled",
+    )
+
+    cancelled = await store.cancel_run(run_id)
+    assert cancelled.status is RunStatus.CANCELLED
+    assert cancelled.cancel_requested is True
+
+    kwargs = dict(
+        run_id=run_id,
+        action_id=action_id,
+        outcome=ActionResolutionOutcome.SUCCEEDED,
+        evidence={"ticket": "T-cancelled"},
+        reason="verified after cancellation",
+        resolver_identity="operator:e2",
+    )
+    run, first = await store.resolve_action(**kwargs)
+    replay_run, replay = await store.resolve_action(**kwargs)
+    assert run.status is RunStatus.CANCELLED
+    assert replay_run.status is RunStatus.CANCELLED
+    assert first.id == replay.id
+
+    with pytest.raises(ActionResolutionConflictError, match="contradictory"):
+        await store.resolve_action(
+            run_id=run_id,
+            action_id=action_id,
+            outcome=ActionResolutionOutcome.FAILED,
+            evidence={"ticket": "T-cancelled"},
+            reason="contradictory operator result",
+            resolver_identity="operator:e2",
+        )
+
+    async with sessions() as session:
+        action = await session.get(ExternalActionRow, action_id)
+        assert action is not None
+        call = await session.get(ToolCallRow, action.tool_call_id)
+        resolution_count = await session.scalar(
+            select(func.count())
+            .select_from(ActionResolutionRow)
+            .where(ActionResolutionRow.external_action_id == action_id)
+        )
+    assert action.status is ExternalActionStatus.SUCCEEDED
+    assert call is not None and call.status is ToolCallStatus.SUCCEEDED
+    assert resolution_count == 1
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_manual_resolution_rejects_non_manual_review_action() -> None:
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+    store, run_id, action_id, _ = await _build_manual_review_run_for_e2(
+        sessions,
+        key="integration-e2-state-guard",
+        tool_name="manual_state_guard",
+    )
+
+    # Resolve once, then a distinct second request must be rejected permanently.
+    await store.resolve_action(
+        run_id=run_id,
+        action_id=action_id,
+        outcome=ActionResolutionOutcome.ABORTED,
+        evidence=None,
+        reason="first final resolution",
+        resolver_identity="operator:e2",
+    )
+    with pytest.raises(ActionResolutionConflictError):
+        await store.resolve_action(
+            run_id=run_id,
+            action_id=action_id,
+            outcome=ActionResolutionOutcome.SUCCEEDED,
+            evidence=None,
+            reason="cannot overwrite",
+            resolver_identity="operator:e2",
         )
     await engine.dispose()

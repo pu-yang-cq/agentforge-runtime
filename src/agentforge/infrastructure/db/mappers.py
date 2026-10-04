@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from agentforge.domain.actions import ActionSnapshot, ExternalAction
+from agentforge.domain.actions import ActionResolution, ActionSnapshot, ExternalAction
 from agentforge.domain.enums import ReconciliationMode, ToolEffectType
 from agentforge.domain.models import AgentVersion, Run, RunMessage, RunState, ToolBinding, ToolCall
 from agentforge.infrastructure.db.models import (
+    ActionResolutionRow,
     ActionSnapshotRow,
     ExternalActionRow,
     RunMessageRow,
@@ -175,4 +176,16 @@ def external_action_from_row(row: ExternalActionRow) -> ExternalAction:
         operation_id=row.operation_id,
         status=row.status,
         current_attempt_id=row.current_attempt_id,
+    )
+
+
+def action_resolution_from_row(row: ActionResolutionRow) -> ActionResolution:
+    return ActionResolution(
+        id=row.id,
+        action_id=row.external_action_id,
+        outcome=row.outcome,
+        evidence=None if row.evidence is None else dict(row.evidence),
+        reason=row.reason,
+        resolver_identity=row.resolver_identity,
+        created_at=row.created_at,
     )

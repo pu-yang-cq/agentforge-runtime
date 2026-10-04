@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from hashlib import sha256
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -9,9 +10,14 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from agentforge.application.errors import IdempotencyConflictError
+from agentforge.application.errors import (
+    ActionResolutionConflictError,
+    IdempotencyConflictError,
+)
 from agentforge.application.ports import RuntimeStore
+from agentforge.domain.actions import ActionResolution
 from agentforge.domain.enums import (
+    ActionResolutionOutcome,
     EventType,
     ExternalActionStatus,
     MessageRole,
@@ -32,11 +38,13 @@ from agentforge.domain.models import (
     RunState,
 )
 from agentforge.infrastructure.db.mappers import (
+    action_resolution_from_row,
     agent_version_from_parts,
     run_from_row,
     run_state_from_row,
 )
 from agentforge.infrastructure.db.models import (
+    ActionResolutionRow,
     AgentVersionRow,
     AgentVersionToolRow,
     DomainEventRow,
@@ -97,6 +105,16 @@ async def _allocate_event_sequences(session: AsyncSession, run_id: UUID, count: 
     )
     end = result.scalar_one()
     return range(end - count + 1, end + 1)
+
+
+async def _allocate_message_sequence(session: AsyncSession, run_id: UUID) -> int:
+    result = await session.execute(
+        update(RunCounterRow)
+        .where(RunCounterRow.run_id == run_id)
+        .values(message_sequence=RunCounterRow.message_sequence + 1)
+        .returning(RunCounterRow.message_sequence)
+    )
+    return result.scalar_one()
 
 
 async def _close_orphaned_model_invocations_on_recovery(
@@ -538,6 +556,243 @@ class PostgresRuntimeStore(RuntimeStore):
             await session.flush()
             await session.refresh(row)
             return run_from_row(row)
+
+    async def resolve_action(
+        self,
+        *,
+        run_id: UUID,
+        action_id: UUID,
+        outcome: ActionResolutionOutcome,
+        evidence: dict[str, Any] | None,
+        reason: str | None,
+        resolver_identity: str,
+    ) -> tuple[Run, ActionResolution]:
+        """Commit one final manual business truth under Run -> Action -> ToolCall locks."""
+        if not resolver_identity.strip():
+            raise ValueError("resolver_identity cannot be blank")
+
+        async with self._sessions() as session, session.begin():
+            run_row = (
+                await session.execute(select(RunRow).where(RunRow.id == run_id).with_for_update())
+            ).scalar_one_or_none()
+            if run_row is None:
+                raise KeyError(f"run not found: {run_id}")
+
+            action_row = (
+                await session.execute(
+                    select(ExternalActionRow)
+                    .where(
+                        ExternalActionRow.id == action_id,
+                        ExternalActionRow.run_id == run_id,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if action_row is None:
+                raise KeyError(f"external action not found: {action_id}")
+
+            existing = (
+                await session.execute(
+                    select(ActionResolutionRow).where(
+                        ActionResolutionRow.external_action_id == action_id
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                same_request = (
+                    existing.outcome is outcome
+                    and (
+                        (existing.evidence is None and evidence is None)
+                        or (
+                            existing.evidence is not None
+                            and evidence is not None
+                            and dict(existing.evidence) == evidence
+                        )
+                    )
+                    and existing.reason == reason
+                    and existing.resolver_identity == resolver_identity
+                )
+                if not same_request:
+                    raise ActionResolutionConflictError(
+                        "external action already has a contradictory final resolution"
+                    )
+                await session.refresh(run_row)
+                return run_from_row(run_row), action_resolution_from_row(existing)
+
+            if action_row.status is not ExternalActionStatus.MANUAL_REVIEW:
+                raise ActionResolutionConflictError(
+                    "only MANUAL_REVIEW ExternalAction may be manually resolved"
+                )
+            if run_row.status not in {
+                RunStatus.WAITING_ACTION_RESOLUTION,
+                RunStatus.CANCELLED,
+            }:
+                raise ActionResolutionConflictError(
+                    "MANUAL_REVIEW action is inconsistent with Run terminal/waiting state"
+                )
+            if run_row.status is RunStatus.WAITING_ACTION_RESOLUTION and run_row.cancel_requested:
+                raise ActionResolutionConflictError(
+                    "cancel-requested manual review must stabilize Run to CANCELLED first"
+                )
+            if run_row.status is RunStatus.CANCELLED and not run_row.cancel_requested:
+                raise ActionResolutionConflictError(
+                    "CANCELLED manual-review Run lacks durable cancel_requested"
+                )
+
+            call_row = (
+                await session.execute(
+                    select(ToolCallRow)
+                    .where(
+                        ToolCallRow.id == action_row.tool_call_id,
+                        ToolCallRow.run_id == run_id,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one()
+            if call_row.status is not ToolCallStatus.UNRESOLVED:
+                raise ActionResolutionConflictError(
+                    "MANUAL_REVIEW action does not project to UNRESOLVED ToolCall"
+                )
+
+            db_now = await session.scalar(select(func.clock_timestamp()))
+            if db_now is None:
+                raise RuntimeError("database clock_timestamp() returned no value")
+
+            resolution_row = ActionResolutionRow(
+                id=uuid4(),
+                run_id=run_id,
+                external_action_id=action_id,
+                outcome=outcome,
+                evidence=evidence,
+                reason=reason,
+                resolver_identity=resolver_identity.strip(),
+            )
+            session.add(resolution_row)
+            await session.flush()
+
+            if outcome is ActionResolutionOutcome.SUCCEEDED:
+                action_row.status = ExternalActionStatus.SUCCEEDED
+                call_row.status = ToolCallStatus.SUCCEEDED
+                call_row.error = None
+                call_row.result = {
+                    "manual_resolution": ActionResolutionOutcome.SUCCEEDED.value,
+                    "evidence": evidence,
+                }
+            elif outcome is ActionResolutionOutcome.FAILED:
+                action_row.status = ExternalActionStatus.FAILED
+                call_row.status = ToolCallStatus.FAILED
+                call_row.error = reason or "manual resolution confirmed action failure"
+            elif outcome is ActionResolutionOutcome.ABORTED:
+                action_row.status = ExternalActionStatus.ABORTED
+                call_row.status = ToolCallStatus.NOT_EXECUTED
+                call_row.error = reason or "manual resolution confirmed action did not execute"
+            else:
+                raise ValueError(f"unsupported ActionResolution outcome: {outcome}")
+            action_row.updated_at = db_now
+
+            events: list[tuple[EventType, dict[str, object]]] = [
+                (
+                    EventType.ACTION_RESOLUTION_RECORDED,
+                    {
+                        "resolution_id": str(resolution_row.id),
+                        "external_action_id": str(action_id),
+                        "operation_id": str(action_row.operation_id),
+                        "outcome": outcome.value,
+                        "resolver_identity": resolver_identity.strip(),
+                    },
+                )
+            ]
+
+            if run_row.status is RunStatus.CANCELLED:
+                # Post-terminal resolution updates facts only. Cancellation remains final.
+                pass
+            elif outcome is ActionResolutionOutcome.SUCCEEDED:
+                if db_now < run_row.deadline_at:
+                    message_seq = await _allocate_message_sequence(session, run_id)
+                    content = json.dumps(
+                        call_row.result,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    session.add(
+                        RunMessageRow(
+                            id=uuid4(),
+                            run_id=run_id,
+                            sequence=message_seq,
+                            role=MessageRole.TOOL.value,
+                            content=content,
+                            source_id=call_row.id,
+                        )
+                    )
+                    run_row.status = RunStatus.QUEUED
+                    run_row.queue_reason = QueueReason.ACTION_RESOLVED
+                    run_row.available_at = None
+                    run_row.failure_reason = None
+                    run_row.final_output = None
+                    run_row.owner_worker_id = None
+                    run_row.lease_expires_at = None
+                    run_row.completed_at = None
+                    events.append(
+                        (
+                            EventType.RUN_QUEUED,
+                            {"queue_reason": QueueReason.ACTION_RESOLVED.value},
+                        )
+                    )
+                else:
+                    run_row.status = RunStatus.FAILED
+                    run_row.queue_reason = None
+                    run_row.available_at = None
+                    run_row.failure_reason = (
+                        "DEADLINE_EXCEEDED_AFTER_ACTION_RESOLUTION: "
+                        "manual success arrived after Run deadline"
+                    )
+                    run_row.final_output = None
+                    run_row.owner_worker_id = None
+                    run_row.lease_expires_at = None
+                    run_row.completed_at = db_now
+                    events.append(
+                        (
+                            EventType.RUN_FAILED,
+                            {"reason": run_row.failure_reason},
+                        )
+                    )
+            else:
+                run_row.status = RunStatus.FAILED
+                run_row.queue_reason = None
+                run_row.available_at = None
+                run_row.failure_reason = (
+                    "MANUAL_ACTION_RESOLUTION_FAILED"
+                    if outcome is ActionResolutionOutcome.FAILED
+                    else "MANUAL_ACTION_RESOLUTION_ABORTED"
+                )
+                run_row.final_output = None
+                run_row.owner_worker_id = None
+                run_row.lease_expires_at = None
+                run_row.completed_at = db_now
+                events.append(
+                    (
+                        EventType.RUN_FAILED,
+                        {"reason": run_row.failure_reason},
+                    )
+                )
+
+            seqs = list(await _allocate_event_sequences(session, run_id, len(events)))
+            for seq, (event_type, payload) in zip(seqs, events, strict=True):
+                session.add(
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run_id,
+                        sequence=seq,
+                        event_type=event_type.value,
+                        payload=payload,
+                    )
+                )
+
+            await session.flush()
+            await session.refresh(run_row)
+            await session.refresh(resolution_row)
+            return run_from_row(run_row), action_resolution_from_row(resolution_row)
 
     async def claim_next_run(self, *, worker_id: str, lease_seconds: int) -> Run | None:
         if lease_seconds <= 0:

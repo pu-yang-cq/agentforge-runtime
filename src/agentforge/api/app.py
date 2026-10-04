@@ -5,9 +5,19 @@ from uuid import UUID
 
 from fastapi import FastAPI, Header, HTTPException, status
 
-from agentforge.api.schemas import RunCreate, RunView
-from agentforge.application.errors import IdempotencyConflictError
+from agentforge.api.schemas import (
+    ActionResolutionCreate,
+    ActionResolutionResultView,
+    ActionResolutionView,
+    RunCreate,
+    RunView,
+)
+from agentforge.application.errors import (
+    ActionResolutionConflictError,
+    IdempotencyConflictError,
+)
 from agentforge.application.ports import RuntimeStore
+from agentforge.domain.actions import ActionResolution
 from agentforge.domain.models import Run
 
 
@@ -22,6 +32,18 @@ def _run_view(run: Run) -> RunView:
         created_at=run.created_at,
         started_at=run.started_at,
         completed_at=run.completed_at,
+    )
+
+
+def _resolution_view(resolution: ActionResolution) -> ActionResolutionView:
+    return ActionResolutionView(
+        id=resolution.id,
+        action_id=resolution.action_id,
+        outcome=resolution.outcome,
+        evidence=resolution.evidence,
+        reason=resolution.reason,
+        resolver_identity=resolution.resolver_identity,
+        created_at=resolution.created_at,
     )
 
 
@@ -59,6 +81,33 @@ def create_app(store: RuntimeStore) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="run not found") from exc
         return _run_view(run)
+
+    @app.post(
+        "/v1/runs/{run_id}/actions/{action_id}/resolve",
+        response_model=ActionResolutionResultView,
+    )
+    async def resolve_action(
+        run_id: UUID,
+        action_id: UUID,
+        request: ActionResolutionCreate,
+    ) -> ActionResolutionResultView:
+        try:
+            run, resolution = await store.resolve_action(
+                run_id=run_id,
+                action_id=action_id,
+                outcome=request.outcome,
+                evidence=request.evidence,
+                reason=request.reason,
+                resolver_identity=request.resolver_identity,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="run or action not found") from exc
+        except ActionResolutionConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return ActionResolutionResultView(
+            run=_run_view(run),
+            resolution=_resolution_view(resolution),
+        )
 
     @app.get("/v1/runs/{run_id}", response_model=RunView)
     async def get_run(run_id: UUID) -> RunView:

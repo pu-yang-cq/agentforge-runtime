@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any
 from uuid import UUID, uuid4
 
-from agentforge.domain.enums import ExternalActionStatus, ToolEffectType
+from agentforge.domain.enums import (
+    ActionResolutionOutcome,
+    ExternalActionStatus,
+    ToolEffectType,
+)
 
 ACTION_SNAPSHOT_FORMAT_VERSION = 1
 MIN_SAFE_INTEGER = -9_007_199_254_740_991
@@ -104,6 +109,21 @@ class ActionSnapshot:
             canonical_json=canonical.decode("utf-8"),
             digest=sha256(canonical).hexdigest(),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ActionResolution:
+    id: UUID
+    action_id: UUID
+    outcome: ActionResolutionOutcome
+    evidence: dict[str, Any] | None
+    reason: str | None
+    resolver_identity: str
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    def __post_init__(self) -> None:
+        if not self.resolver_identity.strip():
+            raise ValueError("resolver_identity cannot be blank")
 
 
 @dataclass(slots=True)
@@ -209,6 +229,18 @@ class ExternalAction:
         if self.status is not ExternalActionStatus.RECONCILING:
             raise ValueError("reconciliation abort requires RECONCILING")
         self.status = ExternalActionStatus.ABORTED
+
+    def resolve_manual(self, outcome: ActionResolutionOutcome) -> None:
+        if self.status is not ExternalActionStatus.MANUAL_REVIEW:
+            raise ValueError("manual resolution requires MANUAL_REVIEW")
+        if outcome is ActionResolutionOutcome.SUCCEEDED:
+            self.status = ExternalActionStatus.SUCCEEDED
+        elif outcome is ActionResolutionOutcome.FAILED:
+            self.status = ExternalActionStatus.FAILED
+        elif outcome is ActionResolutionOutcome.ABORTED:
+            self.status = ExternalActionStatus.ABORTED
+        else:
+            raise ValueError(f"unsupported action resolution outcome: {outcome}")
 
     def abort(self) -> None:
         if self.status is not ExternalActionStatus.READY or self.current_attempt_id is not None:

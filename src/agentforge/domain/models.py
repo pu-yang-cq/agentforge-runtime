@@ -201,6 +201,29 @@ class Run:
         self.owner_worker_id = None
         self.lease_expires_at = None
 
+    def resume_after_action_resolution(self) -> None:
+        if self.status is not RunStatus.WAITING_ACTION_RESOLUTION:
+            raise ValueError(f"cannot resume action resolution from {self.status}")
+        if self.cancel_requested:
+            raise ValueError("cancel-requested run cannot resume business progression")
+        self.status = RunStatus.QUEUED
+        self.queue_reason = QueueReason.ACTION_RESOLVED
+        self.available_at = None
+        self.owner_worker_id = None
+        self.lease_expires_at = None
+
+    def fail_after_action_resolution(self, reason: str) -> None:
+        if self.status is not RunStatus.WAITING_ACTION_RESOLUTION:
+            raise ValueError(f"cannot fail action resolution from {self.status}")
+        self.status = RunStatus.FAILED
+        self.queue_reason = None
+        self.available_at = None
+        self.final_output = None
+        self.failure_reason = reason
+        self.owner_worker_id = None
+        self.lease_expires_at = None
+        self.completed_at = utcnow()
+
     def request_cancel(self) -> None:
         if self.status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}:
             return
@@ -361,6 +384,25 @@ class ToolCall:
         if self.status is not ToolCallStatus.FAILED:
             raise ValueError("tool call can only retry from FAILED")
         self.status = ToolCallStatus.READY
+        self.error = reason
+
+    def resolve_manual_succeeded(self, result: Any) -> None:
+        if self.status is not ToolCallStatus.UNRESOLVED:
+            raise ValueError("manual success requires UNRESOLVED ToolCall")
+        self.status = ToolCallStatus.SUCCEEDED
+        self.result = result
+        self.error = None
+
+    def resolve_manual_failed(self, reason: str) -> None:
+        if self.status is not ToolCallStatus.UNRESOLVED:
+            raise ValueError("manual failure requires UNRESOLVED ToolCall")
+        self.status = ToolCallStatus.FAILED
+        self.error = reason
+
+    def resolve_manual_aborted(self, reason: str) -> None:
+        if self.status is not ToolCallStatus.UNRESOLVED:
+            raise ValueError("manual abort requires UNRESOLVED ToolCall")
+        self.status = ToolCallStatus.NOT_EXECUTED
         self.error = reason
 
     def succeed(self, result: Any) -> None:

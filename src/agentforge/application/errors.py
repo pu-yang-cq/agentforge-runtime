@@ -2,6 +2,10 @@ class IdempotencyConflictError(RuntimeError):
     pass
 
 
+class ActionResolutionConflictError(RuntimeError):
+    """Manual resolution conflicts with durable action/run truth."""
+
+
 class RunExecutionFailedError(RuntimeError):
     """A Run reached a durable FAILED outcome; the Worker itself may continue."""
 

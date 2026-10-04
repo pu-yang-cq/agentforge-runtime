@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
-from agentforge.domain.actions import ActionSnapshot, ExternalAction
-from agentforge.domain.enums import ReconciliationBusinessResult
+from agentforge.domain.actions import ActionResolution, ActionSnapshot, ExternalAction
+from agentforge.domain.enums import ActionResolutionOutcome, ReconciliationBusinessResult
 from agentforge.domain.model_contract import ModelRequest, ModelResponse, ModelToolSpec
 from agentforge.domain.models import (
     AgentVersion,
@@ -366,6 +366,17 @@ class RuntimeStore(Protocol):
     async def get_run(self, run_id: UUID) -> Run | None: ...
 
     async def cancel_run(self, run_id: UUID) -> Run: ...
+
+    async def resolve_action(
+        self,
+        *,
+        run_id: UUID,
+        action_id: UUID,
+        outcome: ActionResolutionOutcome,
+        evidence: dict[str, Any] | None,
+        reason: str | None,
+        resolver_identity: str,
+    ) -> tuple[Run, ActionResolution]: ...
 
     async def claim_next_run(self, *, worker_id: str, lease_seconds: int) -> Run | None: ...
 

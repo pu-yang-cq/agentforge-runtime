@@ -4,7 +4,8 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 from agentforge.api.app import create_app
-from agentforge.domain.enums import RunStatus
+from agentforge.domain.actions import ActionResolution
+from agentforge.domain.enums import ActionResolutionOutcome, RunStatus
 from agentforge.domain.models import Run
 
 
@@ -38,6 +39,29 @@ class FakeRuntimeStore:
         run.request_cancel()
         run.cancel()
         return run
+
+    async def resolve_action(
+        self,
+        *,
+        run_id,
+        action_id,
+        outcome,
+        evidence,
+        reason,
+        resolver_identity,
+    ):
+        run = self.runs.get(run_id)
+        if run is None:
+            raise KeyError(run_id)
+        resolution = ActionResolution(
+            id=uuid4(),
+            action_id=action_id,
+            outcome=outcome,
+            evidence=evidence,
+            reason=reason,
+            resolver_identity=resolver_identity,
+        )
+        return run, resolution
 
     async def claim_next_run(self, *, worker_id: str, lease_seconds: int):
         raise NotImplementedError
@@ -96,3 +120,30 @@ def test_cancel_run_api_contract() -> None:
     assert response.status_code == 200
     assert response.json()["status"] == "CANCELLED"
     assert response.json()["cancel_requested"] is True
+
+
+def test_action_resolution_api_contract() -> None:
+    store = FakeRuntimeStore()
+    client = TestClient(create_app(store))
+    created = client.post(
+        "/v1/runs",
+        json={"agent_version_id": str(store.agent_version_id), "input": "resolve me"},
+        headers={"Idempotency-Key": "run-resolve-0001"},
+    ).json()
+    action_id = uuid4()
+
+    response = client.post(
+        f"/v1/runs/{created['id']}/actions/{action_id}/resolve",
+        json={
+            "outcome": ActionResolutionOutcome.SUCCEEDED.value,
+            "evidence": {"ticket": "T-1"},
+            "reason": "operator verified provider state",
+            "resolver_identity": "operator:test",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run"]["id"] == created["id"]
+    assert body["resolution"]["action_id"] == str(action_id)
+    assert body["resolution"]["outcome"] == "SUCCEEDED"
+    assert body["resolution"]["resolver_identity"] == "operator:test"

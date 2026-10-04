@@ -21,6 +21,7 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from agentforge.domain.enums import (
+    ActionResolutionOutcome,
     ExternalActionStatus,
     QueueReason,
     ReconciliationAttemptStatus,
@@ -545,6 +546,37 @@ class ReconciliationAttemptRow(Base):
         DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ActionResolutionRow(Base):
+    __tablename__ = "action_resolutions"
+    __table_args__ = (
+        UniqueConstraint(
+            "external_action_id",
+            name="uq_action_resolutions_external_action",
+        ),
+        CheckConstraint(
+            "length(btrim(resolver_identity)) > 0",
+            name="ck_action_resolutions_nonblank_resolver",
+        ),
+        Index("ix_action_resolutions_run_id", "run_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    run_id: Mapped[UUID] = mapped_column(ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False)
+    external_action_id: Mapped[UUID] = mapped_column(
+        ForeignKey("external_actions.id", ondelete="RESTRICT"), nullable=False
+    )
+    outcome: Mapped[ActionResolutionOutcome] = mapped_column(
+        Enum(ActionResolutionOutcome, name="action_resolution_outcome"),
+        nullable=False,
+    )
+    evidence: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    reason: Mapped[str | None] = mapped_column(Text)
+    resolver_identity: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
 
 
 class DomainEventRow(Base):
