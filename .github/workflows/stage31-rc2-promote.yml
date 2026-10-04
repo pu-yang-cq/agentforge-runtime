@@ -49,6 +49,14 @@ jobs:
           (cd /tmp/agentforge-rc2 && tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner --exclude='./uv.lock' --exclude='./.pytest_cache' --exclude='./.mypy_cache' --exclude='./.ruff_cache' --exclude='./.venv' --exclude='*/__pycache__/*' --exclude='*.pyc' -cf - .) | gzip -n > /tmp/agentforge-rc2-clean.tar.gz
           echo "5dade13189461557596a378a70f8f469d06bd48e24bbe6e41abfb1b092b7bc05  /tmp/agentforge-rc2-clean.tar.gz" | sha256sum -c -
 
+      - name: Upload RC2 reproducibility diagnostic
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: stage31-rc2-repro-diagnostic
+          path: /tmp/agentforge-rc2-clean.tar.gz
+          if-no-files-found: warn
+          retention-days: 2
       - name: Commit exact RC2 acceptance payload
         shell: bash
         run: |
