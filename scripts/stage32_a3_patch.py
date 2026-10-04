@@ -366,7 +366,8 @@ replace_once(
         run: Run,
         *,
         max_attempts: int,
-        delay_seconds: int,
+        initial_backoff_seconds: int,
+        max_backoff_seconds: int,
         expected_generation: int,
     ) -> bool: ...
 
@@ -423,16 +424,23 @@ replace_once(
         run: Run,
         *,
         max_attempts: int,
-        delay_seconds: int,
+        initial_backoff_seconds: int,
+        max_backoff_seconds: int,
         expected_generation: int,
     ) -> bool:
         if call.status is not ToolCallStatus.FAILED:
             raise ValueError("transient READ persistence requires FAILED ToolCall")
         if run.status is not RunStatus.RUNNING:
             raise ValueError("transient READ persistence requires RUNNING Run")
-        if delay_seconds < 0:
-            raise ValueError("retry delay cannot be negative")
+        if initial_backoff_seconds < 0:
+            raise ValueError("retry initial backoff cannot be negative")
+        if max_backoff_seconds < initial_backoff_seconds:
+            raise ValueError("retry max backoff cannot be below initial backoff")
         attempt = self._started_tool_attempt(call.id)
+        delay_seconds = min(
+            initial_backoff_seconds * (2 ** (attempt.attempt_number - 1)),
+            max_backoff_seconds,
+        )
         attempt.fail(
             call.error or "transient READ failure",
             error_class="TRANSIENT",
@@ -603,7 +611,8 @@ replace_once(
                     call,
                     run,
                     max_attempts=prepared.binding.read_retry_max_attempts,
-                    delay_seconds=prepared.binding.read_retry_initial_backoff_seconds,
+                    initial_backoff_seconds=prepared.binding.read_retry_initial_backoff_seconds,
+                    max_backoff_seconds=prepared.binding.read_retry_max_backoff_seconds,
                     expected_generation=expected_generation,
                 )
                 if scheduled:
@@ -637,7 +646,8 @@ replace_once(
         run: Run,
         *,
         max_attempts: int,
-        delay_seconds: int,
+        initial_backoff_seconds: int,
+        max_backoff_seconds: int,
         expected_generation: int,
     ) -> bool:
         self._assert_generation(expected_generation)
@@ -647,8 +657,10 @@ replace_once(
             raise ValueError("transient READ persistence requires RUNNING Run")
         if max_attempts <= 0:
             raise ValueError("max_attempts must be positive")
-        if delay_seconds < 0:
-            raise ValueError("retry delay cannot be negative")
+        if initial_backoff_seconds < 0:
+            raise ValueError("retry initial backoff cannot be negative")
+        if max_backoff_seconds < initial_backoff_seconds:
+            raise ValueError("retry max backoff cannot be below initial backoff")
 
         async with self._sessions() as session, session.begin():
             row = await _lock_owned_run(
@@ -670,6 +682,10 @@ replace_once(
             attempt = await _lock_started_tool_attempt(session, call.id)
             state = await _lock_run_state(session, run.id)
             db_now = await _database_now(session)
+            delay_seconds = min(
+                initial_backoff_seconds * (2 ** (attempt.attempt_number - 1)),
+                max_backoff_seconds,
+            )
             due_at = db_now + timedelta(seconds=delay_seconds)
 
             attempt.status = ToolExecutionAttemptStatus.FAILED
