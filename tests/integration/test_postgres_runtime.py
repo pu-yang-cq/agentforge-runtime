@@ -1371,3 +1371,173 @@ async def test_model_and_tool_start_reserve_usage_atomically() -> None:
     assert state.tool_attempts_used == 1
 
     await engine.dispose()
+
+
+
+@pytest.mark.asyncio
+async def test_stale_executor_precedes_deadline_for_model_result() -> None:
+    from agentforge.domain.enums import MessageRole
+    from agentforge.domain.models import RunMessage
+    from agentforge.infrastructure.db.models import ModelInvocationRow, RunRow
+
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+    store = PostgresRuntimeStore(sessions)
+    run = await store.create_run(
+        agent_version_id=DEMO_AGENT_VERSION_ID,
+        input_text="stale wins over deadline",
+        idempotency_key="integration-stale-deadline-1",
+        principal_scope="test-user",
+    )
+    claimed = await store.claim_next_run(worker_id="worker-a", lease_seconds=1)
+    assert claimed is not None
+    recorder = PostgresExecutionRecorder(
+        sessions,
+        run_id=run.id,
+        generation=claimed.execution_generation,
+    )
+    _, invocation = await recorder.begin_model_invocation(
+        run_id=run.id,
+        invocation_id=uuid4(),
+        expected_generation=claimed.execution_generation,
+    )
+    invocation.complete("FINAL")
+    message = RunMessage(
+        run.id,
+        0,
+        MessageRole.ASSISTANT,
+        "late stale answer",
+        invocation.id,
+    )
+
+    await asyncio.sleep(1.2)
+    async with sessions() as session, session.begin():
+        await session.execute(
+            update(RunRow)
+            .where(RunRow.id == run.id)
+            .values(deadline_at=func.clock_timestamp() - text("INTERVAL '1 second'"))
+        )
+
+    with pytest.raises(StaleExecutorError):
+        await recorder.record_model_final_decision(
+            invocation,
+            claimed,
+            message,
+            expected_generation=claimed.execution_generation,
+        )
+
+    async with sessions() as session:
+        invocation_row = await session.get(ModelInvocationRow, invocation.id)
+        assert invocation_row is not None
+        assert invocation_row.status == "STARTED"
+        discarded = await session.scalar(
+            select(func.count())
+            .select_from(DomainEventRow)
+            .where(
+                DomainEventRow.run_id == run.id,
+                DomainEventRow.event_type == EventType.MODEL_RESULT_DISCARDED.value,
+            )
+        )
+    assert discarded == 0
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_expired_deadline_blocks_recovered_read_without_new_attempt_or_usage() -> None:
+    from agentforge.infrastructure.db.models import RunRow
+
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+    store = PostgresRuntimeStore(sessions)
+    run = await store.create_run(
+        agent_version_id=DEMO_AGENT_VERSION_ID,
+        input_text="blocked recovered read",
+        idempotency_key="integration-recovered-deadline-1",
+        principal_scope="test-user",
+    )
+    claimed_a = await store.claim_next_run(worker_id="worker-a", lease_seconds=1)
+    assert claimed_a is not None
+    recorder_a = PostgresExecutionRecorder(
+        sessions,
+        run_id=run.id,
+        generation=claimed_a.execution_generation,
+    )
+    _, invocation = await recorder_a.begin_model_invocation(
+        run_id=run.id,
+        invocation_id=uuid4(),
+        expected_generation=1,
+    )
+    invocation.complete("TOOL_PROPOSAL")
+    proposal = ToolProposal.create(
+        run_id=run.id,
+        model_invocation_id=invocation.id,
+        tool_name="echo_read",
+        arguments={"text": "retry must be blocked"},
+    )
+    agent_version = await store.load_agent_version(DEMO_AGENT_VERSION_ID)
+    prepared = ToolCoordinator(build_demo_registry()).prepare_read(
+        proposal=proposal,
+        agent_version=agent_version,
+    )
+    await recorder_a.record_model_tool_started(
+        invocation,
+        proposal,
+        prepared.call,
+        expected_generation=1,
+    )
+
+    before = await store.load_run_state(run.id)
+    assert before.tool_attempts_used == 1
+    await asyncio.sleep(1.2)
+    claimed_b = await store.claim_next_run(worker_id="worker-b", lease_seconds=30)
+    assert claimed_b is not None
+    assert claimed_b.execution_generation == 2
+
+    async with sessions() as session, session.begin():
+        await session.execute(
+            update(RunRow)
+            .where(RunRow.id == run.id)
+            .values(deadline_at=func.clock_timestamp() - text("INTERVAL '1 second'"))
+        )
+
+    recorder_b = PostgresExecutionRecorder(
+        sessions,
+        run_id=run.id,
+        generation=claimed_b.execution_generation,
+    )
+    recovered = await recorder_b.load_recoverable_read_call(run.id)
+    assert recovered is not None
+    recovered = ToolCoordinator(build_demo_registry()).prepare_recovered_read(
+        call=recovered,
+        agent_version=agent_version,
+    ).call
+
+    with pytest.raises(BusinessProgressionBlockedError, match="DEADLINE_EXCEEDED"):
+        await recorder_b.record_recovered_read_started(
+            recovered,
+            expected_generation=2,
+        )
+
+    after = await store.load_run_state(run.id)
+    assert after.tool_attempts_used == 1
+    async with sessions() as session:
+        attempts = (
+            (
+                await session.execute(
+                    select(ToolExecutionAttemptRow)
+                    .where(ToolExecutionAttemptRow.run_id == run.id)
+                    .order_by(ToolExecutionAttemptRow.attempt_number)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(attempts) == 1
+    assert attempts[0].status is ToolExecutionAttemptStatus.UNKNOWN
+
+    await engine.dispose()
