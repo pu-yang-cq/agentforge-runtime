@@ -1122,9 +1122,14 @@ Path("tests/unit/test_run_manager.py").write_text(
 # ---------- integration retry gate ----------
 replace_once(
     "tests/integration/test_postgres_runtime.py",
-    '''from agentforge.application.errors import IdempotencyConflictError, StaleExecutorError
+    '''from agentforge.application.errors import (
+    BusinessProgressionBlockedError,
+    IdempotencyConflictError,
+    StaleExecutorError,
+)
 ''',
     '''from agentforge.application.errors import (
+    BusinessProgressionBlockedError,
     IdempotencyConflictError,
     StaleExecutorError,
     ToolTransientError,
