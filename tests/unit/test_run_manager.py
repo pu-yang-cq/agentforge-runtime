@@ -9,10 +9,13 @@ from agentforge.application.errors import (
     ToolAdapterError,
     ToolTransientError,
 )
+from agentforge.application.ports import ReconciliationResult
 from agentforge.application.run_manager import ExecutionJournal, RunManager
 from agentforge.domain.enums import (
     EventType,
     QueueReason,
+    ReconciliationAttemptStatus,
+    ReconciliationBusinessResult,
     RunStatus,
     ToolCallStatus,
     ToolExecutionAttemptStatus,
@@ -1674,3 +1677,375 @@ async def test_safe_side_effect_retry_exhaustion_fails_without_unknown() -> None
     assert journal.tool_calls[0].status is ToolCallStatus.FAILED
     assert journal.tool_attempts[0].status is ToolExecutionAttemptStatus.FAILED
     assert journal.tool_attempts[0].definite_not_executed is True
+
+
+@pytest.mark.asyncio
+async def test_authoritative_reconciliation_not_executed_requeues_non_idempotent() -> None:
+    from agentforge.application.errors import ToolAdapterError
+    from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode, ToolEffectType
+
+    version_id = uuid4()
+    physical_calls = 0
+    reconcile_calls = 0
+
+    async def ambiguous(_invocation):
+        nonlocal physical_calls
+        physical_calls += 1
+        raise ToolAdapterError(
+            "response lost",
+            error_class="RESPONSE_LOST",
+            definite_not_executed=False,
+        )
+
+    async def reconcile(_invocation):
+        nonlocal reconcile_calls
+        reconcile_calls += 1
+        return ReconciliationResult(
+            ReconciliationBusinessResult.NOT_EXECUTED,
+            {"provider": "authoritative-ledger"},
+        )
+
+    registry = InMemoryToolRegistry(
+        [
+            SideEffectFunctionTool(
+                version_id=version_id,
+                name="authoritative_write",
+                description="write",
+                input_schema={"type": "object"},
+                func=ambiguous,
+                reconcile_func=reconcile,
+            )
+        ]
+    )
+    manager = RunManager(
+        NativeRunner(
+            ScriptedFakeModel([ToolStep("authoritative_write", {"v": 1})]),
+            registry,
+        ),
+        ToolCoordinator(registry),
+    )
+    version = AgentVersion(
+        uuid4(),
+        uuid4(),
+        1,
+        "authoritative reconcile",
+        (
+            ToolBinding(
+                version_id,
+                "authoritative_write",
+                effect_type=ToolEffectType.WRITE,
+                allow_no_approval_execution=True,
+                idempotency_supported=False,
+                reconciliation_mode=ReconciliationMode.AUTHORITATIVE,
+                side_effect_retry_max_attempts=2,
+                side_effect_retry_initial_backoff_seconds=0,
+                side_effect_retry_max_backoff_seconds=0,
+            ),
+        ),
+    )
+    run = Run(uuid4(), version.id, "write")
+    run.queue()
+    state = RunState(run.id)
+    journal = ExecutionJournal()
+
+    assert (
+        await manager.execute(
+            run=run,
+            run_state=state,
+            agent_version=version,
+            recorder=journal,
+        )
+        is None
+    )
+    action = journal.external_actions[0]
+    original_operation_id = action.operation_id
+    assert action.status is ExternalActionStatus.UNKNOWN
+
+    assert (
+        await manager.execute(
+            run=run,
+            run_state=state,
+            agent_version=version,
+            recorder=journal,
+        )
+        is None
+    )
+    assert reconcile_calls == 1
+    assert physical_calls == 1
+    assert action.operation_id == original_operation_id
+    assert action.status is ExternalActionStatus.READY
+    assert journal.tool_calls[0].status is ToolCallStatus.READY
+    assert run.status is RunStatus.QUEUED
+    assert run.queue_reason is QueueReason.RETRY
+    assert len(journal.reconciliation_attempts) == 1
+    assert (
+        journal.reconciliation_attempts[0].business_result
+        is ReconciliationBusinessResult.NOT_EXECUTED
+    )
+
+
+@pytest.mark.asyncio
+async def test_best_effort_non_idempotent_not_executed_requires_manual_review() -> None:
+    from agentforge.application.errors import ToolAdapterError
+    from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode, ToolEffectType
+
+    version_id = uuid4()
+
+    async def ambiguous(_invocation):
+        raise ToolAdapterError(
+            "timeout",
+            error_class="TIMEOUT",
+            definite_not_executed=False,
+        )
+
+    async def reconcile(_invocation):
+        return ReconciliationResult(ReconciliationBusinessResult.NOT_EXECUTED)
+
+    registry = InMemoryToolRegistry(
+        [
+            SideEffectFunctionTool(
+                version_id=version_id,
+                name="best_effort_write",
+                description="write",
+                input_schema={"type": "object"},
+                func=ambiguous,
+                reconcile_func=reconcile,
+            )
+        ]
+    )
+    manager = RunManager(
+        NativeRunner(ScriptedFakeModel([ToolStep("best_effort_write", {})]), registry),
+        ToolCoordinator(registry),
+    )
+    version = AgentVersion(
+        uuid4(),
+        uuid4(),
+        1,
+        "best effort",
+        (
+            ToolBinding(
+                version_id,
+                "best_effort_write",
+                effect_type=ToolEffectType.WRITE,
+                allow_no_approval_execution=True,
+                idempotency_supported=False,
+                reconciliation_mode=ReconciliationMode.BEST_EFFORT,
+                side_effect_retry_max_attempts=3,
+            ),
+        ),
+    )
+    run = Run(uuid4(), version.id, "write")
+    run.queue()
+    state = RunState(run.id)
+    journal = ExecutionJournal()
+    await manager.execute(run=run, run_state=state, agent_version=version, recorder=journal)
+    await manager.execute(run=run, run_state=state, agent_version=version, recorder=journal)
+
+    assert journal.external_actions[0].status is ExternalActionStatus.MANUAL_REVIEW
+    assert journal.tool_calls[0].status is ToolCallStatus.UNRESOLVED
+    assert run.status is RunStatus.WAITING_ACTION_RESOLUTION
+
+
+@pytest.mark.asyncio
+async def test_best_effort_idempotent_not_executed_may_safe_retry() -> None:
+    from agentforge.application.errors import ToolAdapterError
+    from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode, ToolEffectType
+
+    version_id = uuid4()
+
+    async def ambiguous(_invocation):
+        raise ToolAdapterError(
+            "timeout",
+            error_class="TIMEOUT",
+            definite_not_executed=False,
+        )
+
+    async def reconcile(_invocation):
+        return ReconciliationResult(ReconciliationBusinessResult.NOT_EXECUTED)
+
+    registry = InMemoryToolRegistry(
+        [
+            SideEffectFunctionTool(
+                version_id=version_id,
+                name="idempotent_write",
+                description="write",
+                input_schema={"type": "object"},
+                func=ambiguous,
+                reconcile_func=reconcile,
+            )
+        ]
+    )
+    manager = RunManager(
+        NativeRunner(ScriptedFakeModel([ToolStep("idempotent_write", {})]), registry),
+        ToolCoordinator(registry),
+    )
+    version = AgentVersion(
+        uuid4(),
+        uuid4(),
+        1,
+        "best effort idempotent",
+        (
+            ToolBinding(
+                version_id,
+                "idempotent_write",
+                effect_type=ToolEffectType.WRITE,
+                allow_no_approval_execution=True,
+                idempotency_supported=True,
+                reconciliation_mode=ReconciliationMode.BEST_EFFORT,
+                side_effect_retry_max_attempts=2,
+                side_effect_retry_initial_backoff_seconds=0,
+                side_effect_retry_max_backoff_seconds=0,
+            ),
+        ),
+    )
+    run = Run(uuid4(), version.id, "write")
+    run.queue()
+    state = RunState(run.id)
+    journal = ExecutionJournal()
+    await manager.execute(run=run, run_state=state, agent_version=version, recorder=journal)
+    await manager.execute(run=run, run_state=state, agent_version=version, recorder=journal)
+
+    assert journal.external_actions[0].status is ExternalActionStatus.READY
+    assert run.status is RunStatus.QUEUED
+    assert run.queue_reason is QueueReason.RETRY
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_mode_none_enters_manual_review_without_query() -> None:
+    from agentforge.application.errors import ToolAdapterError
+    from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode, ToolEffectType
+
+    version_id = uuid4()
+    reconcile_calls = 0
+
+    async def ambiguous(_invocation):
+        raise ToolAdapterError(
+            "timeout",
+            error_class="TIMEOUT",
+            definite_not_executed=False,
+        )
+
+    async def reconcile(_invocation):
+        nonlocal reconcile_calls
+        reconcile_calls += 1
+        return ReconciliationResult(ReconciliationBusinessResult.SUCCEEDED)
+
+    registry = InMemoryToolRegistry(
+        [
+            SideEffectFunctionTool(
+                version_id=version_id,
+                name="none_write",
+                description="write",
+                input_schema={"type": "object"},
+                func=ambiguous,
+                reconcile_func=reconcile,
+            )
+        ]
+    )
+    manager = RunManager(
+        NativeRunner(ScriptedFakeModel([ToolStep("none_write", {})]), registry),
+        ToolCoordinator(registry),
+    )
+    version = AgentVersion(
+        uuid4(),
+        uuid4(),
+        1,
+        "none",
+        (
+            ToolBinding(
+                version_id,
+                "none_write",
+                effect_type=ToolEffectType.WRITE,
+                allow_no_approval_execution=True,
+                reconciliation_mode=ReconciliationMode.NONE,
+            ),
+        ),
+    )
+    run = Run(uuid4(), version.id, "write")
+    run.queue()
+    state = RunState(run.id)
+    journal = ExecutionJournal()
+    await manager.execute(run=run, run_state=state, agent_version=version, recorder=journal)
+    await manager.execute(run=run, run_state=state, agent_version=version, recorder=journal)
+
+    assert reconcile_calls == 0
+    assert journal.external_actions[0].status is ExternalActionStatus.MANUAL_REVIEW
+    assert run.status is RunStatus.WAITING_ACTION_RESOLUTION
+    assert journal.reconciliation_attempts == []
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_transport_failure_uses_separate_bounded_budget() -> None:
+    from agentforge.application.errors import ToolAdapterError
+    from agentforge.domain.enums import ExternalActionStatus, ReconciliationMode, ToolEffectType
+
+    version_id = uuid4()
+    reconcile_calls = 0
+
+    async def ambiguous(_invocation):
+        raise ToolAdapterError(
+            "timeout",
+            error_class="TIMEOUT",
+            definite_not_executed=False,
+        )
+
+    async def reconcile(_invocation):
+        nonlocal reconcile_calls
+        reconcile_calls += 1
+        raise RuntimeError("provider reconcile 503")
+
+    registry = InMemoryToolRegistry(
+        [
+            SideEffectFunctionTool(
+                version_id=version_id,
+                name="reconcile_retry",
+                description="write",
+                input_schema={"type": "object"},
+                func=ambiguous,
+                reconcile_func=reconcile,
+            )
+        ]
+    )
+    manager = RunManager(
+        NativeRunner(ScriptedFakeModel([ToolStep("reconcile_retry", {})]), registry),
+        ToolCoordinator(registry),
+    )
+    version = AgentVersion(
+        uuid4(),
+        uuid4(),
+        1,
+        "reconcile retry",
+        (
+            ToolBinding(
+                version_id,
+                "reconcile_retry",
+                effect_type=ToolEffectType.WRITE,
+                allow_no_approval_execution=True,
+                reconciliation_mode=ReconciliationMode.AUTHORITATIVE,
+                reconciliation_max_attempts=2,
+                reconciliation_initial_backoff_seconds=0,
+                reconciliation_max_backoff_seconds=0,
+            ),
+        ),
+    )
+    run = Run(uuid4(), version.id, "write")
+    run.queue()
+    state = RunState(run.id)
+    journal = ExecutionJournal()
+
+    await manager.execute(run=run, run_state=state, agent_version=version, recorder=journal)
+    run.deadline_at = utcnow() - timedelta(seconds=1)
+
+    await manager.execute(run=run, run_state=state, agent_version=version, recorder=journal)
+    assert run.status is RunStatus.QUEUED
+    assert run.queue_reason is QueueReason.RETRY
+    assert reconcile_calls == 1
+    assert len(journal.reconciliation_attempts) == 1
+    assert journal.reconciliation_attempts[0].status is ReconciliationAttemptStatus.FAILED
+    assert journal.external_actions[0].status is ExternalActionStatus.RECONCILING
+
+    await manager.execute(run=run, run_state=state, agent_version=version, recorder=journal)
+    assert reconcile_calls == 2
+    assert len(journal.reconciliation_attempts) == 2
+    assert journal.external_actions[0].status is ExternalActionStatus.MANUAL_REVIEW
+    assert run.status is RunStatus.WAITING_ACTION_RESOLUTION

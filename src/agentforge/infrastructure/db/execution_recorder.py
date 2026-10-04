@@ -10,12 +10,16 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql import Select
 
 from agentforge.application.errors import BusinessProgressionBlockedError, StaleExecutorError
-from agentforge.application.ports import ExecutionRecorder
+from agentforge.application.ports import ExecutionRecorder, ReconciliationResult
 from agentforge.domain.actions import ActionSnapshot, ExternalAction
 from agentforge.domain.enums import (
     EventType,
     ExternalActionStatus,
+    MessageRole,
     ModelInvocationStatus,
+    ReconciliationAttemptStatus,
+    ReconciliationBusinessResult,
+    ReconciliationMode,
     QueueReason,
     RunStatus,
     ToolCallStatus,
@@ -24,9 +28,11 @@ from agentforge.domain.enums import (
 )
 from agentforge.domain.models import (
     ModelInvocation,
+    ReconciliationAttempt,
     Run,
     RunMessage,
     RunState,
+    ToolBinding,
     ToolCall,
     ToolExecutionAttempt,
     ToolProposal,
@@ -44,6 +50,7 @@ from agentforge.infrastructure.db.models import (
     DomainEventRow,
     ExternalActionRow,
     ModelInvocationRow,
+    ReconciliationAttemptRow,
     RunCounterRow,
     RunMessageRow,
     RunRow,
@@ -54,6 +61,7 @@ from agentforge.infrastructure.db.models import (
     ToolVersionRow,
 )
 from agentforge.infrastructure.db.runtime_store import _allocate_event_sequences
+from agentforge.runtime.tool_coordinator import tool_result_message_content
 
 
 def build_owned_run_stmt(*, run_id: UUID, expected_generation: int) -> Select[tuple[RunRow]]:
@@ -146,6 +154,27 @@ async def _assert_no_active_tool_calls(session: AsyncSession, run_id: UUID) -> N
     )
     if active_id is not None:
         raise RuntimeError(f"cannot terminalize run {run_id} with active ToolCall {active_id}")
+
+
+async def _assert_no_unresolved_actions(session: AsyncSession, run_id: UUID) -> None:
+    unresolved_id = await session.scalar(
+        select(ExternalActionRow.id)
+        .where(
+            ExternalActionRow.run_id == run_id,
+            ExternalActionRow.status.in_(
+                [
+                    ExternalActionStatus.UNKNOWN,
+                    ExternalActionStatus.RECONCILING,
+                    ExternalActionStatus.MANUAL_REVIEW,
+                ]
+            ),
+        )
+        .limit(1)
+    )
+    if unresolved_id is not None:
+        raise RuntimeError(
+            f"cannot start model reasoning with unresolved ExternalAction {unresolved_id}"
+        )
 
 
 async def _assert_no_started_tool_attempts(session: AsyncSession, run_id: UUID) -> None:
@@ -373,6 +402,763 @@ class PostgresExecutionRecorder(ExecutionRecorder):
             action_snapshot_from_row(snapshot_row),
             external_action_from_row(action_row),
         )
+
+    async def load_reconciliation_external_action(
+        self,
+        run_id: UUID,
+    ) -> tuple[ToolCall, ActionSnapshot, ExternalAction] | None:
+        if run_id != self._run_id:
+            raise ValueError("recorder is scoped to one run")
+        async with self._sessions() as session:
+            rows = (
+                await session.execute(
+                    select(ExternalActionRow, ToolCallRow, ActionSnapshotRow)
+                    .join(ToolCallRow, ToolCallRow.id == ExternalActionRow.tool_call_id)
+                    .join(
+                        ActionSnapshotRow,
+                        ActionSnapshotRow.id == ExternalActionRow.action_snapshot_id,
+                    )
+                    .where(
+                        ExternalActionRow.run_id == run_id,
+                        ExternalActionRow.status.in_(
+                            [ExternalActionStatus.UNKNOWN, ExternalActionStatus.RECONCILING]
+                        ),
+                        ExternalActionRow.current_attempt_id.is_(None),
+                        ToolCallRow.status == ToolCallStatus.UNRESOLVED,
+                    )
+                )
+            ).all()
+        if len(rows) > 1:
+            raise RuntimeError("found multiple reconciliation ExternalActions for one Run")
+        if not rows:
+            return None
+        action_row, call_row, snapshot_row = rows[0]
+        return (
+            tool_call_from_row(call_row),
+            action_snapshot_from_row(snapshot_row),
+            external_action_from_row(action_row),
+        )
+
+    async def record_action_manual_review(
+        self,
+        call: ToolCall,
+        action: ExternalAction,
+        run: Run,
+        reason: str,
+        *,
+        expected_generation: int,
+    ) -> None:
+        self._assert_generation(expected_generation)
+        async with self._sessions() as session, session.begin():
+            run_row = await _lock_owned_run(
+                session,
+                run_id=run.id,
+                expected_generation=expected_generation,
+            )
+            action_row = (
+                await session.execute(
+                    select(ExternalActionRow)
+                    .where(
+                        ExternalActionRow.id == action.id,
+                        ExternalActionRow.run_id == run.id,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one()
+            call_row = (
+                await session.execute(
+                    select(ToolCallRow)
+                    .where(
+                        ToolCallRow.id == call.id,
+                        ToolCallRow.run_id == run.id,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one()
+            if action_row.status not in {
+                ExternalActionStatus.UNKNOWN,
+                ExternalActionStatus.RECONCILING,
+            }:
+                raise RuntimeError("manual review action is no longer unresolved")
+            if call_row.status is not ToolCallStatus.UNRESOLVED:
+                raise RuntimeError("manual review ToolCall is no longer UNRESOLVED")
+            started_reconcile = await session.scalar(
+                select(ReconciliationAttemptRow.id)
+                .where(
+                    ReconciliationAttemptRow.external_action_id == action.id,
+                    ReconciliationAttemptRow.status == ReconciliationAttemptStatus.STARTED,
+                )
+                .limit(1)
+            )
+            if started_reconcile is not None:
+                raise RuntimeError("cannot enter manual review with STARTED reconciliation")
+            action_row.status = ExternalActionStatus.MANUAL_REVIEW
+            action_row.updated_at = func.clock_timestamp()
+            run_row.status = RunStatus.WAITING_ACTION_RESOLUTION
+            run_row.queue_reason = None
+            run_row.available_at = None
+            run_row.owner_worker_id = None
+            run_row.lease_expires_at = None
+            seq = next(iter(await _allocate_event_sequences(session, run.id, 1)))
+            session.add(
+                DomainEventRow(
+                    id=uuid4(),
+                    run_id=run.id,
+                    sequence=seq,
+                    event_type=EventType.ACTION_MANUAL_REVIEW.value,
+                    payload={
+                        "external_action_id": str(action.id),
+                        "operation_id": str(action.operation_id),
+                        "reason": reason,
+                    },
+                )
+            )
+            await session.flush()
+        action.manual_review()
+        run.wait_for_action_resolution()
+
+    async def record_reconciliation_started(
+        self,
+        call: ToolCall,
+        action: ExternalAction,
+        run: Run,
+        *,
+        max_attempts: int,
+        expected_generation: int,
+    ) -> ReconciliationAttempt | None:
+        self._assert_generation(expected_generation)
+        if max_attempts <= 0:
+            raise ValueError("reconciliation max_attempts must be positive")
+        attempt_id = uuid4()
+        attempt_number = 0
+        async with self._sessions() as session, session.begin():
+            run_row = await _lock_owned_run(
+                session,
+                run_id=run.id,
+                expected_generation=expected_generation,
+            )
+            action_row = (
+                await session.execute(
+                    select(ExternalActionRow)
+                    .where(
+                        ExternalActionRow.id == action.id,
+                        ExternalActionRow.run_id == run.id,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one()
+            call_row = (
+                await session.execute(
+                    select(ToolCallRow)
+                    .where(
+                        ToolCallRow.id == call.id,
+                        ToolCallRow.run_id == run.id,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one()
+            if action_row.status not in {
+                ExternalActionStatus.UNKNOWN,
+                ExternalActionStatus.RECONCILING,
+            }:
+                raise RuntimeError("ExternalAction is not eligible for reconciliation")
+            if action_row.current_attempt_id is not None:
+                raise RuntimeError("reconciliation cannot overlap side-effect authorization")
+            if call_row.status is not ToolCallStatus.UNRESOLVED:
+                raise RuntimeError("reconciliation ToolCall is not UNRESOLVED")
+            await _assert_no_started_model_invocations(session, run.id)
+            await _assert_no_started_tool_attempts(session, run.id)
+            started = await session.scalar(
+                select(ReconciliationAttemptRow.id)
+                .where(
+                    ReconciliationAttemptRow.external_action_id == action.id,
+                    ReconciliationAttemptRow.status == ReconciliationAttemptStatus.STARTED,
+                )
+                .limit(1)
+            )
+            if started is not None:
+                raise RuntimeError("reconciliation attempt already STARTED")
+            count = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(ReconciliationAttemptRow)
+                    .where(ReconciliationAttemptRow.external_action_id == action.id)
+                )
+                or 0
+            )
+            if count >= max_attempts:
+                action_row.status = ExternalActionStatus.MANUAL_REVIEW
+                action_row.updated_at = func.clock_timestamp()
+                run_row.status = RunStatus.WAITING_ACTION_RESOLUTION
+                run_row.queue_reason = None
+                run_row.available_at = None
+                run_row.owner_worker_id = None
+                run_row.lease_expires_at = None
+                seq = next(iter(await _allocate_event_sequences(session, run.id, 1)))
+                session.add(
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seq,
+                        event_type=EventType.ACTION_MANUAL_REVIEW.value,
+                        payload={
+                            "external_action_id": str(action.id),
+                            "operation_id": str(action.operation_id),
+                            "reason": "RECONCILIATION_BUDGET_EXHAUSTED",
+                        },
+                    )
+                )
+                await session.flush()
+                action.manual_review()
+                run.wait_for_action_resolution()
+                return None
+
+            attempt_number = count + 1
+            session.add(
+                ReconciliationAttemptRow(
+                    id=attempt_id,
+                    run_id=run.id,
+                    external_action_id=action.id,
+                    attempt_number=attempt_number,
+                    execution_generation=expected_generation,
+                    status=ReconciliationAttemptStatus.STARTED,
+                )
+            )
+            action_row.status = ExternalActionStatus.RECONCILING
+            action_row.updated_at = func.clock_timestamp()
+            seq = next(iter(await _allocate_event_sequences(session, run.id, 1)))
+            session.add(
+                DomainEventRow(
+                    id=uuid4(),
+                    run_id=run.id,
+                    sequence=seq,
+                    event_type=EventType.RECONCILIATION_STARTED.value,
+                    payload={
+                        "external_action_id": str(action.id),
+                        "attempt_id": str(attempt_id),
+                        "attempt_number": attempt_number,
+                    },
+                )
+            )
+            await session.flush()
+
+        action.start_reconciliation()
+        return ReconciliationAttempt(
+            attempt_id,
+            run.id,
+            action.id,
+            attempt_number,
+            expected_generation,
+        )
+
+    async def record_reconciliation_failed(
+        self,
+        action: ExternalAction,
+        attempt: ReconciliationAttempt,
+        run: Run,
+        *,
+        error: str,
+        max_attempts: int,
+        initial_backoff_seconds: int,
+        max_backoff_seconds: int,
+        expected_generation: int,
+    ) -> bool:
+        self._assert_generation(expected_generation)
+        async with self._sessions() as session, session.begin():
+            run_row = await _lock_owned_run(
+                session,
+                run_id=run.id,
+                expected_generation=expected_generation,
+            )
+            action_row = (
+                await session.execute(
+                    select(ExternalActionRow)
+                    .where(
+                        ExternalActionRow.id == action.id,
+                        ExternalActionRow.run_id == run.id,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one()
+            attempt_row = (
+                await session.execute(
+                    select(ReconciliationAttemptRow)
+                    .where(
+                        ReconciliationAttemptRow.id == attempt.id,
+                        ReconciliationAttemptRow.external_action_id == action.id,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one()
+            if (
+                action_row.status is not ExternalActionStatus.RECONCILING
+                or attempt_row.status is not ReconciliationAttemptStatus.STARTED
+            ):
+                raise RuntimeError("reconciliation request failure lost current authority")
+            db_now = await _database_now(session)
+            attempt_row.status = ReconciliationAttemptStatus.FAILED
+            attempt_row.error = error
+            attempt_row.outcome_reason = "RECONCILIATION_REQUEST_FAILED"
+            attempt_row.finished_at = db_now
+
+            seq_count = 2 if attempt.attempt_number < max_attempts else 2
+            seqs = list(await _allocate_event_sequences(session, run.id, seq_count))
+            session.add(
+                DomainEventRow(
+                    id=uuid4(),
+                    run_id=run.id,
+                    sequence=seqs[0],
+                    event_type=EventType.RECONCILIATION_FAILED.value,
+                    payload={
+                        "external_action_id": str(action.id),
+                        "attempt_id": str(attempt.id),
+                        "attempt_number": attempt.attempt_number,
+                        "error": error,
+                    },
+                )
+            )
+            if attempt.attempt_number < max_attempts:
+                delay_seconds = min(
+                    initial_backoff_seconds * (2 ** (attempt.attempt_number - 1)),
+                    max_backoff_seconds,
+                )
+                run_row.status = RunStatus.QUEUED
+                run_row.queue_reason = QueueReason.RETRY
+                run_row.available_at = db_now + timedelta(seconds=delay_seconds)
+                run_row.owner_worker_id = None
+                run_row.lease_expires_at = None
+                session.add(
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[1],
+                        event_type=EventType.RECONCILIATION_RETRY_SCHEDULED.value,
+                        payload={
+                            "external_action_id": str(action.id),
+                            "attempt_number": attempt.attempt_number,
+                            "delay_seconds": delay_seconds,
+                        },
+                    )
+                )
+                await session.flush()
+                attempt.fail(error, outcome_reason="RECONCILIATION_REQUEST_FAILED")
+                run.status = RunStatus.QUEUED
+                run.queue_reason = QueueReason.RETRY
+                run.available_at = db_now + timedelta(seconds=delay_seconds)
+                run.owner_worker_id = None
+                run.lease_expires_at = None
+                return True
+
+            action_row.status = ExternalActionStatus.MANUAL_REVIEW
+            action_row.updated_at = db_now
+            run_row.status = RunStatus.WAITING_ACTION_RESOLUTION
+            run_row.queue_reason = None
+            run_row.available_at = None
+            run_row.owner_worker_id = None
+            run_row.lease_expires_at = None
+            session.add(
+                DomainEventRow(
+                    id=uuid4(),
+                    run_id=run.id,
+                    sequence=seqs[1],
+                    event_type=EventType.ACTION_MANUAL_REVIEW.value,
+                    payload={
+                        "external_action_id": str(action.id),
+                        "operation_id": str(action.operation_id),
+                        "reason": "RECONCILIATION_BUDGET_EXHAUSTED",
+                    },
+                )
+            )
+            await session.flush()
+        attempt.fail(error, outcome_reason="RECONCILIATION_REQUEST_FAILED")
+        action.manual_review()
+        run.wait_for_action_resolution()
+        return False
+
+    async def record_reconciliation_result(
+        self,
+        call: ToolCall,
+        action: ExternalAction,
+        attempt: ReconciliationAttempt,
+        run: Run,
+        result: ReconciliationResult,
+        *,
+        binding: ToolBinding,
+        expected_generation: int,
+    ) -> RunMessage | None:
+        self._assert_generation(expected_generation)
+        returned_message: RunMessage | None = None
+        async with self._sessions() as session, session.begin():
+            run_row = await _lock_owned_run(
+                session,
+                run_id=run.id,
+                expected_generation=expected_generation,
+            )
+            action_row = (
+                await session.execute(
+                    select(ExternalActionRow)
+                    .where(
+                        ExternalActionRow.id == action.id,
+                        ExternalActionRow.run_id == run.id,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one()
+            attempt_row = (
+                await session.execute(
+                    select(ReconciliationAttemptRow)
+                    .where(
+                        ReconciliationAttemptRow.id == attempt.id,
+                        ReconciliationAttemptRow.external_action_id == action.id,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one()
+            call_row = (
+                await session.execute(
+                    select(ToolCallRow)
+                    .where(
+                        ToolCallRow.id == call.id,
+                        ToolCallRow.run_id == run.id,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one()
+            if (
+                action_row.status is not ExternalActionStatus.RECONCILING
+                or attempt_row.status is not ReconciliationAttemptStatus.STARTED
+                or call_row.status is not ToolCallStatus.UNRESOLVED
+            ):
+                raise RuntimeError("reconciliation result lost current authority")
+
+            db_now = await _database_now(session)
+            attempt_row.status = ReconciliationAttemptStatus.SUCCEEDED
+            attempt_row.business_result = result.outcome
+            attempt_row.evidence = result.evidence
+            attempt_row.finished_at = db_now
+            seqs = list(await _allocate_event_sequences(session, run.id, 3))
+            session.add(
+                DomainEventRow(
+                    id=uuid4(),
+                    run_id=run.id,
+                    sequence=seqs[0],
+                    event_type=EventType.RECONCILIATION_SUCCEEDED.value,
+                    payload={
+                        "external_action_id": str(action.id),
+                        "attempt_id": str(attempt.id),
+                        "attempt_number": attempt.attempt_number,
+                        "business_result": result.outcome.value,
+                    },
+                )
+            )
+
+            if result.outcome is ReconciliationBusinessResult.SUCCEEDED:
+                action_row.status = ExternalActionStatus.SUCCEEDED
+                action_row.updated_at = db_now
+                call_row.status = ToolCallStatus.SUCCEEDED
+                call_row.error = None
+                call_row.result = {
+                    "reconciliation": "SUCCEEDED",
+                    "evidence": result.evidence,
+                }
+                message_seq = await _allocate_message_sequence(session, run.id)
+                session.add(
+                    RunMessageRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=message_seq,
+                        role=MessageRole.TOOL.value,
+                        content=tool_result_message_content(call_row.result),
+                        source_id=call.id,
+                    )
+                )
+                session.add(
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[1],
+                        event_type=EventType.ACTION_SUCCEEDED.value,
+                        payload={
+                            "external_action_id": str(action.id),
+                            "operation_id": str(action.operation_id),
+                            "source": "RECONCILIATION",
+                        },
+                    )
+                )
+                session.add(
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[2],
+                        event_type=EventType.TOOL_SUCCEEDED.value,
+                        payload={
+                            "tool_call_id": str(call.id),
+                            "tool_name": call.tool_name,
+                            "source": "RECONCILIATION",
+                        },
+                    )
+                )
+                returned_message = RunMessage(
+                    run.id,
+                    message_seq,
+                    MessageRole.TOOL,
+                    tool_result_message_content(call_row.result),
+                    call.id,
+                )
+
+            elif result.outcome is ReconciliationBusinessResult.FAILED:
+                action_row.status = ExternalActionStatus.FAILED
+                action_row.updated_at = db_now
+                call_row.status = ToolCallStatus.FAILED
+                call_row.error = "reconciliation confirmed action failure"
+                run_row.status = RunStatus.FAILED
+                run_row.failure_reason = "RECONCILIATION_CONFIRMED_ACTION_FAILED"
+                run_row.completed_at = db_now
+                run_row.owner_worker_id = None
+                run_row.lease_expires_at = None
+                session.add(
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[1],
+                        event_type=EventType.ACTION_FAILED.value,
+                        payload={
+                            "external_action_id": str(action.id),
+                            "operation_id": str(action.operation_id),
+                            "source": "RECONCILIATION",
+                        },
+                    )
+                )
+                session.add(
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[2],
+                        event_type=EventType.RUN_FAILED.value,
+                        payload={"reason": "RECONCILIATION_CONFIRMED_ACTION_FAILED"},
+                    )
+                )
+
+            elif result.outcome is ReconciliationBusinessResult.NOT_EXECUTED and (
+                binding.reconciliation_mode is ReconciliationMode.AUTHORITATIVE
+                or (
+                    binding.reconciliation_mode is ReconciliationMode.BEST_EFFORT
+                    and binding.idempotency_supported
+                )
+            ):
+                physical_number = int(
+                    await session.scalar(
+                        select(func.max(ToolExecutionAttemptRow.attempt_number)).where(
+                            ToolExecutionAttemptRow.external_action_id == action.id
+                        )
+                    )
+                    or 0
+                )
+                state = await _lock_run_state(session, run.id)
+                delay_seconds = binding.side_effect_retry_delay_seconds(max(physical_number, 1))
+                due_at = db_now + timedelta(seconds=delay_seconds)
+                retry_allowed = (
+                    physical_number < binding.side_effect_retry_max_attempts
+                    and state.tool_attempts_used < run_row.max_tool_attempts
+                    and due_at < run_row.deadline_at
+                )
+                if retry_allowed:
+                    action_row.status = ExternalActionStatus.READY
+                    action_row.updated_at = db_now
+                    call_row.status = ToolCallStatus.READY
+                    call_row.error = "reconciliation proved NOT_EXECUTED"
+                    run_row.status = RunStatus.QUEUED
+                    run_row.queue_reason = QueueReason.RETRY
+                    run_row.available_at = due_at
+                    run_row.owner_worker_id = None
+                    run_row.lease_expires_at = None
+                    session.add(
+                        DomainEventRow(
+                            id=uuid4(),
+                            run_id=run.id,
+                            sequence=seqs[1],
+                            event_type=EventType.ACTION_RETRY_READY.value,
+                            payload={
+                                "external_action_id": str(action.id),
+                                "operation_id": str(action.operation_id),
+                                "source": "RECONCILIATION_NOT_EXECUTED",
+                            },
+                        )
+                    )
+                    session.add(
+                        DomainEventRow(
+                            id=uuid4(),
+                            run_id=run.id,
+                            sequence=seqs[2],
+                            event_type=EventType.TOOL_RETRY_SCHEDULED.value,
+                            payload={
+                                "tool_call_id": str(call.id),
+                                "attempt_number": physical_number,
+                                "delay_seconds": delay_seconds,
+                                "source": "RECONCILIATION",
+                            },
+                        )
+                    )
+                elif physical_number >= binding.side_effect_retry_max_attempts:
+                    action_row.status = ExternalActionStatus.FAILED
+                    action_row.updated_at = db_now
+                    call_row.status = ToolCallStatus.FAILED
+                    call_row.error = "side-effect retry policy exhausted after reconciliation"
+                    run_row.status = RunStatus.FAILED
+                    run_row.failure_reason = "SIDE_EFFECT_RETRY_EXHAUSTED_AFTER_RECONCILIATION"
+                    run_row.completed_at = db_now
+                    run_row.owner_worker_id = None
+                    run_row.lease_expires_at = None
+                    session.add(
+                        DomainEventRow(
+                            id=uuid4(),
+                            run_id=run.id,
+                            sequence=seqs[1],
+                            event_type=EventType.ACTION_FAILED.value,
+                            payload={
+                                "external_action_id": str(action.id),
+                                "operation_id": str(action.operation_id),
+                                "reason": run_row.failure_reason,
+                            },
+                        )
+                    )
+                    session.add(
+                        DomainEventRow(
+                            id=uuid4(),
+                            run_id=run.id,
+                            sequence=seqs[2],
+                            event_type=EventType.RUN_FAILED.value,
+                            payload={"reason": run_row.failure_reason},
+                        )
+                    )
+                else:
+                    reason = (
+                        "BUDGET_EXCEEDED: max_tool_attempts exhausted"
+                        if state.tool_attempts_used >= run_row.max_tool_attempts
+                        else "DEADLINE_EXCEEDED: side-effect retry due time reaches run deadline"
+                    )
+                    action_row.status = ExternalActionStatus.ABORTED
+                    action_row.updated_at = db_now
+                    call_row.status = ToolCallStatus.NOT_EXECUTED
+                    call_row.error = reason
+                    run_row.status = RunStatus.FAILED
+                    run_row.failure_reason = reason
+                    run_row.completed_at = db_now
+                    run_row.owner_worker_id = None
+                    run_row.lease_expires_at = None
+                    session.add(
+                        DomainEventRow(
+                            id=uuid4(),
+                            run_id=run.id,
+                            sequence=seqs[1],
+                            event_type=EventType.ACTION_ABORTED.value,
+                            payload={
+                                "external_action_id": str(action.id),
+                                "operation_id": str(action.operation_id),
+                                "reason": reason,
+                            },
+                        )
+                    )
+                    session.add(
+                        DomainEventRow(
+                            id=uuid4(),
+                            run_id=run.id,
+                            sequence=seqs[2],
+                            event_type=EventType.RUN_FAILED.value,
+                            payload={"reason": reason},
+                        )
+                    )
+
+            else:
+                reason = (
+                    "RECONCILIATION_UNKNOWN"
+                    if result.outcome is ReconciliationBusinessResult.UNKNOWN
+                    else "BEST_EFFORT_NOT_EXECUTED_UNSAFE"
+                )
+                action_row.status = ExternalActionStatus.MANUAL_REVIEW
+                action_row.updated_at = db_now
+                run_row.status = RunStatus.WAITING_ACTION_RESOLUTION
+                run_row.queue_reason = None
+                run_row.available_at = None
+                run_row.owner_worker_id = None
+                run_row.lease_expires_at = None
+                session.add(
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[1],
+                        event_type=EventType.ACTION_MANUAL_REVIEW.value,
+                        payload={
+                            "external_action_id": str(action.id),
+                            "operation_id": str(action.operation_id),
+                            "reason": reason,
+                        },
+                    )
+                )
+                session.add(
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[2],
+                        event_type=EventType.RUN_YIELDED.value,
+                        payload={"reason": "WAITING_ACTION_RESOLUTION"},
+                    )
+                )
+            await session.flush()
+
+        attempt.succeed(result.outcome, result.evidence)
+        if result.outcome is ReconciliationBusinessResult.SUCCEEDED:
+            action.reconcile_succeeded()
+            call.status = ToolCallStatus.SUCCEEDED
+            call.error = None
+            call.result = {"reconciliation": "SUCCEEDED", "evidence": result.evidence}
+        elif result.outcome is ReconciliationBusinessResult.FAILED:
+            action.reconcile_failed()
+            call.status = ToolCallStatus.FAILED
+            call.error = "reconciliation confirmed action failure"
+            run.status = RunStatus.FAILED
+            run.failure_reason = "RECONCILIATION_CONFIRMED_ACTION_FAILED"
+            run.completed_at = datetime.now(run.deadline_at.tzinfo)
+            run.owner_worker_id = None
+            run.lease_expires_at = None
+        elif result.outcome is ReconciliationBusinessResult.NOT_EXECUTED and (
+            binding.reconciliation_mode is ReconciliationMode.AUTHORITATIVE
+            or (
+                binding.reconciliation_mode is ReconciliationMode.BEST_EFFORT
+                and binding.idempotency_supported
+            )
+        ):
+            if run_row.status is RunStatus.QUEUED:
+                action.reconcile_retry_ready()
+                call.status = ToolCallStatus.READY
+                call.error = "reconciliation proved NOT_EXECUTED"
+                run.status = RunStatus.QUEUED
+                run.queue_reason = QueueReason.RETRY
+                run.available_at = run_row.available_at
+                run.owner_worker_id = None
+                run.lease_expires_at = None
+            elif action_row.status is ExternalActionStatus.FAILED:
+                action.reconcile_failed()
+                call.status = ToolCallStatus.FAILED
+                call.error = call_row.error
+                run.status = RunStatus.FAILED
+                run.failure_reason = run_row.failure_reason
+                run.completed_at = run_row.completed_at
+                run.owner_worker_id = None
+                run.lease_expires_at = None
+            else:
+                action.reconcile_abort_not_executed()
+                call.status = ToolCallStatus.NOT_EXECUTED
+                call.error = call_row.error
+                run.status = RunStatus.FAILED
+                run.failure_reason = run_row.failure_reason
+                run.completed_at = run_row.completed_at
+                run.owner_worker_id = None
+                run.lease_expires_at = None
+        else:
+            action.manual_review()
+            run.wait_for_action_resolution()
+        return returned_message
 
     async def record_side_effect_attempt_started(
         self,
@@ -1338,6 +2124,7 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                 session, run_id=run_id, expected_generation=expected_generation
             )
             await _assert_no_active_tool_calls(session, run_id)
+            await _assert_no_unresolved_actions(session, run_id)
             await _assert_no_started_tool_attempts(session, run_id)
             await _assert_no_started_model_invocations(session, run_id)
             state = await _lock_run_state(session, run_id)

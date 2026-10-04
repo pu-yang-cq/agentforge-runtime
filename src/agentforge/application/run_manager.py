@@ -12,13 +12,16 @@ from agentforge.application.errors import (
     ToolAdapterError,
     ToolTransientError,
 )
-from agentforge.application.ports import ExecutionRecorder
+from agentforge.application.ports import ExecutionRecorder, ReconciliationResult
 from agentforge.domain.actions import ActionSnapshot, ExternalAction
 from agentforge.domain.enums import (
     EventType,
     ExternalActionStatus,
     MessageRole,
     QueueReason,
+    ReconciliationAttemptStatus,
+    ReconciliationBusinessResult,
+    ReconciliationMode,
     RunStatus,
     ToolCallStatus,
     ToolExecutionAttemptStatus,
@@ -28,9 +31,11 @@ from agentforge.domain.models import (
     AgentVersion,
     DomainEvent,
     ModelInvocation,
+    ReconciliationAttempt,
     Run,
     RunMessage,
     RunState,
+    ToolBinding,
     ToolCall,
     ToolExecutionAttempt,
     ToolProposal,
@@ -55,6 +60,7 @@ class ExecutionJournal(ExecutionRecorder):
     proposals: list[ToolProposal] = field(default_factory=list)
     tool_calls: list[ToolCall] = field(default_factory=list)
     tool_attempts: list[ToolExecutionAttempt] = field(default_factory=list)
+    reconciliation_attempts: list[ReconciliationAttempt] = field(default_factory=list)
     action_snapshots: list[ActionSnapshot] = field(default_factory=list)
     external_actions: list[ExternalAction] = field(default_factory=list)
     run_state: RunState | None = None
@@ -108,6 +114,23 @@ class ExecutionJournal(ExecutionRecorder):
         if active:
             raise RuntimeError(
                 f"cannot terminalize run {run_id} with active ToolCall {active[0].id}"
+            )
+
+    def _assert_no_unresolved_actions(self, run_id: UUID) -> None:
+        unresolved = [
+            action
+            for action in self.external_actions
+            if action.run_id == run_id
+            and action.status
+            in {
+                ExternalActionStatus.UNKNOWN,
+                ExternalActionStatus.RECONCILING,
+                ExternalActionStatus.MANUAL_REVIEW,
+            }
+        ]
+        if unresolved:
+            raise RuntimeError(
+                f"cannot start model reasoning with unresolved ExternalAction {unresolved[0].id}"
             )
 
     def _started_tool_attempt(self, tool_call_id: UUID) -> ToolExecutionAttempt:
@@ -246,6 +269,335 @@ class ExecutionJournal(ExecutionRecorder):
         if call.status is not ToolCallStatus.UNRESOLVED:
             raise RuntimeError("UNKNOWN ExternalAction does not project to UNRESOLVED ToolCall")
         return call, snapshot, action
+
+    async def load_reconciliation_external_action(
+        self,
+        run_id: UUID,
+    ) -> tuple[ToolCall, ActionSnapshot, ExternalAction] | None:
+        actions = [
+            action
+            for action in self.external_actions
+            if action.run_id == run_id
+            and action.status
+            in {
+                ExternalActionStatus.UNKNOWN,
+                ExternalActionStatus.RECONCILING,
+            }
+        ]
+        if len(actions) > 1:
+            raise RuntimeError("found multiple reconciliation ExternalActions for one Run")
+        if not actions:
+            return None
+        action = actions[0]
+        call = next(item for item in self.tool_calls if item.id == action.tool_call_id)
+        snapshot = next(
+            item for item in self.action_snapshots if item.id == action.action_snapshot_id
+        )
+        if call.status is not ToolCallStatus.UNRESOLVED:
+            raise RuntimeError("reconciliation action does not project to UNRESOLVED ToolCall")
+        return call, snapshot, action
+
+    async def record_action_manual_review(
+        self,
+        call: ToolCall,
+        action: ExternalAction,
+        run: Run,
+        reason: str,
+        *,
+        expected_generation: int,
+    ) -> None:
+        if call.status is not ToolCallStatus.UNRESOLVED:
+            raise ValueError("manual review requires UNRESOLVED ToolCall")
+        action.manual_review()
+        run.wait_for_action_resolution()
+        self._append_event(
+            run,
+            EventType.ACTION_MANUAL_REVIEW,
+            {
+                "external_action_id": str(action.id),
+                "operation_id": str(action.operation_id),
+                "reason": reason,
+            },
+        )
+
+    async def record_reconciliation_started(
+        self,
+        call: ToolCall,
+        action: ExternalAction,
+        run: Run,
+        *,
+        max_attempts: int,
+        expected_generation: int,
+    ) -> ReconciliationAttempt | None:
+        if call.status is not ToolCallStatus.UNRESOLVED:
+            raise ValueError("reconciliation requires UNRESOLVED ToolCall")
+        if action.status not in {
+            ExternalActionStatus.UNKNOWN,
+            ExternalActionStatus.RECONCILING,
+        }:
+            raise ValueError("reconciliation requires unresolved ExternalAction")
+        if max_attempts <= 0:
+            raise ValueError("reconciliation max_attempts must be positive")
+        active = [
+            item
+            for item in self.reconciliation_attempts
+            if item.external_action_id == action.id
+            and item.status is ReconciliationAttemptStatus.STARTED
+        ]
+        if active:
+            raise RuntimeError("reconciliation attempt already STARTED")
+        attempts = [
+            item for item in self.reconciliation_attempts if item.external_action_id == action.id
+        ]
+        if len(attempts) >= max_attempts:
+            await self.record_action_manual_review(
+                call,
+                action,
+                run,
+                "RECONCILIATION_BUDGET_EXHAUSTED",
+                expected_generation=expected_generation,
+            )
+            return None
+        attempt = ReconciliationAttempt(
+            uuid4(),
+            run.id,
+            action.id,
+            len(attempts) + 1,
+            expected_generation,
+        )
+        self.reconciliation_attempts.append(attempt)
+        action.start_reconciliation()
+        self._append_event(
+            run,
+            EventType.RECONCILIATION_STARTED,
+            {
+                "external_action_id": str(action.id),
+                "attempt_id": str(attempt.id),
+                "attempt_number": attempt.attempt_number,
+            },
+        )
+        return attempt
+
+    async def record_reconciliation_failed(
+        self,
+        action: ExternalAction,
+        attempt: ReconciliationAttempt,
+        run: Run,
+        *,
+        error: str,
+        max_attempts: int,
+        initial_backoff_seconds: int,
+        max_backoff_seconds: int,
+        expected_generation: int,
+    ) -> bool:
+        if action.status is not ExternalActionStatus.RECONCILING:
+            raise ValueError("reconciliation request failure requires RECONCILING action")
+        attempt.fail(error, outcome_reason="RECONCILIATION_REQUEST_FAILED")
+        self._append_event(
+            run,
+            EventType.RECONCILIATION_FAILED,
+            {
+                "external_action_id": str(action.id),
+                "attempt_id": str(attempt.id),
+                "attempt_number": attempt.attempt_number,
+                "error": error,
+            },
+        )
+        if attempt.attempt_number < max_attempts:
+            delay_seconds = min(
+                initial_backoff_seconds * (2 ** (attempt.attempt_number - 1)),
+                max_backoff_seconds,
+            )
+            run.yield_to_queue(QueueReason.RETRY)
+            run.available_at = utcnow() + timedelta(seconds=delay_seconds)
+            self._append_event(
+                run,
+                EventType.RECONCILIATION_RETRY_SCHEDULED,
+                {
+                    "external_action_id": str(action.id),
+                    "attempt_number": attempt.attempt_number,
+                    "delay_seconds": delay_seconds,
+                },
+            )
+            return True
+        action.manual_review()
+        run.wait_for_action_resolution()
+        self._append_event(
+            run,
+            EventType.ACTION_MANUAL_REVIEW,
+            {
+                "external_action_id": str(action.id),
+                "operation_id": str(action.operation_id),
+                "reason": "RECONCILIATION_BUDGET_EXHAUSTED",
+            },
+        )
+        return False
+
+    async def record_reconciliation_result(
+        self,
+        call: ToolCall,
+        action: ExternalAction,
+        attempt: ReconciliationAttempt,
+        run: Run,
+        result: ReconciliationResult,
+        *,
+        binding: ToolBinding,
+        expected_generation: int,
+    ) -> RunMessage | None:
+        if action.status is not ExternalActionStatus.RECONCILING:
+            raise ValueError("reconciliation result requires RECONCILING action")
+        attempt.succeed(result.outcome, result.evidence)
+        self._append_event(
+            run,
+            EventType.RECONCILIATION_SUCCEEDED,
+            {
+                "external_action_id": str(action.id),
+                "attempt_id": str(attempt.id),
+                "attempt_number": attempt.attempt_number,
+                "business_result": result.outcome.value,
+            },
+        )
+        if result.outcome is ReconciliationBusinessResult.SUCCEEDED:
+            action.reconcile_succeeded()
+            call.status = ToolCallStatus.SUCCEEDED
+            call.result = {
+                "reconciliation": "SUCCEEDED",
+                "evidence": result.evidence,
+            }
+            message = RunMessage(
+                run.id,
+                len(self.messages) + 1,
+                MessageRole.TOOL,
+                tool_result_message_content(call.result),
+                call.id,
+            )
+            self.messages.append(message)
+            self._append_event(
+                run,
+                EventType.ACTION_SUCCEEDED,
+                {
+                    "external_action_id": str(action.id),
+                    "operation_id": str(action.operation_id),
+                    "source": "RECONCILIATION",
+                },
+            )
+            return message
+
+        if result.outcome is ReconciliationBusinessResult.FAILED:
+            action.reconcile_failed()
+            call.status = ToolCallStatus.FAILED
+            call.error = "authoritative reconciliation confirmed action failure"
+            run.fail("RECONCILIATION_CONFIRMED_ACTION_FAILED")
+            self._append_event(
+                run,
+                EventType.ACTION_FAILED,
+                {
+                    "external_action_id": str(action.id),
+                    "operation_id": str(action.operation_id),
+                    "source": "RECONCILIATION",
+                },
+            )
+            self._append_event(run, EventType.RUN_FAILED, {"reason": run.failure_reason})
+            return None
+
+        safe_not_executed = result.outcome is ReconciliationBusinessResult.NOT_EXECUTED and (
+            binding.reconciliation_mode is ReconciliationMode.AUTHORITATIVE
+            or (
+                binding.reconciliation_mode is ReconciliationMode.BEST_EFFORT
+                and binding.idempotency_supported
+            )
+        )
+        if safe_not_executed:
+            physical_attempts = [
+                item for item in self.tool_attempts if item.external_action_id == action.id
+            ]
+            physical_number = max((item.attempt_number for item in physical_attempts), default=0)
+            delay_seconds = binding.side_effect_retry_delay_seconds(max(physical_number, 1))
+            assert self.run_state is not None
+            retry_allowed = (
+                physical_number < binding.side_effect_retry_max_attempts
+                and self.run_state.tool_attempts_used < run.max_tool_attempts
+                and utcnow() + timedelta(seconds=delay_seconds) < run.deadline_at
+            )
+            if retry_allowed:
+                action.reconcile_retry_ready()
+                call.status = ToolCallStatus.READY
+                call.error = "reconciliation proved NOT_EXECUTED"
+                run.yield_to_queue(QueueReason.RETRY)
+                run.available_at = utcnow() + timedelta(seconds=delay_seconds)
+                self._append_event(
+                    run,
+                    EventType.ACTION_RETRY_READY,
+                    {
+                        "external_action_id": str(action.id),
+                        "operation_id": str(action.operation_id),
+                        "source": "RECONCILIATION_NOT_EXECUTED",
+                    },
+                )
+                self._append_event(
+                    run,
+                    EventType.TOOL_RETRY_SCHEDULED,
+                    {
+                        "tool_call_id": str(call.id),
+                        "attempt_number": physical_number,
+                        "delay_seconds": delay_seconds,
+                        "source": "RECONCILIATION",
+                    },
+                )
+                return None
+            if physical_number >= binding.side_effect_retry_max_attempts:
+                action.reconcile_failed()
+                call.status = ToolCallStatus.FAILED
+                call.error = "side-effect retry policy exhausted after reconciliation"
+                run.fail("SIDE_EFFECT_RETRY_EXHAUSTED_AFTER_RECONCILIATION")
+                self._append_event(
+                    run,
+                    EventType.ACTION_FAILED,
+                    {
+                        "external_action_id": str(action.id),
+                        "operation_id": str(action.operation_id),
+                        "reason": run.failure_reason,
+                    },
+                )
+            else:
+                action.reconcile_abort_not_executed()
+                call.status = ToolCallStatus.NOT_EXECUTED
+                reason = (
+                    "BUDGET_EXCEEDED: max_tool_attempts exhausted"
+                    if self.run_state.tool_attempts_used >= run.max_tool_attempts
+                    else "DEADLINE_EXCEEDED: side-effect retry due time reaches run deadline"
+                )
+                call.error = reason
+                run.fail(reason)
+                self._append_event(
+                    run,
+                    EventType.ACTION_ABORTED,
+                    {
+                        "external_action_id": str(action.id),
+                        "operation_id": str(action.operation_id),
+                        "reason": reason,
+                    },
+                )
+            self._append_event(run, EventType.RUN_FAILED, {"reason": run.failure_reason})
+            return None
+
+        action.manual_review()
+        run.wait_for_action_resolution()
+        reason = (
+            "RECONCILIATION_UNKNOWN"
+            if result.outcome is ReconciliationBusinessResult.UNKNOWN
+            else "BEST_EFFORT_NOT_EXECUTED_UNSAFE"
+        )
+        self._append_event(
+            run,
+            EventType.ACTION_MANUAL_REVIEW,
+            {
+                "external_action_id": str(action.id),
+                "operation_id": str(action.operation_id),
+                "reason": reason,
+            },
+        )
+        return None
 
     async def record_side_effect_attempt_started(
         self,
@@ -684,6 +1036,7 @@ class ExecutionJournal(ExecutionRecorder):
         if self.run_state is None or self.run_state.run_id != run_id:
             raise RuntimeError("journal run state is not seeded")
         self._assert_no_active_tool_calls(run_id)
+        self._assert_no_unresolved_actions(run_id)
         self._assert_no_started_tool_attempts(run_id)
         self._assert_no_started_model_invocations(run_id)
         self._assert_deadline_not_expired(run_id)
@@ -1268,11 +1621,71 @@ class RunManager:
         progression_steps = 0
         prepared: PreparedToolCall | PreparedExternalAction
 
-        # D1 safety stop: unresolved external truth outranks new model reasoning.
-        # D2/D3 will add takeover/reconciliation continuation from this durable fact.
-        unknown_action = await recorder.load_unknown_external_action(run.id)
-        if unknown_action is not None:
-            return None
+        # Persisted unresolved external truth outranks new model reasoning.
+        reconciliation_action = await recorder.load_reconciliation_external_action(run.id)
+        if reconciliation_action is not None:
+            unresolved_call, unresolved_snapshot, unresolved_action = reconciliation_action
+            binding = self._tools.reconciliation_binding(
+                call=unresolved_call,
+                snapshot=unresolved_snapshot,
+                action=unresolved_action,
+                agent_version=agent_version,
+            )
+            if binding.reconciliation_mode is ReconciliationMode.NONE:
+                await recorder.record_action_manual_review(
+                    unresolved_call,
+                    unresolved_action,
+                    run,
+                    "RECONCILIATION_MODE_NONE",
+                    expected_generation=expected_generation,
+                )
+                return None
+            prepared_reconciliation = self._tools.prepare_reconciliation(
+                call=unresolved_call,
+                snapshot=unresolved_snapshot,
+                action=unresolved_action,
+                agent_version=agent_version,
+            )
+            reconciliation_attempt = await recorder.record_reconciliation_started(
+                unresolved_call,
+                unresolved_action,
+                run,
+                max_attempts=binding.reconciliation_max_attempts,
+                expected_generation=expected_generation,
+            )
+            if reconciliation_attempt is None:
+                return None
+            try:
+                reconciliation_result = await self._tools.execute_reconciliation(
+                    prepared_reconciliation
+                )
+            except Exception as exc:
+                await recorder.record_reconciliation_failed(
+                    unresolved_action,
+                    reconciliation_attempt,
+                    run,
+                    error=str(exc),
+                    max_attempts=binding.reconciliation_max_attempts,
+                    initial_backoff_seconds=binding.reconciliation_initial_backoff_seconds,
+                    max_backoff_seconds=binding.reconciliation_max_backoff_seconds,
+                    expected_generation=expected_generation,
+                )
+                return None
+            reconciled_message = await recorder.record_reconciliation_result(
+                unresolved_call,
+                unresolved_action,
+                reconciliation_attempt,
+                run,
+                reconciliation_result,
+                binding=binding,
+                expected_generation=expected_generation,
+            )
+            if run.status is RunStatus.FAILED:
+                raise RunExecutionFailedError(run.failure_reason or "reconciliation failed Run")
+            if reconciled_message is None:
+                return None
+            messages.append(reconciled_message)
+            progression_steps += 1
 
         ready_action = await recorder.load_ready_external_action(run.id)
         if ready_action is not None:

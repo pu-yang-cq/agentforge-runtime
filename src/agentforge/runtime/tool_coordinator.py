@@ -6,13 +6,21 @@ from typing import cast
 from uuid import uuid4
 
 from agentforge.application.ports import (
+    ReconciliationInvocation,
+    ReconciliationResult,
+    ReconciliationTool,
     SideEffectInvocation,
     SideEffectTool,
     Tool,
     ToolRegistry,
 )
 from agentforge.domain.actions import ActionSnapshot, ExternalAction
-from agentforge.domain.enums import ExternalActionStatus, ToolCallStatus, ToolEffectType
+from agentforge.domain.enums import (
+    ExternalActionStatus,
+    ReconciliationMode,
+    ToolCallStatus,
+    ToolEffectType,
+)
 from agentforge.domain.models import (
     AgentVersion,
     ToolBinding,
@@ -35,6 +43,15 @@ class PreparedExternalAction:
     snapshot: ActionSnapshot
     action: ExternalAction
     tool: SideEffectTool
+    binding: ToolBinding
+
+
+@dataclass(slots=True)
+class PreparedReconciliation:
+    call: ToolCall
+    snapshot: ActionSnapshot
+    action: ExternalAction
+    tool: ReconciliationTool
     binding: ToolBinding
 
 
@@ -174,6 +191,70 @@ class ToolCoordinator:
             raise ValueError("recovered READ call tool version no longer matches binding")
         call.start()
         return PreparedToolCall(call=call, tool=tool, binding=binding)
+
+    def reconciliation_binding(
+        self,
+        *,
+        call: ToolCall,
+        snapshot: ActionSnapshot,
+        action: ExternalAction,
+        agent_version: AgentVersion,
+    ) -> ToolBinding:
+        if call.status is not ToolCallStatus.UNRESOLVED:
+            raise ValueError("reconciliation requires UNRESOLVED ToolCall")
+        if action.status not in {
+            ExternalActionStatus.UNKNOWN,
+            ExternalActionStatus.RECONCILING,
+        }:
+            raise ValueError("reconciliation requires UNKNOWN/RECONCILING ExternalAction")
+        if call.id != action.tool_call_id or snapshot.id != action.action_snapshot_id:
+            raise ValueError("reconciliation durable identity mismatch")
+        if call.tool_version_id != snapshot.tool_version_id:
+            raise ValueError("reconciliation ToolVersion mismatch")
+        if action.operation_id != snapshot.operation_id or call.arguments != snapshot.arguments:
+            raise ValueError("reconciliation snapshot identity mismatch")
+        binding = self._binding(call.tool_name, agent_version)
+        if binding.tool_version_id != snapshot.tool_version_id:
+            raise ValueError("reconciliation binding no longer matches snapshot")
+        return binding
+
+    def prepare_reconciliation(
+        self,
+        *,
+        call: ToolCall,
+        snapshot: ActionSnapshot,
+        action: ExternalAction,
+        agent_version: AgentVersion,
+    ) -> PreparedReconciliation:
+        binding = self.reconciliation_binding(
+            call=call,
+            snapshot=snapshot,
+            action=action,
+            agent_version=agent_version,
+        )
+        if binding.reconciliation_mode is ReconciliationMode.NONE:
+            raise PermissionError("ToolVersion declares no reconciliation capability")
+        tool = self._resolve_bound_tool(binding, agent_version)
+        if not isinstance(tool, ReconciliationTool):
+            raise PermissionError("tool adapter does not implement reconciliation contract")
+        return PreparedReconciliation(
+            call=call,
+            snapshot=snapshot,
+            action=action,
+            tool=cast(ReconciliationTool, tool),
+            binding=binding,
+        )
+
+    async def execute_reconciliation(
+        self,
+        prepared: PreparedReconciliation,
+    ) -> ReconciliationResult:
+        invocation = ReconciliationInvocation(
+            operation_id=prepared.action.operation_id,
+            arguments=dict(prepared.snapshot.arguments),
+            credential_ref=prepared.snapshot.credential_ref,
+        )
+        return await prepared.tool.reconcile(invocation)
 
     def prepare_recovered_side_effect(
         self,

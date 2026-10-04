@@ -10,6 +10,8 @@ from .enums import (
     MessageRole,
     ModelInvocationStatus,
     QueueReason,
+    ReconciliationAttemptStatus,
+    ReconciliationBusinessResult,
     ReconciliationMode,
     RunStatus,
     ToolCallStatus,
@@ -53,6 +55,9 @@ class ToolBinding:
     side_effect_retry_max_attempts: int = 1
     side_effect_retry_initial_backoff_seconds: int = 1
     side_effect_retry_max_backoff_seconds: int = 30
+    reconciliation_max_attempts: int = 3
+    reconciliation_initial_backoff_seconds: int = 1
+    reconciliation_max_backoff_seconds: int = 30
 
     def __post_init__(self) -> None:
         if self.read_retry_max_attempts <= 0:
@@ -78,6 +83,12 @@ class ToolBinding:
             < self.side_effect_retry_initial_backoff_seconds
         ):
             raise ValueError("side-effect retry max backoff cannot be below initial backoff")
+        if self.reconciliation_max_attempts <= 0:
+            raise ValueError("reconciliation_max_attempts must be positive")
+        if self.reconciliation_initial_backoff_seconds < 0:
+            raise ValueError("reconciliation initial backoff cannot be negative")
+        if self.reconciliation_max_backoff_seconds < self.reconciliation_initial_backoff_seconds:
+            raise ValueError("reconciliation max backoff cannot be below initial backoff")
 
     @property
     def stage32_side_effect_executable(self) -> bool:
@@ -104,6 +115,14 @@ class ToolBinding:
             2 ** (failed_attempt_number - 1)
         )
         return min(delay, self.side_effect_retry_max_backoff_seconds)
+
+    def reconciliation_delay_seconds(self, failed_attempt_number: int) -> int:
+        if failed_attempt_number <= 0:
+            raise ValueError("failed_attempt_number must be positive")
+        delay: int = self.reconciliation_initial_backoff_seconds * (
+            2 ** (failed_attempt_number - 1)
+        )
+        return min(delay, self.reconciliation_max_backoff_seconds)
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +188,15 @@ class Run:
             raise ValueError(f"cannot yield run from {self.status}")
         self.status = RunStatus.QUEUED
         self.queue_reason = reason
+        self.owner_worker_id = None
+        self.lease_expires_at = None
+
+    def wait_for_action_resolution(self) -> None:
+        if self.status is not RunStatus.RUNNING:
+            raise ValueError(f"cannot wait for action resolution from {self.status}")
+        self.status = RunStatus.WAITING_ACTION_RESOLUTION
+        self.queue_reason = None
+        self.available_at = None
         self.owner_worker_id = None
         self.lease_expires_at = None
 
@@ -394,3 +422,39 @@ class DomainEvent:
     type: EventType
     payload: dict[str, Any]
     occurred_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass(slots=True)
+class ReconciliationAttempt:
+    id: UUID
+    run_id: UUID
+    external_action_id: UUID
+    attempt_number: int
+    execution_generation: int
+    status: ReconciliationAttemptStatus = ReconciliationAttemptStatus.STARTED
+    business_result: ReconciliationBusinessResult | None = None
+    evidence: dict[str, Any] | None = None
+    error: str | None = None
+    outcome_reason: str | None = None
+    started_at: datetime = field(default_factory=utcnow)
+    finished_at: datetime | None = None
+
+    def succeed(
+        self,
+        business_result: ReconciliationBusinessResult,
+        evidence: dict[str, Any] | None,
+    ) -> None:
+        if self.status is not ReconciliationAttemptStatus.STARTED:
+            raise ValueError("reconciliation attempt can only succeed from STARTED")
+        self.status = ReconciliationAttemptStatus.SUCCEEDED
+        self.business_result = business_result
+        self.evidence = evidence
+        self.finished_at = utcnow()
+
+    def fail(self, error: str, *, outcome_reason: str) -> None:
+        if self.status is not ReconciliationAttemptStatus.STARTED:
+            raise ValueError("reconciliation attempt can only fail from STARTED")
+        self.status = ReconciliationAttemptStatus.FAILED
+        self.error = error
+        self.outcome_reason = outcome_reason
+        self.finished_at = utcnow()
