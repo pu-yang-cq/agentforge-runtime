@@ -5,3 +5,5 @@ Retry with exact non-YAML patcher.
 Retry after aligning integration import anchors.
 
 Retry after Ruff-clean import formatting.
+
+Retry after canonical Ruff formatting step.
