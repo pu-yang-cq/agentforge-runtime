@@ -33,7 +33,7 @@ jobs:
           while IFS= read -r path; do
             [ -z "$path" ] && continue
             case "$path" in
-              docs/design/stage3.3-governance-amendment-001-approval-metadata.md|              docs/acceptance/stage3.3-governance-amendment-001-approval-metadata.md|              src/agentforge/domain/governance.py|              src/agentforge/domain/governance_decisions.py|              tests/unit/test_stage33_a1_governance_foundation.py|              tests/unit/test_stage33_a2_policy_evaluator.py|              tests/unit/test_stage33_c_approval_intent.py|              .github/workflows/stage33-amendment001-acceptance.yml|              rc/RUN_STAGE33_AMENDMENT001_ACCEPTANCE)
+              docs/design/stage3.3-governance-amendment-001-approval-metadata.md|              docs/acceptance/stage3.3-governance-amendment-001-approval-metadata.md|              src/agentforge/domain/governance.py|              src/agentforge/domain/governance_decisions.py|              src/agentforge/domain/approvals.py|              tests/integration/test_stage33_c_postgres.py|              tests/unit/test_stage33_b_governed_consequence.py|              tests/unit/test_stage33_a1_governance_foundation.py|              tests/unit/test_stage33_a2_policy_evaluator.py|              tests/unit/test_stage33_c_approval_intent.py|              .github/workflows/stage33-amendment001-acceptance.yml|              rc/RUN_STAGE33_AMENDMENT001_ACCEPTANCE)
                 ;;
               *)
                 echo "unexpected amendment file: $path" >&2
