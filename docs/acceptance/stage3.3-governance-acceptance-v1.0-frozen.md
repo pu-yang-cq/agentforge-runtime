@@ -3,7 +3,7 @@
 Status: **ACCEPTED / FROZEN**
 
 Depends on:
-- docs/design/stage3.3-governance-v0.3.md
+- docs/design/stage3.3-governance-v1.0-frozen.md
 - complete V0.1/V0.2 review chain
 
 Regression baseline:
