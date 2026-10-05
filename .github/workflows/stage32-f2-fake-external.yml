@@ -34,20 +34,20 @@ jobs:
             -e UV_PROJECT_ENVIRONMENT=/tmp/agentforge-f2-venv \
             -e UV_CACHE_DIR=/tmp/agentforge-f2-cache \
             ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim \
-            sh -lc "uv sync --locked --all-groups >/dev/null && uv run --locked ruff format tests/support tests/unit/test_fake_external_system.py"
+            sh -lc "uv sync --locked --all-groups >/dev/null && uv run --locked ruff format src/agentforge/testing tests/unit/test_fake_external_system.py"
 
       - name: Verify frozen F2 observability surface
         shell: bash
         run: |
           set -Eeuo pipefail
-          grep -R 'class StatefulFakeExternalSystem' -n tests/support
-          grep -R 'external_resource_id' -n tests/support/fake_external_system.py
+          grep -R 'class StatefulFakeExternalSystem' -n src/agentforge/testing
+          grep -R 'external_resource_id' -n src/agentforge/testing/fake_external_system.py
           grep -R 'duplicate_request_count' -n tests/support/fake_external_system.py
           grep -R 'reconciliation_query_count' -n tests/support/fake_external_system.py
-          grep -R 'COMMIT_RESPONSE_LOSS' -n tests/support tests/unit
-          grep -R 'DEFINITE_NO_EFFECT' -n tests/support tests/unit
-          grep -R 'AMBIGUOUS_TIMEOUT' -n tests/support tests/unit
-          grep -R 'CrashBarrierPoint' -n tests/support tests/unit
+          grep -R 'COMMIT_RESPONSE_LOSS' -n src/agentforge/testing tests/unit
+          grep -R 'DEFINITE_NO_EFFECT' -n src/agentforge/testing tests/unit
+          grep -R 'AMBIGUOUS_TIMEOUT' -n src/agentforge/testing tests/unit
+          grep -R 'CrashBarrierPoint' -n src/agentforge/testing tests/unit
           test -f docs/implementation/stage3.2-f1-checkpoint-overlay.md
 
       - name: Run focused F2 fake-provider tests
@@ -75,7 +75,7 @@ jobs:
           git config user.name "agentforge-stage32-bot"
           git config user.email "agentforge-stage32-bot@users.noreply.github.com"
           git rm scripts/stage32_f2_patch.py
-          git add tests/support tests/unit/test_fake_external_system.py
+          git add src/agentforge/testing tests/unit/test_fake_external_system.py
           git diff --cached --check
           git commit -m "test(runtime): add stateful fake external ledger"
           git push origin HEAD:main
