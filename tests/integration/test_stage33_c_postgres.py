@@ -430,7 +430,7 @@ async def test_c_side_effect_require_approval_freezes_exact_action_identity(
 
 
 @pytest.mark.asyncio
-async def test_c_cancel_before_pending_consequence_discards_all_candidate_governance_facts() -> None:
+async def test_c_cancel_before_pending_consequence_rolls_back_candidate_facts() -> None:
     fx = await _fixture(effect_type=ToolEffectType.READ)
     plan = plan_governed_tool_consequence(
         run=fx.claimed,
