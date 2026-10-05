@@ -115,8 +115,6 @@ class PostgresApprovalReviewStore:
                 intent=intent,
                 decision=decision,
                 call=tool_call_from_row(call_row),
-                snapshot=(
-                    None if snapshot_row is None else action_snapshot_from_row(snapshot_row)
-                ),
+                snapshot=(None if snapshot_row is None else action_snapshot_from_row(snapshot_row)),
                 action=None if action_row is None else external_action_from_row(action_row),
             )
