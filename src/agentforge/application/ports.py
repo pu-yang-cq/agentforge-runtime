@@ -7,6 +7,7 @@ from uuid import UUID
 from agentforge.domain.actions import ActionResolution, ActionSnapshot, ExternalAction
 from agentforge.domain.checkpoints import RuntimeCheckpoint
 from agentforge.domain.enums import ActionResolutionOutcome, ReconciliationBusinessResult
+from agentforge.domain.governance import GovernancePolicyRule, GovernancePolicyVersion, PrincipalContext
 from agentforge.domain.model_contract import ModelRequest, ModelResponse, ModelToolSpec
 from agentforge.domain.models import (
     AgentVersion,
@@ -83,6 +84,36 @@ class ToolRegistry(Protocol):
     def specs(self, bindings: tuple[ToolBinding, ...]) -> tuple[ModelToolSpec, ...]: ...
 
     def resolve(self, name: str, bindings: tuple[ToolBinding, ...]) -> Tool: ...
+
+
+class PrincipalResolver(Protocol):
+    @property
+    def trusted_for_governed(self) -> bool: ...
+
+    def resolve(self) -> PrincipalContext: ...
+
+
+class GovernancePolicyStore(Protocol):
+    async def create_draft(
+        self,
+        *,
+        policy_key: str,
+        version_number: int,
+        rules: tuple[GovernancePolicyRule, ...],
+    ) -> GovernancePolicyVersion: ...
+
+    async def update_draft(
+        self,
+        policy_version_id: UUID,
+        *,
+        rules: tuple[GovernancePolicyRule, ...],
+    ) -> GovernancePolicyVersion: ...
+
+    async def publish(self, policy_version_id: UUID) -> GovernancePolicyVersion: ...
+
+    async def retire(self, policy_version_id: UUID) -> GovernancePolicyVersion: ...
+
+    async def get(self, policy_version_id: UUID) -> GovernancePolicyVersion | None: ...
 
 
 class ExecutionRecorder(Protocol):
@@ -362,6 +393,7 @@ class RuntimeStore(Protocol):
         input_text: str,
         idempotency_key: str,
         principal_scope: str,
+        principal: PrincipalContext | None = None,
     ) -> Run: ...
 
     async def get_run(self, run_id: UUID) -> Run | None: ...
