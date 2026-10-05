@@ -1,0 +1,97 @@
+name: Stage 3.2-F1 Acceptance
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/RUN_STAGE32_F1_ACCEPTANCE
+
+permissions:
+  contents: read
+
+jobs:
+  accept:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Verify committed F1 surface
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f docs/implementation/stage3.2-e-accepted.md
+          test -f docs/implementation/stage3.2-f-slices-frozen.md
+          test -f migrations/versions/0016_checkpoint_overlay.py
+          test ! -f scripts/stage32_f1_patch.py
+          grep -R 'class RuntimeCheckpoint' -n src
+          grep -R 'save_checkpoint' -n src tests
+          grep -R 'load_checkpoint_overlay' -n src tests
+
+      - name: Prove checkpoint is optional and exact-high-water only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          source = Path("src/agentforge/infrastructure/db/runtime_store.py").read_text()
+          tree = ast.parse(source)
+          fn = next(
+              n for n in ast.walk(tree)
+              if isinstance(n, ast.AsyncFunctionDef) and n.name == "load_checkpoint_overlay"
+          )
+          text = ast.get_source_segment(source, fn) or ""
+          required = [
+              "if checkpoint is None:",
+              "return None",
+              "checkpoint.run_state_version == state.state_version",
+              "checkpoint.message_high_water == counter.message_sequence",
+              "checkpoint.event_high_water == counter.event_sequence",
+              "if not compatible or not fresh:",
+          ]
+          for token in required:
+              if token not in text:
+                  raise SystemExit(f"missing optional/fresh checkpoint invariant: {token}")
+          print("checkpoint is optional and exact-high-water only: PASS")
+          PY
+
+      - name: Prove checkpoint payload excludes authority and secrets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          source = Path("src/agentforge/domain/checkpoints.py").read_text()
+          required = [
+              '"chain_of_thought"',
+              '"reasoning_trace"',
+              '"resolved_credentials"',
+              '"secret"',
+              '"cancel_requested"',
+              '"action_outcome"',
+              '"external_action_status"',
+              '"tool_call_outcome"',
+          ]
+          for token in required:
+              if token not in source:
+                  raise SystemExit(f"missing checkpoint exclusion: {token}")
+          print("checkpoint private-state boundary: PASS")
+          PY
+
+      - name: Verify explicit checkpoint precedence regression cases
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          grep -R 'test_f1_checkpoint_missing_compatible_and_unsupported_fallback' -n tests
+          grep -R 'test_f1_checkpoint_rejects_authority_secret_and_reasoning_payloads' -n tests
+          grep -R 'test_f1_newer_tool_action_attempt_and_reconciliation_facts_stale_checkpoint' -n tests
+          grep -R 'test_f1_newer_cancellation_fact_stales_checkpoint' -n tests
+
+      - name: Run independent F1 acceptance gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ./scripts/validate_stage31_containerized.sh
