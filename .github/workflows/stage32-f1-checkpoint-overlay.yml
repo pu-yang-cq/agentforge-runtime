@@ -101,8 +101,20 @@ jobs:
       - name: Run Stage 3.2-F1 target gate
         shell: bash
         run: |
-          set -Eeuo pipefail
-          ./scripts/validate_stage31_containerized.sh
+          set +e
+          ./scripts/validate_stage31_containerized.sh > f1-target-gate.log 2>&1
+          rc=$?
+          cat f1-target-gate.log
+          exit $rc
+
+      - name: Upload F1 failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage32-f1-target-gate-diagnostics
+          path: f1-target-gate.log
+          if-no-files-found: ignore
+          retention-days: 1
 
       - name: Commit Stage 3.2-F1 only if green
         shell: bash
