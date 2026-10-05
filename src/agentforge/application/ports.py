@@ -7,7 +7,11 @@ from uuid import UUID
 from agentforge.domain.actions import ActionResolution, ActionSnapshot, ExternalAction
 from agentforge.domain.checkpoints import RuntimeCheckpoint
 from agentforge.domain.enums import ActionResolutionOutcome, ReconciliationBusinessResult
-from agentforge.domain.governance import GovernancePolicyRule, GovernancePolicyVersion, PrincipalContext
+from agentforge.domain.governance import (
+    GovernancePolicyRule,
+    GovernancePolicyVersion,
+    PrincipalContext,
+)
 from agentforge.domain.model_contract import ModelRequest, ModelResponse, ModelToolSpec
 from agentforge.domain.models import (
     AgentVersion,
