@@ -1,0 +1,93 @@
+name: Stage 3.3 Governance Amendment 001 Approval Metadata
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/RUN_STAGE33_AMENDMENT001_ACCEPTANCE
+
+permissions:
+  contents: read
+
+jobs:
+  accept:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Verify amendment surface and frozen authorities
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          baseline=46b97f7e7d73cf8239a00014ef7d51ded9fecc2d
+          stage32=fa747268cfbf1d5b57e5796b9cbc767abc3d4e0c
+          a2=9b8a9bd45dd8f76f93a06d1ece4a2846e7043af9
+          b=bdeef5adbda0408b7b17af9042ce1dd731ab3804
+
+          test -f docs/design/stage3.3-governance-amendment-001-approval-metadata.md
+          test -f docs/acceptance/stage3.3-governance-amendment-001-approval-metadata.md
+
+          git diff --exit-code "$stage32" --             docs/design/stage3.3-governance-v1.0-frozen.md             docs/acceptance/stage3.3-governance-acceptance-v1.0-frozen.md
+          git diff --exit-code "$a2" -- docs/implementation/stage3.3-a2-accepted.md
+          git diff --exit-code "$b" -- docs/implementation/stage3.3-b-accepted.md
+          git diff --exit-code "$baseline" -- migrations
+
+          allowed='^(
+            docs/design/stage3\.3-governance-amendment-001-approval-metadata\.md|
+            docs/acceptance/stage3\.3-governance-amendment-001-approval-metadata\.md|
+            src/agentforge/domain/governance\.py|
+            src/agentforge/domain/governance_decisions\.py|
+            tests/unit/test_stage33_a1_governance_foundation\.py|
+            tests/unit/test_stage33_a2_policy_evaluator\.py|
+            tests/unit/test_stage33_c_approval_intent\.py|
+            \.github/workflows/stage33-amendment001-acceptance\.yml|
+            rc/RUN_STAGE33_AMENDMENT001_ACCEPTANCE
+          )$'
+          changed="$(git diff --name-only "$baseline"..HEAD)"
+          while IFS= read -r path; do
+            [ -z "$path" ] && continue
+            if ! printf '%s\n' "$path" | grep -Eq "$allowed"; then
+              echo "unexpected amendment file: $path" >&2
+              exit 1
+            fi
+          done <<< "$changed"
+          echo "amendment surface and frozen authorities: PASS"
+
+      - name: Run amendment unit contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm             -v "$PWD:/workspace"             -w /workspace             -e UV_PROJECT_ENVIRONMENT=/tmp/agentforge-stage33-amendment001-unit-venv             -e UV_CACHE_DIR=/tmp/agentforge-stage33-amendment001-unit-cache             ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim             sh -lc "uv sync --locked --all-groups >/dev/null && uv run --locked pytest -q               tests/unit/test_stage33_a1_governance_foundation.py               tests/unit/test_stage33_a2_policy_evaluator.py               tests/unit/test_stage33_a2_governance_intent.py               tests/unit/test_stage33_b_governed_consequence.py               tests/unit/test_stage33_c_approval_intent.py"
+
+      - name: Run amendment PostgreSQL regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          compose='docker compose -f docker-compose.acceptance.yml'
+          trap '$compose down -v --remove-orphans >/dev/null 2>&1 || true' EXIT
+          $compose up -d postgres
+          $compose run --rm validator /bin/sh -lc '
+            uv sync --locked --all-groups >/dev/null &&
+            uv run --locked pytest -q               tests/integration/test_stage33_a1_postgres.py               tests/integration/test_stage33_a2_postgres.py               tests/integration/test_stage33_b_postgres.py               tests/integration/test_stage33_c_postgres.py
+          '
+          $compose down -v --remove-orphans
+          trap - EXIT
+
+      - name: Prove amendment does not introduce Stage 3.3-D behavior
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if grep -R -n -E             'class ApprovalDecision|def decide_approval|def approve_approval|def deny_approval|expire_due_approvals|def resume_after_approval'             src/agentforge migrations/versions; then
+            echo "Amendment 001 must not introduce Stage 3.3-D behavior" >&2
+            exit 1
+          fi
+          echo "no Stage 3.3-D behavior: PASS"
+
+      - name: Run complete Stage 3.2 regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ./scripts/validate_stage31_containerized.sh
