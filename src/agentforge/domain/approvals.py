@@ -54,7 +54,8 @@ class ApprovalRequest:
         )
         if (self.external_action_id is None) != (self.action_snapshot_digest is None):
             raise ValueError(
-                "external_action_id and action_snapshot_digest must either both be set or both be null"
+                "external_action_id and action_snapshot_digest must either both be set "
+                "or both be null"
             )
         if self.action_snapshot_digest is not None:
             self.action_snapshot_digest = _validate_digest(
