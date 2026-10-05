@@ -447,9 +447,7 @@ class GovernanceIntentRow(Base):
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
     format_version: Mapped[int] = mapped_column(Integer, nullable=False)
-    run_id: Mapped[UUID] = mapped_column(
-        ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False
-    )
+    run_id: Mapped[UUID] = mapped_column(ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False)
     agent_version_id: Mapped[UUID] = mapped_column(
         ForeignKey("agent_versions.id", ondelete="RESTRICT"), nullable=False
     )
@@ -487,9 +485,7 @@ class PolicyDecisionRow(Base):
     governance_intent_id: Mapped[UUID] = mapped_column(
         ForeignKey("governance_intents.id", ondelete="RESTRICT"), nullable=False
     )
-    run_id: Mapped[UUID] = mapped_column(
-        ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False
-    )
+    run_id: Mapped[UUID] = mapped_column(ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False)
     proposal_id: Mapped[UUID] = mapped_column(
         ForeignKey("tool_proposals.id", ondelete="RESTRICT"), nullable=False
     )
