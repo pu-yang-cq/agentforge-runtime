@@ -314,11 +314,17 @@ replace_once(
 # ---------------------------------------------------------------------------
 replace_once(
     "tests/integration/test_postgres_runtime.py",
-    '''    ReconciliationBusinessResult,
+    '''    ExternalActionStatus,
+    QueueReason,
+    ReconciliationAttemptStatus,
+    ReconciliationBusinessResult,
     RunStatus,
 ''',
-    '''    ReconciliationBusinessResult,
+    '''    ExternalActionStatus,
     MessageRole,
+    QueueReason,
+    ReconciliationAttemptStatus,
+    ReconciliationBusinessResult,
     RunStatus,
 ''',
 )
@@ -490,7 +496,7 @@ async def test_e3_result_wins_then_cancellation_does_not_rollback_succeeded_acti
 
 
 @pytest.mark.asyncio
-async def test_e3_cancellation_wins_inflight_side_effect_result_records_truth_but_fences_worker() -> None:
+async def test_e3_cancel_wins_side_effect_result_records_truth_and_fences_worker() -> None:
     reset_schema()
     engine = create_engine(DATABASE_URL)
     sessions = create_session_factory(engine)
