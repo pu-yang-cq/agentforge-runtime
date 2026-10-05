@@ -6,6 +6,7 @@ class RunStatus(StrEnum):
     QUEUED = "QUEUED"
     RUNNING = "RUNNING"
     WAITING_ACTION_RESOLUTION = "WAITING_ACTION_RESOLUTION"
+    WAITING_APPROVAL = "WAITING_APPROVAL"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
@@ -35,6 +36,7 @@ class ReconciliationMode(StrEnum):
 
 
 class ExternalActionStatus(StrEnum):
+    AWAITING_APPROVAL = "AWAITING_APPROVAL"
     READY = "READY"
     EXECUTING = "EXECUTING"
     UNKNOWN = "UNKNOWN"
@@ -47,6 +49,7 @@ class ExternalActionStatus(StrEnum):
 
 class ToolCallStatus(StrEnum):
     CREATED = "CREATED"
+    AWAITING_APPROVAL = "AWAITING_APPROVAL"
     READY = "READY"
     EXECUTING = "EXECUTING"
     UNRESOLVED = "UNRESOLVED"
@@ -152,3 +155,11 @@ class GovernanceDecision(StrEnum):
     ALLOW = "ALLOW"
     DENY = "DENY"
     REQUIRE_APPROVAL = "REQUIRE_APPROVAL"
+
+
+class ApprovalRequestStatus(StrEnum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    DENIED = "DENIED"
+    EXPIRED = "EXPIRED"
+    CANCELLED = "CANCELLED"
