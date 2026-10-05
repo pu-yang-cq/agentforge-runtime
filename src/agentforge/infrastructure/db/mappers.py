@@ -3,7 +3,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from agentforge.domain.actions import ActionResolution, ActionSnapshot, ExternalAction
-from agentforge.domain.enums import ReconciliationMode, ToolEffectType
+from agentforge.domain.enums import GovernanceMode, ReconciliationMode, ToolEffectType
 from agentforge.domain.models import AgentVersion, Run, RunMessage, RunState, ToolBinding, ToolCall
 from agentforge.infrastructure.db.models import (
     ActionResolutionRow,
@@ -36,6 +36,12 @@ def run_from_row(row: RunRow) -> Run:
         max_model_invocations=row.max_model_invocations,
         max_tool_attempts=row.max_tool_attempts,
         deadline_at=row.deadline_at,
+        policy_version_id=row.policy_version_id,
+        requester_principal_id=row.requester_principal_id,
+        requester_principal_type=row.requester_principal_type,
+        requester_roles=None if row.requester_roles is None else tuple(row.requester_roles),
+        requester_scope=row.requester_scope,
+        requester_authn_source=row.requester_authn_source,
     )
 
 
@@ -90,6 +96,8 @@ def agent_version_from_parts(
             int,
         ]
     ],
+    governance_mode: GovernanceMode = GovernanceMode.LEGACY_STAGE32,
+    policy_version_id: UUID | None = None,
 ) -> AgentVersion:
     return AgentVersion(
         id=version_id,
@@ -136,6 +144,8 @@ def agent_version_from_parts(
                 reconciliation_max_backoff_seconds,
             ) in bindings
         ),
+        governance_mode=governance_mode,
+        policy_version_id=policy_version_id,
     )
 
 
