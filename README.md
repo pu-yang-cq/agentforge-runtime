@@ -40,13 +40,17 @@ Frozen Stage 3.3 design artifacts:
 Stage 3.3 implementation is in progress.
 
 - Stage 3.3-A1 Identity / Compatibility / Policy Schema: **ACCEPTED / FROZEN**
-- accepted semantic candidate: `cf1c7571b67210bedfe411865bb940c83e6da4f0`
+- Stage 3.3-A2 Evaluator / Intent / PolicyDecision: **ACCEPTED / FROZEN**
+- Stage 3.3-A Aggregate: **ACCEPTED / FROZEN**
+- accepted Stage 3.3-A semantic candidate: `9b8a9bd45dd8f76f93a06d1ece4a2846e7043af9`
 - successful A1 gate: `37268108885`
-- acceptance: `docs/implementation/stage3.3-a1-accepted.md`
-- Stage 3.3-A2 Evaluator / Intent / PolicyDecision: **UNLOCKED**
+- successful A2 gate: `37275301253`
+- successful A aggregate gate: `37281068420`
+- aggregate acceptance: `docs/implementation/stage3.3-a-accepted.md`
+- Stage 3.3-B Governed ALLOW / DENY + Control-plane Authorization: **UNLOCKED**
 
-Stage 3.3-A aggregate and later Stage 3.3 runtime acceptance remain **LOCKED** until their
-frozen implementation gates pass.
+Stage 3.3-C and later Stage 3.3 runtime acceptance remain **LOCKED** until their frozen
+implementation gates pass.
 
 Stage 3.1 accepted immutable source:
 
