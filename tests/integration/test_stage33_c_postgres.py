@@ -23,7 +23,7 @@ if not DATABASE_URL:
         raise RuntimeError("AGENTFORGE_TEST_DATABASE_URL is required for Stage 3.3-C acceptance")
     pytest.skip("set AGENTFORGE_TEST_DATABASE_URL", allow_module_level=True)
 
-from agentforge.application.errors import BusinessProgressionBlockedError
+from agentforge.application.errors import BusinessProgressionBlockedError, StaleExecutorError
 from agentforge.application.governed_consequence import plan_governed_tool_consequence
 from agentforge.domain.enums import (
     ApprovalRequestStatus,
@@ -42,6 +42,7 @@ from agentforge.domain.governance import (
     PrincipalContext,
 )
 from agentforge.domain.models import ToolProposal
+from agentforge.infrastructure.db.approval_review_store import PostgresApprovalReviewStore
 from agentforge.infrastructure.db.execution_recorder import PostgresExecutionRecorder
 from agentforge.infrastructure.db.governance_store import PostgresGovernancePolicyStore
 from agentforge.infrastructure.db.models import (
@@ -251,6 +252,41 @@ async def _fixture(*, effect_type: ToolEffectType) -> ApprovalFixture:
         tool_version_id=tool_version_id,
         physical_calls=physical_calls,
     )
+
+
+async def _persist_pending(fx: ApprovalFixture):
+    plan = plan_governed_tool_consequence(
+        run=fx.claimed,
+        agent_version=fx.agent_version,
+        proposal=fx.proposal,
+        policy=fx.policy,
+        tools=fx.tools,
+    )
+    assert plan.pending_call is not None
+    if plan.pending_action is None:
+        await fx.recorder.record_governed_model_read_approval_pending(
+            fx.invocation,
+            fx.proposal,
+            plan.pending_call,
+            plan.intent,
+            plan.evaluation,
+            fx.policy.id,
+            expected_generation=fx.claimed.execution_generation,
+        )
+    else:
+        assert plan.pending_snapshot is not None
+        await fx.recorder.record_governed_model_side_effect_approval_pending(
+            fx.invocation,
+            fx.proposal,
+            plan.pending_call,
+            plan.pending_snapshot,
+            plan.pending_action,
+            plan.intent,
+            plan.evaluation,
+            fx.policy.id,
+            expected_generation=fx.claimed.execution_generation,
+        )
+    return plan
 
 
 @pytest.mark.asyncio
@@ -468,5 +504,154 @@ async def test_c_cancel_before_pending_consequence_rolls_back_candidate_facts() 
     assert request_count == 0
     assert call_count == 0
     assert attempt_count == 0
+    assert fx.physical_calls == []
+    await fx.engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "effect_type",
+    [ToolEffectType.READ, ToolEffectType.DESTRUCTIVE],
+)
+async def test_c_waiting_approval_survives_restart_and_is_not_worker_recoverable(
+    effect_type: ToolEffectType,
+) -> None:
+    fx = await _fixture(effect_type=effect_type)
+    await _persist_pending(fx)
+
+    restarted_store = PostgresRuntimeStore(fx.sessions)
+    durable = await restarted_store.get_run(fx.claimed.id)
+    assert durable is not None
+    assert durable.status is RunStatus.WAITING_APPROVAL
+    assert durable.owner_worker_id is None
+    assert durable.lease_expires_at is None
+
+    claimed = await restarted_store.claim_next_run(
+        worker_id="stage33-c-restart-worker",
+        lease_seconds=30,
+    )
+    assert claimed is None
+
+    restarted_recorder = PostgresExecutionRecorder(
+        fx.sessions,
+        run_id=fx.claimed.id,
+        generation=fx.claimed.execution_generation,
+    )
+    assert await restarted_recorder.load_recoverable_read_call(fx.claimed.id) is None
+    assert await restarted_recorder.load_ready_external_action(fx.claimed.id) is None
+
+    with pytest.raises(StaleExecutorError):
+        await restarted_recorder.begin_model_invocation(
+            run_id=fx.claimed.id,
+            invocation_id=uuid4(),
+            expected_generation=fx.claimed.execution_generation,
+        )
+
+    assert fx.physical_calls == []
+    await fx.engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "effect_type",
+    [ToolEffectType.READ, ToolEffectType.DESTRUCTIVE],
+)
+async def test_c_cancel_pending_approval_atomically_stabilizes_governance(
+    effect_type: ToolEffectType,
+) -> None:
+    fx = await _fixture(effect_type=effect_type)
+    await _persist_pending(fx)
+
+    cancelled = await fx.store.cancel_run(fx.claimed.id)
+    assert cancelled.status is RunStatus.CANCELLED
+    assert cancelled.cancel_requested is True
+    assert cancelled.owner_worker_id is None
+    assert cancelled.lease_expires_at is None
+
+    async with fx.sessions() as session:
+        request = (
+            await session.execute(
+                select(ApprovalRequestRow).where(ApprovalRequestRow.run_id == fx.claimed.id)
+            )
+        ).scalar_one()
+        call = (
+            await session.execute(select(ToolCallRow).where(ToolCallRow.run_id == fx.claimed.id))
+        ).scalar_one()
+        action = (
+            await session.execute(
+                select(ExternalActionRow).where(ExternalActionRow.run_id == fx.claimed.id)
+            )
+        ).scalar_one_or_none()
+        attempt_count = await session.scalar(
+            select(func.count())
+            .select_from(ToolExecutionAttemptRow)
+            .where(ToolExecutionAttemptRow.run_id == fx.claimed.id)
+        )
+
+    assert request.status is ApprovalRequestStatus.CANCELLED
+    assert request.decided_at is not None
+    assert call.status is ToolCallStatus.NOT_EXECUTED
+    assert attempt_count == 0
+    if effect_type is ToolEffectType.READ:
+        assert action is None
+    else:
+        assert action is not None
+        assert action.status is ExternalActionStatus.ABORTED
+        assert action.current_attempt_id is None
+
+    again = await fx.store.cancel_run(fx.claimed.id)
+    assert again.status is RunStatus.CANCELLED
+    assert fx.physical_calls == []
+    await fx.engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "effect_type",
+    [ToolEffectType.READ, ToolEffectType.DESTRUCTIVE],
+)
+async def test_c_pending_approval_review_projection_is_deterministic_from_durable_facts(
+    effect_type: ToolEffectType,
+) -> None:
+    fx = await _fixture(effect_type=effect_type)
+    plan = await _persist_pending(fx)
+
+    async with fx.sessions() as session:
+        request_id = await session.scalar(
+            select(ApprovalRequestRow.id).where(ApprovalRequestRow.run_id == fx.claimed.id)
+        )
+    assert request_id is not None
+
+    store = PostgresApprovalReviewStore(fx.sessions)
+    first = await store.get_pending(request_id)
+    second = await store.get_pending(request_id)
+    assert first is not None
+    assert first == second
+    assert first.run_id == fx.claimed.id
+    assert first.tool_call_id == plan.pending_call.id
+    assert first.policy_version_id == fx.policy.id
+    assert first.governance_intent_digest == plan.intent.digest
+    assert first.requested_by_principal == "requester-c"
+    assert first.principal_scope == "tenant-c"
+    assert first.required_approver_role == "risk-approver"
+    assert first.separation_of_duties is True
+    assert first.status is ApprovalRequestStatus.PENDING
+    assert first.tool_version_id == fx.tool_version_id
+    assert first.effect_type is effect_type
+    assert first.arguments_canonical_json
+
+    if effect_type is ToolEffectType.READ:
+        assert first.external_action_id is None
+        assert first.action_snapshot_digest is None
+        assert first.operation_id is None
+    else:
+        assert plan.pending_action is not None
+        assert plan.pending_snapshot is not None
+        assert first.external_action_id == plan.pending_action.id
+        assert first.action_snapshot_digest == plan.pending_snapshot.digest
+        assert first.operation_id == plan.pending_action.operation_id
+
+    await fx.store.cancel_run(fx.claimed.id)
+    assert await store.get_pending(request_id) is None
     assert fx.physical_calls == []
     await fx.engine.dispose()
