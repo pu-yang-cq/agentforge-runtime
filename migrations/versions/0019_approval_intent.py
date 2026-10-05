@@ -23,9 +23,7 @@ def upgrade() -> None:
     with op.get_context().autocommit_block():
         op.execute("ALTER TYPE run_status ADD VALUE IF NOT EXISTS 'WAITING_APPROVAL'")
         op.execute("ALTER TYPE tool_call_status ADD VALUE IF NOT EXISTS 'AWAITING_APPROVAL'")
-        op.execute(
-            "ALTER TYPE external_action_status ADD VALUE IF NOT EXISTS 'AWAITING_APPROVAL'"
-        )
+        op.execute("ALTER TYPE external_action_status ADD VALUE IF NOT EXISTS 'AWAITING_APPROVAL'")
 
     approval_status = postgresql.ENUM(
         "PENDING",
@@ -59,9 +57,7 @@ def upgrade() -> None:
         "tool_calls",
         ["run_id"],
         unique=True,
-        postgresql_where=sa.text(
-            "status IN ('AWAITING_APPROVAL', 'READY', 'EXECUTING')"
-        ),
+        postgresql_where=sa.text("status IN ('AWAITING_APPROVAL', 'READY', 'EXECUTING')"),
     )
 
     op.drop_index(
