@@ -42,7 +42,7 @@ jobs:
           set -Eeuo pipefail
           test -f docs/implementation/stage3.2-f2-fake-external-ledger.md
           test -f docs/acceptance/stage3.2-f3-recovery-matrix.json
-          grep -R 'test_f3_crash_after_action_commit_before_external_call_recovers_without_duplicate_effect' -n tests/integration
+          grep -R 'test_f3_crash_post_commit_pre_call_no_duplicate_effect' -n tests/integration
           grep -R 'test_f3_crash_during_external_call_recovers_without_duplicate_effect' -n tests/integration
           grep -R 'test_f3_crash_after_external_effect_before_response_reconciles_without_replay' -n tests/integration
           grep -R 'test_f3_crash_after_response_before_result_commit_reconciles_without_replay' -n tests/integration
@@ -82,7 +82,7 @@ jobs:
               tests/integration/test_postgres_runtime.py::test_side_effect_preparation_stale_lease_creates_no_intent \
               tests/integration/test_postgres_runtime.py::test_ready_action_recovery_uses_same_operation_id_without_model_reproposal \
               tests/integration/test_postgres_runtime.py::test_action_commit_deadline_block_aborts_ready_action_without_external_call \
-              tests/integration/test_postgres_runtime.py::test_f3_crash_after_action_commit_before_external_call_recovers_without_duplicate_effect \
+              tests/integration/test_postgres_runtime.py::test_f3_crash_post_commit_pre_call_no_duplicate_effect \
               tests/integration/test_postgres_runtime.py::test_f3_crash_during_external_call_recovers_without_duplicate_effect \
               tests/integration/test_postgres_runtime.py::test_f3_crash_after_external_effect_before_response_reconciles_without_replay \
               tests/integration/test_postgres_runtime.py::test_f3_crash_after_response_before_result_commit_reconciles_without_replay \
