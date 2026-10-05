@@ -17,9 +17,15 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.execute("ALTER TYPE tool_effect_type ADD VALUE IF NOT EXISTS 'WRITE'")
-    op.execute("ALTER TYPE tool_effect_type ADD VALUE IF NOT EXISTS 'EXTERNAL_SIDE_EFFECT'")
-    op.execute("ALTER TYPE tool_effect_type ADD VALUE IF NOT EXISTS 'DESTRUCTIVE'")
+    # When Stage 3.2 is resumed from the frozen Stage 3.1 head, tool_effect_type
+    # already exists in a committed transaction. PostgreSQL requires enum values
+    # added to an existing type to commit before later DDL may reference them.
+    # A base->head migration hid this because the enum itself was created in the
+    # same upgrade transaction. Preserve resume compatibility explicitly.
+    with op.get_context().autocommit_block():
+        op.execute("ALTER TYPE tool_effect_type ADD VALUE IF NOT EXISTS 'WRITE'")
+        op.execute("ALTER TYPE tool_effect_type ADD VALUE IF NOT EXISTS 'EXTERNAL_SIDE_EFFECT'")
+        op.execute("ALTER TYPE tool_effect_type ADD VALUE IF NOT EXISTS 'DESTRUCTIVE'")
 
     action_status = postgresql.ENUM(
         "READY",
