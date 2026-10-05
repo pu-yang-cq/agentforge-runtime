@@ -148,7 +148,21 @@ Acceptance focus:
 
 ## 4. Stage 3.3-C — Durable Approval Intent
 
-Status: **UNLOCKED**
+Status: **ACTIVE**
+
+Governance Amendment 001:
+- **ACCEPTED / FROZEN**
+- accepted semantic candidate: `8d7b214c9ce38e201da364af59dcc35a90565205`
+- successful independent gate: `37325262562`
+- acceptance artifact:
+  `docs/implementation/stage3.3-governance-amendment-001-accepted.md`
+
+Implementation progress:
+- C1 Domain / Schema / Migration: **IMPLEMENTED / READ-BACK VERIFIED**
+- C2 Atomic REQUIRE_APPROVAL Pending Consequence: **IMPLEMENTED / READ-BACK VERIFIED**
+- C3 Restart / Claim / Terminal Guards + Review Projection: **UNLOCKED / ACTIVE**
+
+C remains unaccepted until the complete Stage 3.3-C gate passes.
 
 Scope:
 - Run WAITING_APPROVAL;
@@ -269,6 +283,9 @@ No later slice may be implemented early to make an earlier slice easier to pass.
 Stage 3.3 Governance Design V1.0
 ✅ ACCEPTED / FROZEN
 
+Governance Amendment 001
+✅ ACCEPTED / FROZEN
+
 Implementation Plan
 ✅ FROZEN
 
@@ -282,10 +299,13 @@ Stage 3.3-A Aggregate
 ✅ ACCEPTED / FROZEN
 
 Stage 3.3-B
-🔓 UNLOCKED
+✅ ACCEPTED / FROZEN
 
 Stage 3.3-C
-🔒 LOCKED
+🟡 ACTIVE
+  C1 ✅ IMPLEMENTED / READ-BACK VERIFIED
+  C2 ✅ IMPLEMENTED / READ-BACK VERIFIED
+  C3 🔓 ACTIVE
 
 Stage 3.3-D
 🔒 LOCKED
