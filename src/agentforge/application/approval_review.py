@@ -57,7 +57,8 @@ def build_pending_approval_review_projection(
         raise ValueError("approval review projection requires REQUIRE_APPROVAL decision")
     if call.status is not ToolCallStatus.AWAITING_APPROVAL:
         raise ValueError("approval review projection requires AWAITING_APPROVAL ToolCall")
-    if call.tool_version_id is None:
+    tool_version_id = call.tool_version_id
+    if tool_version_id is None:
         raise ValueError("approval review ToolCall must bind a ToolVersion")
 
     if not (
@@ -65,7 +66,7 @@ def build_pending_approval_review_projection(
         and request.tool_call_id == call.id
         and request.policy_decision_id == decision.id
         and intent.proposal_id == decision.proposal_id == call.proposal_id
-        and intent.tool_version_id == decision.tool_version_id == call.tool_version_id
+        and intent.tool_version_id == decision.tool_version_id == tool_version_id
     ):
         raise ValueError("approval review durable identity mismatch")
     if not (
@@ -107,7 +108,7 @@ def build_pending_approval_review_projection(
         if request.action_snapshot_digest != snapshot.digest:
             raise ValueError("approval review ActionSnapshot digest mismatch")
         if not (
-            snapshot.tool_version_id == call.tool_version_id == intent.tool_version_id
+            snapshot.tool_version_id == tool_version_id == intent.tool_version_id
             and snapshot.effect_type is intent.effect_type
             and snapshot.arguments == call.arguments
             and snapshot.operation_id == action.operation_id
@@ -133,7 +134,7 @@ def build_pending_approval_review_projection(
         expires_at=request.expires_at,
         created_at=request.created_at,
         tool_name=call.tool_name,
-        tool_version_id=call.tool_version_id,
+        tool_version_id=tool_version_id,
         effect_type=intent.effect_type,
         arguments_canonical_json=canonical_json_v1(call.arguments).decode("utf-8"),
         operation_id=operation_id,
