@@ -45,7 +45,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          python - <<'PY'
+          PYTHONPATH=src python - <<'PY'
           from agentforge.testing.fake_external_system import CrashBarrierPoint
 
           expected = {
