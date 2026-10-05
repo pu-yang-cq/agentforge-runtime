@@ -398,9 +398,7 @@ async def _persist_governance_audit_in_consequence(
             policy_key=policy_row.policy_key,
             version_number=policy_row.version_number,
             status=policy_row.status,
-            rules=tuple(
-                GovernancePolicyRule.from_record(record) for record in policy_row.rules
-            ),
+            rules=tuple(GovernancePolicyRule.from_record(record) for record in policy_row.rules),
             created_at=policy_row.created_at,
             published_at=policy_row.published_at,
             retired_at=policy_row.retired_at,
@@ -411,7 +409,7 @@ async def _persist_governance_audit_in_consequence(
             agent_version_id=run.agent_version_id,
             binding=binding,
         )
-    except (AttributeError, TypeError, ValueError):
+    except AttributeError, TypeError, ValueError:
         durable_evaluation = _fail_closed_governance_evaluation()
 
     if durable_evaluation != evaluation:
