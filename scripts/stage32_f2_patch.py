@@ -227,7 +227,7 @@ import pytest
 from agentforge.application.errors import ToolAdapterError
 from agentforge.application.ports import ReconciliationInvocation, SideEffectInvocation
 from agentforge.domain.enums import ReconciliationBusinessResult
-from tests.support.fake_external_system import (
+from agentforge.testing.fake_external_system import (
     CrashBarrierController,
     CrashBarrierPoint,
     SideEffectScenario,
@@ -412,8 +412,7 @@ async def test_fake_external_ledger_never_stores_credential_reference_or_secret_
     assert secret not in representation
 '''
 
-Path("tests/__init__.py").write_text("")
-p=Path("tests/support")
+p=Path("src/agentforge/testing")
 p.mkdir(parents=True, exist_ok=True)
 (p/"__init__.py").write_text("")
 (p/"fake_external_system.py").write_text(SUPPORT)
