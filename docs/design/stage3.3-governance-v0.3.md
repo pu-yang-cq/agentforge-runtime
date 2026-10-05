@@ -157,7 +157,8 @@ create_run:
 - principal must have runtime:run:create.
 
 get_run:
-- requester or authorized same-scope runtime:run:read:any principal.
+- requester or authorized same-scope runtime:run:read:any principal;
+- a caller outside principal_scope receives 404 so resource existence is not disclosed.
 
 cancel_run:
 - requester in same scope; or
@@ -169,9 +170,11 @@ resolve_action:
 approval list/get/decide:
 - same scope;
 - required approval role for decision;
-- list/get only expose requests principal is authorized to review.
+- collection/list filters out requests the caller cannot review;
+- single approval detail outside the caller's visible scope returns 404.
 
-No cross-scope read or mutation is permitted.
+No cross-scope read or mutation is permitted. Mutating requests that identify an already
+visible same-scope resource but lack the required role return 403.
 
 LEGACY development compatibility keeps frozen Stage 3.2 API tests separate from these
 production/governed rules.
