@@ -72,6 +72,7 @@ from agentforge.infrastructure.db.models import (
     AgentRow,
     AgentVersionRow,
     AgentVersionToolRow,
+    CheckpointRow,
     DomainEventRow,
     ExternalActionRow,
     ReconciliationAttemptRow,
@@ -4559,4 +4560,303 @@ async def test_e3_manual_resolution_wins_late_stale_result_cannot_overwrite() ->
     }
     assert final_resolution is not None
     assert final_resolution.outcome is ActionResolutionOutcome.SUCCEEDED
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_f1_checkpoint_missing_compatible_and_unsupported_fallback() -> None:
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+    store = PostgresRuntimeStore(sessions)
+    created = await store.create_run(
+        agent_version_id=DEMO_AGENT_VERSION_ID,
+        input_text="checkpoint overlay",
+        idempotency_key="integration-f1-checkpoint-basic",
+        principal_scope="test-user",
+    )
+    claimed = await store.claim_next_run(worker_id="f1-checkpoint", lease_seconds=30)
+    assert claimed is not None
+
+    assert (
+        await store.load_checkpoint_overlay(
+            run_id=created.id,
+            runner_version="native-v1",
+        )
+        is None
+    )
+
+    saved = await store.save_checkpoint(
+        run_id=created.id,
+        expected_generation=claimed.execution_generation,
+        runner_version="native-v1",
+        working_state={"phase": "before-model", "scratch": {"step": 1}},
+        context_cursor={"message": 1},
+    )
+    loaded = await store.load_checkpoint_overlay(
+        run_id=created.id,
+        runner_version="native-v1",
+    )
+    assert loaded == saved
+    assert loaded is not None
+    assert loaded.working_state == {"phase": "before-model", "scratch": {"step": 1}}
+
+    # Runner/schema mismatch never blocks correctness; it discards the overlay.
+    assert (
+        await store.load_checkpoint_overlay(
+            run_id=created.id,
+            runner_version="native-v2",
+        )
+        is None
+    )
+    async with sessions() as session, session.begin():
+        row = await session.get(CheckpointRow, created.id)
+        assert row is not None
+        row.schema_version = 99
+    assert (
+        await store.load_checkpoint_overlay(
+            run_id=created.id,
+            runner_version="native-v1",
+        )
+        is None
+    )
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_f1_checkpoint_rejects_authority_secret_and_reasoning_payloads() -> None:
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+    store = PostgresRuntimeStore(sessions)
+    created = await store.create_run(
+        agent_version_id=DEMO_AGENT_VERSION_ID,
+        input_text="checkpoint forbidden fields",
+        idempotency_key="integration-f1-checkpoint-forbidden",
+        principal_scope="test-user",
+    )
+    claimed = await store.claim_next_run(worker_id="f1-forbidden", lease_seconds=30)
+    assert claimed is not None
+
+    for payload in (
+        {"chain_of_thought": "private reasoning"},
+        {"nested": {"resolved_credentials": "sentinel-secret"}},
+        {"cancel_requested": True},
+        {"action_outcome": "SUCCEEDED"},
+        {"tool_call_outcome": "FAILED"},
+    ):
+        with pytest.raises(ValueError, match="forbidden"):
+            await store.save_checkpoint(
+                run_id=created.id,
+                expected_generation=claimed.execution_generation,
+                runner_version="native-v1",
+                working_state=payload,
+            )
+
+    async with sessions() as session:
+        assert await session.get(CheckpointRow, created.id) is None
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_f1_newer_tool_action_attempt_and_reconciliation_facts_stale_checkpoint() -> None:
+    from agentforge.domain.enums import ReconciliationMode
+
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+
+    side_tool_id = uuid4()
+    side_version_id = uuid4()
+    async with sessions() as session, session.begin():
+        session.add(
+            ToolDefinitionRow(id=side_tool_id, name="f1_checkpoint_side", description="side")
+        )
+        await session.flush()
+        session.add(
+            ToolVersionRow(
+                id=side_version_id,
+                tool_id=side_tool_id,
+                version_number=1,
+                input_schema={"type": "object"},
+                effect_type=ToolEffectType.EXTERNAL_SIDE_EFFECT,
+                implementation_ref="tests:f1_checkpoint_side",
+                allow_no_approval_execution=True,
+                reconciliation_mode=ReconciliationMode.AUTHORITATIVE,
+                reconciliation_max_attempts=2,
+                reconciliation_initial_backoff_seconds=0,
+                reconciliation_max_backoff_seconds=0,
+            )
+        )
+        await session.flush()
+        session.add(
+            AgentVersionToolRow(
+                agent_version_id=DEMO_AGENT_VERSION_ID,
+                tool_version_id=side_version_id,
+                tool_alias="f1_checkpoint_side",
+            )
+        )
+
+    registry = InMemoryToolRegistry(
+        [
+            FunctionTool(
+                version_id=DEMO_TOOL_VERSION_ID,
+                name="echo_read",
+                description="read",
+                input_schema={"type": "object"},
+                func=lambda text: {"echo": text},
+            ),
+            SideEffectFunctionTool(
+                version_id=side_version_id,
+                name="f1_checkpoint_side",
+                description="side",
+                input_schema={"type": "object"},
+                func=lambda invocation: {"ok": True},
+                reconcile_func=lambda invocation: ReconciliationResult(
+                    ReconciliationBusinessResult.UNKNOWN,
+                    {"operation_id": str(invocation.operation_id)},
+                ),
+            ),
+        ]
+    )
+    store = PostgresRuntimeStore(sessions)
+    created = await store.create_run(
+        agent_version_id=DEMO_AGENT_VERSION_ID,
+        input_text="checkpoint durable facts",
+        idempotency_key="integration-f1-checkpoint-facts",
+        principal_scope="test-user",
+    )
+    claimed = await store.claim_next_run(worker_id="f1-facts", lease_seconds=30)
+    assert claimed is not None
+    recorder = PostgresExecutionRecorder(
+        sessions,
+        run_id=created.id,
+        generation=claimed.execution_generation,
+    )
+    _, invocation = await recorder.begin_model_invocation(
+        run_id=created.id,
+        invocation_id=uuid4(),
+        expected_generation=claimed.execution_generation,
+    )
+
+    await store.save_checkpoint(
+        run_id=created.id,
+        expected_generation=claimed.execution_generation,
+        runner_version="native-v1",
+        working_state={"phase": "model-started"},
+    )
+    invocation.complete("TOOL_PROPOSAL")
+    proposal = ToolProposal.create(
+        run_id=created.id,
+        model_invocation_id=invocation.id,
+        tool_name="f1_checkpoint_side",
+        arguments={"v": 1},
+    )
+    version = await store.load_agent_version(DEMO_AGENT_VERSION_ID)
+    prepared = ToolCoordinator(registry).prepare_side_effect(
+        proposal=proposal,
+        agent_version=version,
+    )
+    await recorder.record_model_side_effect_prepared(
+        invocation,
+        proposal,
+        prepared.call,
+        prepared.snapshot,
+        prepared.action,
+        expected_generation=claimed.execution_generation,
+    )
+    assert (
+        await store.load_checkpoint_overlay(
+            run_id=created.id,
+            runner_version="native-v1",
+        )
+        is None
+    )
+
+    await store.save_checkpoint(
+        run_id=created.id,
+        expected_generation=claimed.execution_generation,
+        runner_version="native-v1",
+        working_state={"phase": "action-ready"},
+    )
+    attempt = await recorder.record_side_effect_attempt_started(
+        prepared.call,
+        prepared.action,
+        expected_generation=claimed.execution_generation,
+    )
+    assert (
+        await store.load_checkpoint_overlay(
+            run_id=created.id,
+            runner_version="native-v1",
+        )
+        is None
+    )
+
+    await recorder.record_side_effect_unknown(
+        prepared.call,
+        prepared.action,
+        attempt,
+        error="response lost",
+        error_class="RESPONSE_LOST",
+        outcome_reason="SIDE_EFFECT_POSSIBLE_EXECUTION",
+        expected_generation=claimed.execution_generation,
+    )
+    await store.save_checkpoint(
+        run_id=created.id,
+        expected_generation=claimed.execution_generation,
+        runner_version="native-v1",
+        working_state={"phase": "action-unknown"},
+    )
+    binding = next(item for item in version.tool_bindings if item.name == "f1_checkpoint_side")
+    reconciliation = await recorder.record_reconciliation_started(
+        prepared.call,
+        prepared.action,
+        claimed,
+        max_attempts=binding.reconciliation_max_attempts,
+        expected_generation=claimed.execution_generation,
+    )
+    assert reconciliation is not None
+    assert (
+        await store.load_checkpoint_overlay(
+            run_id=created.id,
+            runner_version="native-v1",
+        )
+        is None
+    )
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_f1_newer_cancellation_fact_stales_checkpoint() -> None:
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+    store = PostgresRuntimeStore(sessions)
+    created = await store.create_run(
+        agent_version_id=DEMO_AGENT_VERSION_ID,
+        input_text="checkpoint cancellation",
+        idempotency_key="integration-f1-checkpoint-cancel",
+        principal_scope="test-user",
+    )
+    claimed = await store.claim_next_run(worker_id="f1-cancel", lease_seconds=30)
+    assert claimed is not None
+    await store.save_checkpoint(
+        run_id=created.id,
+        expected_generation=claimed.execution_generation,
+        runner_version="native-v1",
+        working_state={"phase": "running"},
+    )
+    cancelled = await store.cancel_run(created.id)
+    assert cancelled.cancel_requested is True
+    assert (
+        await store.load_checkpoint_overlay(
+            run_id=created.id,
+            runner_version="native-v1",
+        )
+        is None
+    )
     await engine.dispose()

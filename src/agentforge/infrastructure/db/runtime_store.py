@@ -16,6 +16,11 @@ from agentforge.application.errors import (
 )
 from agentforge.application.ports import RuntimeStore
 from agentforge.domain.actions import ActionResolution
+from agentforge.domain.checkpoints import (
+    CHECKPOINT_SCHEMA_VERSION,
+    RuntimeCheckpoint,
+    validate_checkpoint_private_payload,
+)
 from agentforge.domain.enums import (
     ActionResolutionOutcome,
     EventType,
@@ -47,6 +52,7 @@ from agentforge.infrastructure.db.models import (
     ActionResolutionRow,
     AgentVersionRow,
     AgentVersionToolRow,
+    CheckpointRow,
     DomainEventRow,
     ExternalActionRow,
     IdempotencyRecordRow,
@@ -793,6 +799,155 @@ class PostgresRuntimeStore(RuntimeStore):
             await session.refresh(run_row)
             await session.refresh(resolution_row)
             return run_from_row(run_row), action_resolution_from_row(resolution_row)
+
+    async def save_checkpoint(
+        self,
+        *,
+        run_id: UUID,
+        expected_generation: int,
+        runner_version: str,
+        working_state: dict[str, Any],
+        context_cursor: dict[str, Any] | None = None,
+    ) -> RuntimeCheckpoint:
+        """Persist optional private runner state at exact durable high-water marks."""
+        if not runner_version.strip():
+            raise ValueError("runner_version cannot be blank")
+        validate_checkpoint_private_payload(working_state, path="$.working_state")
+        if context_cursor is not None:
+            validate_checkpoint_private_payload(context_cursor, path="$.context_cursor")
+
+        async with self._sessions() as session, session.begin():
+            run_row = (
+                await session.execute(
+                    select(RunRow)
+                    .where(
+                        RunRow.id == run_id,
+                        RunRow.status == RunStatus.RUNNING,
+                        RunRow.execution_generation == expected_generation,
+                        RunRow.lease_expires_at.is_not(None),
+                        RunRow.lease_expires_at > func.clock_timestamp(),
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if run_row is None:
+                raise RuntimeError(
+                    f"run {run_id} is not currently owned for checkpoint generation "
+                    f"{expected_generation}"
+                )
+            state = (
+                await session.execute(
+                    select(RunStateRow).where(RunStateRow.run_id == run_id).with_for_update()
+                )
+            ).scalar_one()
+            counter = (
+                await session.execute(
+                    select(RunCounterRow).where(RunCounterRow.run_id == run_id).with_for_update()
+                )
+            ).scalar_one()
+            execution_spec_identity = f"agent-version:{run_row.agent_version_id}"
+            stmt = (
+                pg_insert(CheckpointRow)
+                .values(
+                    run_id=run_id,
+                    schema_version=CHECKPOINT_SCHEMA_VERSION,
+                    runner_version=runner_version.strip(),
+                    run_state_version=state.state_version,
+                    execution_spec_identity=execution_spec_identity,
+                    working_state=working_state,
+                    message_high_water=counter.message_sequence,
+                    event_high_water=counter.event_sequence,
+                    context_cursor=context_cursor,
+                    created_at=func.clock_timestamp(),
+                )
+                .on_conflict_do_update(
+                    index_elements=[CheckpointRow.run_id],
+                    set_={
+                        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+                        "runner_version": runner_version.strip(),
+                        "run_state_version": state.state_version,
+                        "execution_spec_identity": execution_spec_identity,
+                        "working_state": working_state,
+                        "message_high_water": counter.message_sequence,
+                        "event_high_water": counter.event_sequence,
+                        "context_cursor": context_cursor,
+                        "created_at": func.clock_timestamp(),
+                    },
+                )
+            )
+            await session.execute(stmt)
+            row = (
+                await session.execute(select(CheckpointRow).where(CheckpointRow.run_id == run_id))
+            ).scalar_one()
+            return RuntimeCheckpoint(
+                run_id=row.run_id,
+                schema_version=row.schema_version,
+                runner_version=row.runner_version,
+                run_state_version=row.run_state_version,
+                execution_spec_identity=row.execution_spec_identity,
+                working_state=dict(row.working_state),
+                message_high_water=row.message_high_water,
+                event_high_water=row.event_high_water,
+                context_cursor=(None if row.context_cursor is None else dict(row.context_cursor)),
+                created_at=row.created_at,
+            )
+
+    async def load_checkpoint_overlay(
+        self,
+        *,
+        run_id: UUID,
+        runner_version: str,
+        supported_schema_version: int = CHECKPOINT_SCHEMA_VERSION,
+    ) -> RuntimeCheckpoint | None:
+        """Return only an exactly compatible/fresh overlay; durable facts always win."""
+        if supported_schema_version <= 0:
+            raise ValueError("supported_schema_version must be positive")
+        if not runner_version.strip():
+            raise ValueError("runner_version cannot be blank")
+
+        async with self._sessions() as session, session.begin():
+            run_row = (
+                await session.execute(select(RunRow).where(RunRow.id == run_id).with_for_update())
+            ).scalar_one_or_none()
+            if run_row is None:
+                raise KeyError(f"run not found: {run_id}")
+            checkpoint = await session.get(CheckpointRow, run_id)
+            if checkpoint is None:
+                return None
+            # Terminal/waiting Runs have no autonomous private state to restore.
+            if run_row.status not in {RunStatus.QUEUED, RunStatus.RUNNING}:
+                return None
+            state = await session.get(RunStateRow, run_id)
+            counter = await session.get(RunCounterRow, run_id)
+            if state is None or counter is None:
+                raise RuntimeError("run is missing state/counter rows")
+            current_spec = f"agent-version:{run_row.agent_version_id}"
+            compatible = (
+                checkpoint.schema_version == supported_schema_version
+                and checkpoint.runner_version == runner_version.strip()
+                and checkpoint.execution_spec_identity == current_spec
+            )
+            fresh = (
+                checkpoint.run_state_version == state.state_version
+                and checkpoint.message_high_water == counter.message_sequence
+                and checkpoint.event_high_water == counter.event_sequence
+            )
+            if not compatible or not fresh:
+                return None
+            return RuntimeCheckpoint(
+                run_id=checkpoint.run_id,
+                schema_version=checkpoint.schema_version,
+                runner_version=checkpoint.runner_version,
+                run_state_version=checkpoint.run_state_version,
+                execution_spec_identity=checkpoint.execution_spec_identity,
+                working_state=dict(checkpoint.working_state),
+                message_high_water=checkpoint.message_high_water,
+                event_high_water=checkpoint.event_high_water,
+                context_cursor=(
+                    None if checkpoint.context_cursor is None else dict(checkpoint.context_cursor)
+                ),
+                created_at=checkpoint.created_at,
+            )
 
     async def claim_next_run(self, *, worker_id: str, lease_seconds: int) -> Run | None:
         if lease_seconds <= 0:

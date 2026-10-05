@@ -5,6 +5,7 @@ from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
 from agentforge.domain.actions import ActionResolution, ActionSnapshot, ExternalAction
+from agentforge.domain.checkpoints import RuntimeCheckpoint
 from agentforge.domain.enums import ActionResolutionOutcome, ReconciliationBusinessResult
 from agentforge.domain.model_contract import ModelRequest, ModelResponse, ModelToolSpec
 from agentforge.domain.models import (
@@ -392,3 +393,21 @@ class RuntimeStore(Protocol):
     async def load_run_state(self, run_id: UUID) -> RunState: ...
 
     async def load_agent_version(self, agent_version_id: UUID) -> AgentVersion: ...
+
+    async def save_checkpoint(
+        self,
+        *,
+        run_id: UUID,
+        expected_generation: int,
+        runner_version: str,
+        working_state: dict[str, Any],
+        context_cursor: dict[str, Any] | None = None,
+    ) -> RuntimeCheckpoint: ...
+
+    async def load_checkpoint_overlay(
+        self,
+        *,
+        run_id: UUID,
+        runner_version: str,
+        supported_schema_version: int = 1,
+    ) -> RuntimeCheckpoint | None: ...

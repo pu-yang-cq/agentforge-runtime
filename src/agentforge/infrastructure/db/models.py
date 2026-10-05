@@ -579,6 +579,42 @@ class ActionResolutionRow(Base):
     )
 
 
+class CheckpointRow(Base):
+    __tablename__ = "run_checkpoints"
+    __table_args__ = (
+        CheckConstraint("schema_version > 0", name="ck_run_checkpoints_positive_schema"),
+        CheckConstraint(
+            "run_state_version >= 0", name="ck_run_checkpoints_nonnegative_state_version"
+        ),
+        CheckConstraint(
+            "message_high_water >= 0", name="ck_run_checkpoints_nonnegative_message_water"
+        ),
+        CheckConstraint("event_high_water >= 0", name="ck_run_checkpoints_nonnegative_event_water"),
+        CheckConstraint(
+            "length(btrim(runner_version)) > 0", name="ck_run_checkpoints_runner_nonblank"
+        ),
+        CheckConstraint(
+            "length(btrim(execution_spec_identity)) > 0",
+            name="ck_run_checkpoints_execution_spec_nonblank",
+        ),
+    )
+
+    run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    runner_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    run_state_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    execution_spec_identity: Mapped[str] = mapped_column(String(300), nullable=False)
+    working_state: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    message_high_water: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_high_water: Mapped[int] = mapped_column(Integer, nullable=False)
+    context_cursor: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+
+
 class DomainEventRow(Base):
     __tablename__ = "domain_events"
     __table_args__ = (UniqueConstraint("run_id", "sequence"),)
