@@ -214,9 +214,7 @@ def evaluate_policy(
             effective_decision=effective,
             matched_rule_id=selected.rule_id,
             approval=(
-                selected.approval
-                if effective is GovernanceDecision.REQUIRE_APPROVAL
-                else None
+                selected.approval if effective is GovernanceDecision.REQUIRE_APPROVAL else None
             ),
         )
     except AttributeError, KeyError, TypeError, ValueError:
