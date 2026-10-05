@@ -1,0 +1,34 @@
+{
+  "stage": "3.2",
+  "rc_name": "stage3.2-v1.0",
+  "rc_branch": "rc/stage3.2-v1.0",
+  "rc_commit": "3286e348166bc4e704121e5057444767a9cab8ac",
+  "f3_implementation_commit": "9b92830d907379dc132fd433b42e74591adfc392",
+  "f_aggregate_acceptance_run": 37260097961,
+  "stage31_materialized_source_commit": "d3da1ab31ba800e2ffa5cb85bed55c56b3dd6b42",
+  "python": "3.14",
+  "postgres": "18.6-bookworm",
+  "migration_head": "0016_checkpoint_overlay",
+  "immutable_blobs": {
+    ".python-version": "6324d401a069f4020efcf0ff07442724b52f47c2",
+    "uv.lock": "1c9cb3de493f1abc48c30fb8c537ede6fda3feda",
+    "pyproject.toml": "ddd68ded78b4a83af9e176c68108cc06f6d59860",
+    "docker-compose.acceptance.yml": "9c7456d4eca97175c3ce373980f3aced6d360ca9",
+    "alembic.ini": "47bec5a1ac75841382f0acef23c4a957a951de4c"
+  },
+  "stage31_migration_blobs": {
+    "migrations/versions/0001_core_runtime.py": "e461dd96a319f4eb615ae113d8658cf2ba4654e5",
+    "migrations/versions/0002_model_invocation_lifecycle.py": "59ddb1437dd79d720227b21df66ba3f629f00df9",
+    "migrations/versions/0003_denied_tool_calls.py": "4b77fbe5327ca15b0862091c52f41a5d58de73db",
+    "migrations/versions/0004_active_progression_invariants.py": "edc912a7259c883560e8139e02c432d3b8cc0ab4",
+    "migrations/versions/0005_run_terminal_shape.py": "9a8c3db7dcbaf6c0d543f8cce7b874fa9278f4ef"
+  },
+  "required_evidence": {
+    "python314_postgres18_full_gate": true,
+    "stage31_to_stage32_forward_migration": true,
+    "twelve_window_crash_matrix": true,
+    "checkpoint_authority": true,
+    "observable_external_effect_count": true,
+    "no_stage31_migration_edits": true
+  }
+}
