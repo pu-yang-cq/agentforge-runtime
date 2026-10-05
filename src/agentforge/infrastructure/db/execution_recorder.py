@@ -2972,6 +2972,499 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                 ]
             )
 
+    async def record_governed_model_read_allowed_started(
+        self,
+        invocation: ModelInvocation,
+        proposal: ToolProposal,
+        call: ToolCall,
+        intent: GovernanceIntentV1,
+        evaluation: PolicyEvaluation,
+        policy_version_id: UUID,
+        *,
+        expected_generation: int,
+    ) -> RunState:
+        """Atomically persist governed READ ALLOW and STARTED-before-I/O authority."""
+        self._assert_generation(expected_generation)
+        if invocation.status is not ModelInvocationStatus.COMPLETED:
+            raise ValueError("model invocation must be COMPLETED before persistence")
+        if evaluation.effective_decision is not GovernanceDecision.ALLOW:
+            raise ValueError("governed READ ALLOW recorder requires effective ALLOW")
+        if call.status is not ToolCallStatus.EXECUTING:
+            raise ValueError("accepted governed READ must be EXECUTING before persistence")
+        if call.tool_version_id != intent.tool_version_id:
+            raise ValueError("governed READ ToolCall does not match GovernanceIntent ToolVersion")
+
+        async with self._sessions() as session, session.begin():
+            run_row = await _lock_owned_run(
+                session,
+                run_id=invocation.run_id,
+                expected_generation=expected_generation,
+            )
+            _assert_business_progression_allowed(run_row)
+            await _assert_no_active_tool_calls(session, call.run_id)
+            state = await _lock_run_state(session, call.run_id)
+            await _assert_deadline_not_expired(session, run_row)
+            _assert_tool_budget(run_row, state)
+
+            result = await session.execute(
+                update(ModelInvocationRow)
+                .where(
+                    ModelInvocationRow.id == invocation.id,
+                    ModelInvocationRow.run_id == call.run_id,
+                    ModelInvocationRow.status == ModelInvocationStatus.STARTED.value,
+                )
+                .values(
+                    status=invocation.status.value,
+                    outcome_type=invocation.outcome_type,
+                    completed_at=func.clock_timestamp(),
+                )
+            )
+            if cast(CursorResult[Any], result).rowcount != 1:
+                raise RuntimeError("model invocation no longer STARTED")
+
+            session.add(
+                ToolProposalRow(
+                    id=proposal.id,
+                    run_id=proposal.run_id,
+                    model_invocation_id=proposal.model_invocation_id,
+                    tool_name=proposal.tool_name,
+                    arguments=proposal.arguments,
+                )
+            )
+            await session.flush()
+            decision = await _persist_governance_audit_in_consequence(
+                session,
+                run=run_row,
+                proposal=proposal,
+                intent=intent,
+                evaluation=evaluation,
+                policy_version_id=policy_version_id,
+            )
+
+            state.tool_call_count += 1
+            state.tool_attempts_used += 1
+            state.state_version += 1
+            session.add(
+                ToolCallRow(
+                    id=call.id,
+                    run_id=call.run_id,
+                    proposal_id=call.proposal_id,
+                    tool_version_id=call.tool_version_id,
+                    tool_name=call.tool_name,
+                    arguments=call.arguments,
+                    status=call.status,
+                )
+            )
+            await session.flush()
+            attempt = ToolExecutionAttemptRow(
+                id=uuid4(),
+                run_id=call.run_id,
+                tool_call_id=call.id,
+                external_action_id=None,
+                attempt_number=1,
+                execution_generation=expected_generation,
+                status=ToolExecutionAttemptStatus.STARTED,
+            )
+            session.add(attempt)
+
+            seqs = list(await _allocate_event_sequences(session, call.run_id, 4))
+            session.add_all(
+                [
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=call.run_id,
+                        sequence=seqs[0],
+                        event_type=EventType.MODEL_COMPLETED.value,
+                        payload={
+                            "turn": invocation.turn,
+                            "outcome_type": invocation.outcome_type,
+                        },
+                    ),
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=call.run_id,
+                        sequence=seqs[1],
+                        event_type=EventType.TOOL_PROPOSED.value,
+                        payload={
+                            "proposal_id": str(proposal.id),
+                            "tool_name": proposal.tool_name,
+                        },
+                    ),
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=call.run_id,
+                        sequence=seqs[2],
+                        event_type=EventType.POLICY_DECIDED.value,
+                        payload={
+                            "policy_decision_id": str(decision.id),
+                            "proposal_id": str(proposal.id),
+                            "tool_version_id": str(intent.tool_version_id),
+                            "policy_version_id": str(policy_version_id),
+                            "effective_decision": evaluation.effective_decision.value,
+                            "matched_rule_id": evaluation.matched_rule_id,
+                            "intent_digest": intent.digest,
+                        },
+                    ),
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=call.run_id,
+                        sequence=seqs[3],
+                        event_type=EventType.TOOL_STARTED.value,
+                        payload={
+                            "tool_call_id": str(call.id),
+                            "tool_name": call.tool_name,
+                            "attempt_id": str(attempt.id),
+                            "attempt_number": attempt.attempt_number,
+                        },
+                    ),
+                ]
+            )
+            await session.flush()
+            return run_state_from_row(state)
+
+    async def record_governed_model_side_effect_allowed_prepared(
+        self,
+        invocation: ModelInvocation,
+        proposal: ToolProposal,
+        call: ToolCall,
+        snapshot: ActionSnapshot,
+        action: ExternalAction,
+        intent: GovernanceIntentV1,
+        evaluation: PolicyEvaluation,
+        policy_version_id: UUID,
+        *,
+        expected_generation: int,
+    ) -> RunState:
+        """Atomically persist governed no-approval side-effect ALLOW before Action Commit."""
+        self._assert_generation(expected_generation)
+        if invocation.status is not ModelInvocationStatus.COMPLETED:
+            raise ValueError("model invocation must be COMPLETED before persistence")
+        if evaluation.effective_decision is not GovernanceDecision.ALLOW:
+            raise ValueError("governed side-effect recorder requires effective ALLOW")
+        if call.status is not ToolCallStatus.READY:
+            raise ValueError("governed side-effect ToolCall must be READY before persistence")
+        if call.tool_version_id != intent.tool_version_id:
+            raise ValueError("governed side-effect ToolCall does not match GovernanceIntent")
+        if action.status is not ExternalActionStatus.READY:
+            raise ValueError("prepared ExternalAction must be READY")
+        if snapshot.operation_id != action.operation_id:
+            raise ValueError("ActionSnapshot and ExternalAction operation_id mismatch")
+        if action.run_id != call.run_id:
+            raise ValueError("ExternalAction run does not match ToolCall")
+        if action.tool_call_id != call.id or action.action_snapshot_id != snapshot.id:
+            raise ValueError("ExternalAction references do not match prepared intent")
+        if snapshot.tool_version_id != call.tool_version_id:
+            raise ValueError("ActionSnapshot ToolVersion does not match ToolCall")
+        if snapshot.arguments != call.arguments or call.arguments != proposal.arguments:
+            raise ValueError("prepared side-effect arguments diverged")
+
+        async with self._sessions() as session, session.begin():
+            run_row = await _lock_owned_run(
+                session,
+                run_id=call.run_id,
+                expected_generation=expected_generation,
+            )
+            _assert_business_progression_allowed(run_row)
+            await _assert_no_active_tool_calls(session, call.run_id)
+            await _assert_no_started_tool_attempts(session, call.run_id)
+            state = await _lock_run_state(session, call.run_id)
+            await _assert_deadline_not_expired(session, run_row)
+            _assert_tool_budget(run_row, state)
+
+            tool_version = await _lock_stage32_side_effect_tool_version(
+                session,
+                run=run_row,
+                proposal=proposal,
+                call=call,
+            )
+            if snapshot.effect_type is not tool_version.effect_type:
+                raise ValueError("ActionSnapshot effect type does not match durable ToolVersion")
+            if snapshot.credential_ref != tool_version.credential_ref:
+                raise ValueError("ActionSnapshot credential_ref does not match durable ToolVersion")
+
+            result = await session.execute(
+                update(ModelInvocationRow)
+                .where(
+                    ModelInvocationRow.id == invocation.id,
+                    ModelInvocationRow.run_id == call.run_id,
+                    ModelInvocationRow.status == ModelInvocationStatus.STARTED.value,
+                )
+                .values(
+                    status=invocation.status.value,
+                    outcome_type=invocation.outcome_type,
+                    completed_at=func.clock_timestamp(),
+                )
+            )
+            if cast(CursorResult[Any], result).rowcount != 1:
+                raise RuntimeError("model invocation no longer STARTED")
+
+            session.add(
+                ToolProposalRow(
+                    id=proposal.id,
+                    run_id=proposal.run_id,
+                    model_invocation_id=proposal.model_invocation_id,
+                    tool_name=proposal.tool_name,
+                    arguments=proposal.arguments,
+                )
+            )
+            await session.flush()
+            decision = await _persist_governance_audit_in_consequence(
+                session,
+                run=run_row,
+                proposal=proposal,
+                intent=intent,
+                evaluation=evaluation,
+                policy_version_id=policy_version_id,
+            )
+
+            state.tool_call_count += 1
+            state.state_version += 1
+            session.add(
+                ToolCallRow(
+                    id=call.id,
+                    run_id=call.run_id,
+                    proposal_id=call.proposal_id,
+                    tool_version_id=call.tool_version_id,
+                    tool_name=call.tool_name,
+                    arguments=call.arguments,
+                    status=ToolCallStatus.READY,
+                )
+            )
+            session.add(
+                ActionSnapshotRow(
+                    id=snapshot.id,
+                    format_version=snapshot.format_version,
+                    operation_id=snapshot.operation_id,
+                    tool_version_id=snapshot.tool_version_id,
+                    effect_type=snapshot.effect_type,
+                    credential_ref=snapshot.credential_ref,
+                    arguments=snapshot.arguments,
+                    canonical_json=snapshot.canonical_json,
+                    digest=snapshot.digest,
+                )
+            )
+            await session.flush()
+            session.add(
+                ExternalActionRow(
+                    id=action.id,
+                    run_id=action.run_id,
+                    tool_call_id=action.tool_call_id,
+                    action_snapshot_id=action.action_snapshot_id,
+                    operation_id=action.operation_id,
+                    status=ExternalActionStatus.READY,
+                    current_attempt_id=None,
+                )
+            )
+
+            seqs = list(await _allocate_event_sequences(session, call.run_id, 4))
+            session.add_all(
+                [
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=call.run_id,
+                        sequence=seqs[0],
+                        event_type=EventType.MODEL_COMPLETED.value,
+                        payload={
+                            "turn": invocation.turn,
+                            "outcome_type": invocation.outcome_type,
+                        },
+                    ),
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=call.run_id,
+                        sequence=seqs[1],
+                        event_type=EventType.TOOL_PROPOSED.value,
+                        payload={
+                            "proposal_id": str(proposal.id),
+                            "tool_name": proposal.tool_name,
+                        },
+                    ),
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=call.run_id,
+                        sequence=seqs[2],
+                        event_type=EventType.POLICY_DECIDED.value,
+                        payload={
+                            "policy_decision_id": str(decision.id),
+                            "proposal_id": str(proposal.id),
+                            "tool_version_id": str(intent.tool_version_id),
+                            "policy_version_id": str(policy_version_id),
+                            "effective_decision": evaluation.effective_decision.value,
+                            "matched_rule_id": evaluation.matched_rule_id,
+                            "intent_digest": intent.digest,
+                        },
+                    ),
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=call.run_id,
+                        sequence=seqs[3],
+                        event_type=EventType.ACTION_PREPARED.value,
+                        payload={
+                            "tool_call_id": str(call.id),
+                            "external_action_id": str(action.id),
+                            "operation_id": str(action.operation_id),
+                            "snapshot_digest": snapshot.digest,
+                            "effect_type": snapshot.effect_type.value,
+                        },
+                    ),
+                ]
+            )
+            await session.flush()
+            return run_state_from_row(state)
+
+    async def record_governed_model_tool_denied_and_fail_run(
+        self,
+        invocation: ModelInvocation,
+        proposal: ToolProposal,
+        call: ToolCall,
+        run: Run,
+        intent: GovernanceIntentV1,
+        evaluation: PolicyEvaluation,
+        policy_version_id: UUID,
+        *,
+        expected_generation: int,
+    ) -> None:
+        """Atomically persist governed DENY with zero physical execution authority."""
+        self._assert_generation(expected_generation)
+        if invocation.status is not ModelInvocationStatus.COMPLETED:
+            raise ValueError("model invocation must be COMPLETED before persistence")
+        if evaluation.effective_decision is not GovernanceDecision.DENY:
+            raise ValueError("governed DENY recorder requires effective DENY")
+        if run.status is not RunStatus.FAILED:
+            raise ValueError("governed DENY persistence requires a FAILED run")
+        if call.status is not ToolCallStatus.DENIED:
+            raise ValueError("governed DENY requires a DENIED ToolCall")
+        if call.tool_version_id != intent.tool_version_id:
+            raise ValueError("governed DENY ToolCall does not match GovernanceIntent ToolVersion")
+
+        async with self._sessions() as session, session.begin():
+            row = await _lock_owned_run(
+                session,
+                run_id=run.id,
+                expected_generation=expected_generation,
+            )
+            _assert_business_progression_allowed(row)
+            await _assert_no_active_tool_calls(session, run.id)
+            await _assert_deadline_not_expired(session, row)
+
+            result = await session.execute(
+                update(ModelInvocationRow)
+                .where(
+                    ModelInvocationRow.id == invocation.id,
+                    ModelInvocationRow.run_id == run.id,
+                    ModelInvocationRow.status == ModelInvocationStatus.STARTED.value,
+                )
+                .values(
+                    status=invocation.status.value,
+                    outcome_type=invocation.outcome_type,
+                    completed_at=func.clock_timestamp(),
+                )
+            )
+            if cast(CursorResult[Any], result).rowcount != 1:
+                raise RuntimeError("model invocation no longer STARTED")
+            await _assert_no_started_model_invocations(session, run.id)
+
+            session.add(
+                ToolProposalRow(
+                    id=proposal.id,
+                    run_id=proposal.run_id,
+                    model_invocation_id=proposal.model_invocation_id,
+                    tool_name=proposal.tool_name,
+                    arguments=proposal.arguments,
+                )
+            )
+            await session.flush()
+            decision = await _persist_governance_audit_in_consequence(
+                session,
+                run=row,
+                proposal=proposal,
+                intent=intent,
+                evaluation=evaluation,
+                policy_version_id=policy_version_id,
+            )
+
+            state = await _lock_run_state(session, run.id)
+            state.tool_call_count += 1
+            state.state_version += 1
+            session.add(
+                ToolCallRow(
+                    id=call.id,
+                    run_id=call.run_id,
+                    proposal_id=call.proposal_id,
+                    tool_version_id=call.tool_version_id,
+                    tool_name=call.tool_name,
+                    arguments=call.arguments,
+                    status=call.status,
+                    error=call.error,
+                )
+            )
+
+            row.status = RunStatus.FAILED
+            row.failure_reason = run.failure_reason
+            row.completed_at = func.clock_timestamp()
+            row.owner_worker_id = None
+            row.lease_expires_at = None
+
+            seqs = list(await _allocate_event_sequences(session, run.id, 5))
+            session.add_all(
+                [
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[0],
+                        event_type=EventType.MODEL_COMPLETED.value,
+                        payload={
+                            "turn": invocation.turn,
+                            "outcome_type": invocation.outcome_type,
+                        },
+                    ),
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[1],
+                        event_type=EventType.TOOL_PROPOSED.value,
+                        payload={
+                            "proposal_id": str(proposal.id),
+                            "tool_name": proposal.tool_name,
+                        },
+                    ),
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[2],
+                        event_type=EventType.POLICY_DECIDED.value,
+                        payload={
+                            "policy_decision_id": str(decision.id),
+                            "proposal_id": str(proposal.id),
+                            "tool_version_id": str(intent.tool_version_id),
+                            "policy_version_id": str(policy_version_id),
+                            "effective_decision": evaluation.effective_decision.value,
+                            "matched_rule_id": evaluation.matched_rule_id,
+                            "intent_digest": intent.digest,
+                        },
+                    ),
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[3],
+                        event_type=EventType.TOOL_DENIED.value,
+                        payload={
+                            "tool_call_id": str(call.id),
+                            "tool_name": call.tool_name,
+                            "error": call.error,
+                        },
+                    ),
+                    DomainEventRow(
+                        id=uuid4(),
+                        run_id=run.id,
+                        sequence=seqs[4],
+                        event_type=EventType.RUN_FAILED.value,
+                        payload={"reason": run.failure_reason},
+                    ),
+                ]
+            )
+            await session.flush()
+
     async def record_model_final_decision(
         self,
         invocation: ModelInvocation,
