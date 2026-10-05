@@ -186,8 +186,7 @@ def test_0019_approval_intent_migration_extends_existing_progression_guards() ->
     assert "ALTER TYPE run_status ADD VALUE IF NOT EXISTS 'WAITING_APPROVAL'" in migration
     assert "ALTER TYPE tool_call_status ADD VALUE IF NOT EXISTS 'AWAITING_APPROVAL'" in migration
     assert (
-        "ALTER TYPE external_action_status ADD VALUE IF NOT EXISTS 'AWAITING_APPROVAL'"
-        in migration
+        "ALTER TYPE external_action_status ADD VALUE IF NOT EXISTS 'AWAITING_APPROVAL'" in migration
     )
     assert "uq_tool_calls_one_active_per_run" in migration
     assert "uq_external_actions_one_nonterminal_per_run" in migration
@@ -218,9 +217,7 @@ async def test_run_manager_side_effect_require_approval_enters_waiting_without_i
                 name="effect",
                 description="effect",
                 input_schema={"type": "object"},
-                func=lambda invocation: (
-                    calls.append(str(invocation.operation_id)) or {"ok": True}
-                ),
+                func=lambda invocation: calls.append(str(invocation.operation_id)) or {"ok": True},
             )
         ]
     )
@@ -295,10 +292,7 @@ async def test_run_manager_side_effect_require_approval_enters_waiting_without_i
     assert journal.external_actions[0].current_attempt_id is None
     assert len(journal.approval_requests) == 1
     assert journal.approval_requests[0].external_action_id == journal.external_actions[0].id
-    assert (
-        journal.approval_requests[0].action_snapshot_digest
-        == journal.action_snapshots[0].digest
-    )
+    assert journal.approval_requests[0].action_snapshot_digest == journal.action_snapshots[0].digest
     assert journal.tool_attempts == []
 
 
