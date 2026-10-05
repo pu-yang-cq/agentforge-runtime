@@ -2016,9 +2016,7 @@ class RunManager:
                         governed_plan.evaluation.effective_decision
                         is GovernanceDecision.REQUIRE_APPROVAL
                     ):
-                        raise RuntimeError(
-                            "REQUIRE_APPROVAL consequence belongs to Stage 3.3-C"
-                        )
+                        raise RuntimeError("REQUIRE_APPROVAL consequence belongs to Stage 3.3-C")
                     if governed_plan.evaluation.effective_decision is GovernanceDecision.DENY:
                         assert governed_plan.denied_call is not None
                         call = governed_plan.denied_call
