@@ -22,6 +22,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from agentforge.domain.enums import (
     ActionResolutionOutcome,
+    ApprovalRequestStatus,
     ExternalActionStatus,
     GovernanceDecision,
     GovernanceMode,
@@ -283,8 +284,9 @@ class RunRow(Base):
             name="ck_runs_failed_shape",
         ),
         CheckConstraint(
-            "status NOT IN ('CREATED', 'QUEUED', 'RUNNING', 'WAITING_ACTION_RESOLUTION') "
-            "OR completed_at IS NULL",
+            "status NOT IN ("
+            "'CREATED', 'QUEUED', 'RUNNING', 'WAITING_ACTION_RESOLUTION', 'WAITING_APPROVAL'"
+            ") OR completed_at IS NULL",
             name="ck_runs_nonterminal_has_no_completed_at",
         ),
         CheckConstraint(
@@ -518,7 +520,7 @@ class ToolCallRow(Base):
             "uq_tool_calls_one_active_per_run",
             "run_id",
             unique=True,
-            postgresql_where=text("status IN ('READY', 'EXECUTING')"),
+            postgresql_where=text("status IN ('AWAITING_APPROVAL', 'READY', 'EXECUTING')"),
         ),
     )
 
@@ -580,7 +582,10 @@ class ExternalActionRow(Base):
             "run_id",
             unique=True,
             postgresql_where=text(
-                "status IN ('READY', 'EXECUTING', 'UNKNOWN', 'RECONCILING', 'MANUAL_REVIEW')"
+                "status IN ("
+                "'AWAITING_APPROVAL', 'READY', 'EXECUTING', 'UNKNOWN', "
+                "'RECONCILING', 'MANUAL_REVIEW'"
+                ")"
             ),
         ),
     )
@@ -611,6 +616,82 @@ class ExternalActionRow(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
     )
+
+
+class ApprovalRequestRow(Base):
+    __tablename__ = "approval_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "length(governance_intent_digest) = 64",
+            name="ck_approval_requests_intent_digest_length",
+        ),
+        CheckConstraint(
+            "action_snapshot_digest IS NULL OR length(action_snapshot_digest) = 64",
+            name="ck_approval_requests_snapshot_digest_length",
+        ),
+        CheckConstraint(
+            "(external_action_id IS NULL AND action_snapshot_digest IS NULL) OR "
+            "(external_action_id IS NOT NULL AND action_snapshot_digest IS NOT NULL)",
+            name="ck_approval_requests_action_binding_shape",
+        ),
+        CheckConstraint(
+            "length(btrim(requested_by_principal)) > 0",
+            name="ck_approval_requests_nonblank_requester",
+        ),
+        CheckConstraint(
+            "length(btrim(principal_scope)) > 0",
+            name="ck_approval_requests_nonblank_scope",
+        ),
+        CheckConstraint(
+            "length(btrim(required_approver_role)) > 0",
+            name="ck_approval_requests_nonblank_required_role",
+        ),
+        CheckConstraint(
+            "expires_at > created_at",
+            name="ck_approval_requests_expiry_after_creation",
+        ),
+        CheckConstraint(
+            "(status = 'PENDING' AND decided_at IS NULL) OR "
+            "(status <> 'PENDING' AND decided_at IS NOT NULL)",
+            name="ck_approval_requests_status_decided_shape",
+        ),
+        UniqueConstraint("tool_call_id", name="uq_approval_requests_tool_call"),
+        UniqueConstraint("policy_decision_id", name="uq_approval_requests_policy_decision"),
+        UniqueConstraint("external_action_id", name="uq_approval_requests_external_action"),
+        Index(
+            "uq_approval_requests_one_pending_per_run",
+            "run_id",
+            unique=True,
+            postgresql_where=text("status = 'PENDING'"),
+        ),
+        Index("ix_approval_requests_scope_status", "principal_scope", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    run_id: Mapped[UUID] = mapped_column(ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False)
+    tool_call_id: Mapped[UUID] = mapped_column(
+        ForeignKey("tool_calls.id", ondelete="RESTRICT"), nullable=False
+    )
+    external_action_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("external_actions.id", ondelete="RESTRICT"), nullable=True
+    )
+    policy_decision_id: Mapped[UUID] = mapped_column(
+        ForeignKey("policy_decisions.id", ondelete="RESTRICT"), nullable=False
+    )
+    governance_intent_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    action_snapshot_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    requested_by_principal: Mapped[str] = mapped_column(String(200), nullable=False)
+    principal_scope: Mapped[str] = mapped_column(String(200), nullable=False)
+    required_approver_role: Mapped[str] = mapped_column(String(100), nullable=False)
+    separation_of_duties: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    status: Mapped[ApprovalRequestStatus] = mapped_column(
+        Enum(ApprovalRequestStatus, name="approval_request_status"), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ToolExecutionAttemptRow(Base):
