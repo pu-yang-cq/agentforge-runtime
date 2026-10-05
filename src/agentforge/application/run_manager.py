@@ -1167,8 +1167,7 @@ class ExecutionJournal(ExecutionRecorder):
         *,
         expected_generation: int,
     ) -> RunState:
-        if self.run_state is None:
-            raise RuntimeError("journal run state is not seeded")
+        run, state = self._limits(call.run_id)
         approval = evaluation.approval
         if evaluation.effective_decision is not GovernanceDecision.REQUIRE_APPROVAL:
             raise ValueError("READ approval journal requires REQUIRE_APPROVAL")
@@ -1186,20 +1185,20 @@ class ExecutionJournal(ExecutionRecorder):
         self._assert_tool_budget(call.run_id)
         self._persist_completed_invocation(invocation)
         self._append_event(
-            self.seeded_run,
+            run,
             EventType.MODEL_COMPLETED,
             {"turn": invocation.turn, "outcome_type": invocation.outcome_type},
         )
         self.proposals.append(proposal)
         self._append_event(
-            self.seeded_run,
+            run,
             EventType.TOOL_PROPOSED,
             {"proposal_id": str(proposal.id), "tool_name": proposal.tool_name},
         )
         self._record_governance_candidate(intent, evaluation, policy_version_id)
         decision_id = uuid4()
         self._append_event(
-            self.seeded_run,
+            run,
             EventType.POLICY_DECIDED,
             {
                 "policy_decision_id": str(decision_id),
@@ -1212,14 +1211,14 @@ class ExecutionJournal(ExecutionRecorder):
             },
         )
 
-        self.run_state.tool_call_count += 1
-        self.run_state.state_version += 1
+        state.tool_call_count += 1
+        state.state_version += 1
         self.tool_calls.append(call)
 
         now = utcnow()
         expires_at = min(
             now + timedelta(seconds=approval.ttl_seconds),
-            self.seeded_run.deadline_at,
+            run.deadline_at,
         )
         request = ApprovalRequest(
             id=uuid4(),
@@ -1239,7 +1238,7 @@ class ExecutionJournal(ExecutionRecorder):
         )
         self.approval_requests.append(request)
         self._append_event(
-            self.seeded_run,
+            run,
             EventType.APPROVAL_REQUESTED,
             {
                 "approval_request_id": str(request.id),
@@ -1251,7 +1250,7 @@ class ExecutionJournal(ExecutionRecorder):
                 "expires_at": expires_at.isoformat(),
             },
         )
-        return self.run_state
+        return state
 
     async def record_governed_model_side_effect_approval_pending(
         self,
@@ -1266,8 +1265,7 @@ class ExecutionJournal(ExecutionRecorder):
         *,
         expected_generation: int,
     ) -> RunState:
-        if self.run_state is None:
-            raise RuntimeError("journal run state is not seeded")
+        run, state = self._limits(call.run_id)
         approval = evaluation.approval
         if evaluation.effective_decision is not GovernanceDecision.REQUIRE_APPROVAL:
             raise ValueError("side-effect approval journal requires REQUIRE_APPROVAL")
@@ -1295,20 +1293,20 @@ class ExecutionJournal(ExecutionRecorder):
         self._assert_tool_budget(call.run_id)
         self._persist_completed_invocation(invocation)
         self._append_event(
-            self.seeded_run,
+            run,
             EventType.MODEL_COMPLETED,
             {"turn": invocation.turn, "outcome_type": invocation.outcome_type},
         )
         self.proposals.append(proposal)
         self._append_event(
-            self.seeded_run,
+            run,
             EventType.TOOL_PROPOSED,
             {"proposal_id": str(proposal.id), "tool_name": proposal.tool_name},
         )
         self._record_governance_candidate(intent, evaluation, policy_version_id)
         decision_id = uuid4()
         self._append_event(
-            self.seeded_run,
+            run,
             EventType.POLICY_DECIDED,
             {
                 "policy_decision_id": str(decision_id),
@@ -1321,13 +1319,13 @@ class ExecutionJournal(ExecutionRecorder):
             },
         )
 
-        self.run_state.tool_call_count += 1
-        self.run_state.state_version += 1
+        state.tool_call_count += 1
+        state.state_version += 1
         self.tool_calls.append(call)
         self.action_snapshots.append(snapshot)
         self.external_actions.append(action)
         self._append_event(
-            self.seeded_run,
+            run,
             EventType.ACTION_PREPARED,
             {
                 "tool_call_id": str(call.id),
@@ -1342,7 +1340,7 @@ class ExecutionJournal(ExecutionRecorder):
         now = utcnow()
         expires_at = min(
             now + timedelta(seconds=approval.ttl_seconds),
-            self.seeded_run.deadline_at,
+            run.deadline_at,
         )
         request = ApprovalRequest(
             id=uuid4(),
@@ -1362,7 +1360,7 @@ class ExecutionJournal(ExecutionRecorder):
         )
         self.approval_requests.append(request)
         self._append_event(
-            self.seeded_run,
+            run,
             EventType.APPROVAL_REQUESTED,
             {
                 "approval_request_id": str(request.id),
@@ -1376,7 +1374,7 @@ class ExecutionJournal(ExecutionRecorder):
                 "expires_at": expires_at.isoformat(),
             },
         )
-        return self.run_state
+        return state
 
     async def record_governed_model_read_allowed_started(
         self,
