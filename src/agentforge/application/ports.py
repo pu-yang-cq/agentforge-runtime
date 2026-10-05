@@ -12,6 +12,11 @@ from agentforge.domain.governance import (
     GovernancePolicyVersion,
     PrincipalContext,
 )
+from agentforge.domain.governance_decisions import (
+    GovernanceIntentV1,
+    PolicyDecision,
+    PolicyEvaluation,
+)
 from agentforge.domain.model_contract import ModelRequest, ModelResponse, ModelToolSpec
 from agentforge.domain.models import (
     AgentVersion,
@@ -118,6 +123,18 @@ class GovernancePolicyStore(Protocol):
     async def retire(self, policy_version_id: UUID) -> GovernancePolicyVersion: ...
 
     async def get(self, policy_version_id: UUID) -> GovernancePolicyVersion | None: ...
+
+
+class GovernanceDecisionStore(Protocol):
+    async def record(
+        self,
+        *,
+        intent: GovernanceIntentV1,
+        policy_version_id: UUID,
+        evaluation: PolicyEvaluation,
+    ) -> PolicyDecision: ...
+
+    async def get_by_proposal(self, proposal_id: UUID) -> PolicyDecision | None: ...
 
 
 class ExecutionRecorder(Protocol):
