@@ -486,7 +486,7 @@ async def test_b_cancel_wins_before_consequence_and_rolls_back_policy_business_f
     assert decision_count == 0
     assert call_count == 0
     assert attempt_count == 0
-    assert invocation is not None and invocation.status.value == "STARTED"
+    assert invocation is not None and invocation.status == "STARTED"
     assert fx.physical_calls == []
     await fx.engine.dispose()
 
