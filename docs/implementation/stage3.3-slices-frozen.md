@@ -148,7 +148,7 @@ Acceptance focus:
 
 ## 4. Stage 3.3-C — Durable Approval Intent
 
-Status: **ACTIVE**
+Status: **ACCEPTED / FROZEN**
 
 Governance Amendment 001:
 - **ACCEPTED / FROZEN**
@@ -157,12 +157,24 @@ Governance Amendment 001:
 - acceptance artifact:
   `docs/implementation/stage3.3-governance-amendment-001-accepted.md`
 
-Implementation progress:
-- C1 Domain / Schema / Migration: **IMPLEMENTED / READ-BACK VERIFIED**
-- C2 Atomic REQUIRE_APPROVAL Pending Consequence: **IMPLEMENTED / READ-BACK VERIFIED**
-- C3 Restart / Claim / Terminal Guards + Review Projection: **UNLOCKED / ACTIVE**
+Accepted Stage 3.3-C semantic candidate:
+- `400336d6086c550039626f6717b6401410cc8e3b`
 
-C remains unaccepted until the complete Stage 3.3-C gate passes.
+Successful independent C gate:
+- `37329756162`
+
+Acceptance artifact:
+- `docs/implementation/stage3.3-c-accepted.md`
+
+Execution record:
+- `docs/execution/stage3.3-c-execution-record.md`
+
+Implementation progress:
+- C1 Domain / Schema / Migration: **ACCEPTED / FROZEN**
+- C2 Atomic REQUIRE_APPROVAL Pending Consequence: **ACCEPTED / FROZEN**
+- C3 Restart / Claim / Terminal Guards + Review Projection: **ACCEPTED / FROZEN**
+
+Stage 3.3-D is now unlocked.
 
 Scope:
 - Run WAITING_APPROVAL;
@@ -302,13 +314,10 @@ Stage 3.3-B
 ✅ ACCEPTED / FROZEN
 
 Stage 3.3-C
-🟡 ACTIVE
-  C1 ✅ IMPLEMENTED / READ-BACK VERIFIED
-  C2 ✅ IMPLEMENTED / READ-BACK VERIFIED
-  C3 🔓 ACTIVE
+✅ ACCEPTED / FROZEN
 
 Stage 3.3-D
-🔒 LOCKED
+🔓 UNLOCKED
 
 Stage 3.3-E
 🔒 LOCKED
