@@ -8,14 +8,14 @@ Production-Grade Agent Runtime & Governance Platform.
 
 Stage 3.1 passed the independent Python 3.14 + PostgreSQL 18 target acceptance.
 
-**Stage 3.2 Durable Runtime Design — V1.0 ACCEPTED / FROZEN**
+**Stage 3.2 Runtime — V1.0 ACCEPTED / FROZEN**
 
-The Stage 3.2 design and its acceptance contract have completed:
+Authoritative immutable runtime release:
 
-`Design -> Self Review -> Scenario Validation -> Adversarial Review -> Revision -> Re-review -> Final Review -> Acceptance -> Freeze`
-
-Stage 3.2 runtime implementation is now **UNLOCKED**. Stage 3.2 runtime acceptance
-remains locked until the implementation passes the frozen acceptance criteria.
+- branch: `rc/stage3.2-v1.0-r2`
+- SHA: `fa747268cfbf1d5b57e5796b9cbc767abc3d4e0c`
+- final gate: `37262139363`
+- acceptance: `docs/implementation/stage3.2-g-accepted.md`
 
 Frozen Stage 3.2 design artifacts:
 
@@ -23,6 +23,23 @@ Frozen Stage 3.2 design artifacts:
 - `docs/acceptance/stage3.2-acceptance-v1.0-frozen.md`
 - `docs/acceptance/stage3.2-design-v1.0-accepted.md`
 - frozen branch: `stage3.2-design-v1.0-frozen`
+
+**Stage 3.3 Governance Design — V1.0 ACCEPTED / FROZEN**
+
+The governance design completed:
+
+`Design V0.1 -> Self Review -> Scenario Validation -> Adversarial Review -> V0.2 -> Re-review -> V0.3 -> Final Review -> V1.0 Freeze`
+
+Frozen Stage 3.3 design artifacts:
+
+- `docs/design/stage3.3-governance-v1.0-frozen.md`
+- `docs/acceptance/stage3.3-governance-acceptance-v1.0-frozen.md`
+- `docs/acceptance/stage3.3-governance-design-v1.0-accepted.md`
+- frozen branch: `stage3.3-governance-design-v1.0-frozen`
+
+Stage 3.3 implementation is now **UNLOCKED**.
+Stage 3.3 runtime acceptance remains **LOCKED** until implementation passes the frozen
+Governance Acceptance Criteria V1.0.
 
 Stage 3.1 accepted immutable source:
 
@@ -40,9 +57,10 @@ Stage 3.1 accepted immutable source:
 
 Stage 3.1 behavior remains frozen.
 
-Stage 3.2 implementation must conform to the frozen Durable Runtime Design V1.0
-and Acceptance Criteria V1.0. Any correctness-affecting deviation requires an
-explicit design amendment and re-review.
+Stage 3.2 runtime behavior remains frozen at the accepted immutable RC.
 
-Stage 3.3 Governance remains locked until Stage 3.2 runtime implementation is
-accepted.
+Stage 3.3 implementation must conform to the frozen Governance Design V1.0 and Governance
+Acceptance Criteria V1.0. Any correctness-affecting deviation requires an explicit design
+amendment and re-review.
+
+Later stages remain locked until Stage 3.3 runtime implementation is accepted.
