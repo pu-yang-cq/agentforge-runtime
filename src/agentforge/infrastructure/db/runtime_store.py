@@ -492,9 +492,7 @@ class PostgresRuntimeStore(RuntimeStore):
             if row.status is RunStatus.WAITING_APPROVAL:
                 if action is not None:
                     if action.status is not ExternalActionStatus.AWAITING_APPROVAL:
-                        raise RuntimeError(
-                            "WAITING_APPROVAL Run has a non-pending ExternalAction"
-                        )
+                        raise RuntimeError("WAITING_APPROVAL Run has a non-pending ExternalAction")
                     pending_call = (
                         await session.execute(
                             select(ToolCallRow)
@@ -540,9 +538,7 @@ class PostgresRuntimeStore(RuntimeStore):
                     raise RuntimeError("WAITING_APPROVAL Run is missing PENDING ApprovalRequest")
                 if pending_request.tool_call_id != pending_call.id:
                     raise RuntimeError("PENDING ApprovalRequest ToolCall binding mismatch")
-                if pending_request.external_action_id != (
-                    None if action is None else action.id
-                ):
+                if pending_request.external_action_id != (None if action is None else action.id):
                     raise RuntimeError("PENDING ApprovalRequest ExternalAction binding mismatch")
 
                 db_now = await session.scalar(select(func.clock_timestamp()))
