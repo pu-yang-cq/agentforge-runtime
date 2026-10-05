@@ -18,7 +18,9 @@ from agentforge.application.governed_consequence import (
 )
 from agentforge.application.ports import ExecutionRecorder, ReconciliationResult
 from agentforge.domain.actions import ActionSnapshot, ExternalAction
+from agentforge.domain.approvals import ApprovalRequest
 from agentforge.domain.enums import (
+    ApprovalRequestStatus,
     EventType,
     ExternalActionStatus,
     GovernanceDecision,
@@ -73,6 +75,7 @@ class ExecutionJournal(ExecutionRecorder):
     external_actions: list[ExternalAction] = field(default_factory=list)
     governance_intents: list[GovernanceIntentV1] = field(default_factory=list)
     governance_evaluations: list[PolicyEvaluation] = field(default_factory=list)
+    approval_requests: list[ApprovalRequest] = field(default_factory=list)
     run_state: RunState | None = None
     seeded_run: Run | None = None
 
@@ -119,7 +122,12 @@ class ExecutionJournal(ExecutionRecorder):
             call
             for call in self.tool_calls
             if call.run_id == run_id
-            and call.status in {ToolCallStatus.READY, ToolCallStatus.EXECUTING}
+            and call.status
+            in {
+                ToolCallStatus.AWAITING_APPROVAL,
+                ToolCallStatus.READY,
+                ToolCallStatus.EXECUTING,
+            }
         ]
         if active:
             raise RuntimeError(
@@ -133,6 +141,7 @@ class ExecutionJournal(ExecutionRecorder):
             if action.run_id == run_id
             and action.status
             in {
+                ExternalActionStatus.AWAITING_APPROVAL,
                 ExternalActionStatus.UNKNOWN,
                 ExternalActionStatus.RECONCILING,
                 ExternalActionStatus.MANUAL_REVIEW,
