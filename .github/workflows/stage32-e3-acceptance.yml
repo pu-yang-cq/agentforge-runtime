@@ -1,0 +1,116 @@
+name: Stage 3.2-E3 Acceptance
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/RUN_STAGE32_E3_ACCEPTANCE
+
+permissions:
+  contents: read
+
+jobs:
+  accept:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Verify committed E3 surface
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f docs/implementation/stage3.2-e1-cancellation.md
+          test -f docs/implementation/stage3.2-e2-action-resolution.md
+          test -f docs/implementation/stage3.2-e-slices-frozen.md
+          test ! -f scripts/stage32_e3_patch.py
+          grep -R 'CANCEL_WON_BEFORE_SIDE_EFFECT_RESULT' -n src tests
+          grep -R 'CANCEL_WON_BEFORE_RECONCILIATION_RESULT' -n src tests
+          grep -R 'progression authority is fenced' -n src tests
+          grep -R 'test_e3_result_wins_then_cancellation_does_not_rollback_succeeded_action' -n tests
+          grep -R 'test_e3_cancel_wins_side_effect_result_records_truth_and_fences_worker' -n tests
+          grep -R 'test_e3_cancellation_wins_reconciliation_success_truth_without_continuation' -n tests
+          grep -R 'test_e3_manual_resolution_wins_late_stale_result_cannot_overwrite' -n tests
+
+      - name: Prove late physical result is serialized by Run
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          source = Path("src/agentforge/infrastructure/db/execution_recorder.py").read_text()
+          tree = ast.parse(source)
+          fn = next(
+              n for n in ast.walk(tree)
+              if isinstance(n, ast.AsyncFunctionDef) and n.name == "record_side_effect_succeeded"
+          )
+          text = ast.get_source_segment(source, fn) or ""
+          required = [
+              "_lock_owned_run",
+              "cancellation_fenced = run_row.cancel_requested",
+              "RunStatus.CANCELLED",
+              "CANCEL_WON_BEFORE_SIDE_EFFECT_RESULT",
+              "StaleExecutorError",
+          ]
+          for token in required:
+              if token not in text:
+                  raise SystemExit(f"missing physical-result authority invariant: {token}")
+          print("late physical-result cancellation fence: PASS")
+          PY
+
+      - name: Prove reconciliation cannot reopen cancelled progression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          source = Path("src/agentforge/infrastructure/db/execution_recorder.py").read_text()
+          tree = ast.parse(source)
+          fn = next(
+              n for n in ast.walk(tree)
+              if isinstance(n, ast.AsyncFunctionDef) and n.name == "record_reconciliation_result"
+          )
+          text = ast.get_source_segment(source, fn) or ""
+          required = [
+              "cancellation_fenced",
+              "run_row.cancel_requested",
+              "RunStatus.CANCELLED",
+              "CANCEL_WON_BEFORE_RECONCILIATION_RESULT",
+          ]
+          for token in required:
+              if token not in text:
+                  raise SystemExit(f"missing reconciliation cancellation fence: {token}")
+          print("reconciliation cancellation fence: PASS")
+          PY
+
+      - name: Prove ActionResolution remains final and single-valued
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          runtime = Path("src/agentforge/infrastructure/db/runtime_store.py").read_text()
+          models = Path("src/agentforge/infrastructure/db/models.py").read_text()
+          required = [
+              "external action already has a contradictory final resolution",
+              "only MANUAL_REVIEW ExternalAction may be manually resolved",
+              "Post-terminal resolution updates facts only. Cancellation remains final.",
+          ]
+          for token in required:
+              if token not in runtime:
+                  raise SystemExit(f"missing ActionResolution finality invariant: {token}")
+          if 'UniqueConstraint(\n            "external_action_id",\n            name="uq_action_resolutions_external_action"' not in models:
+              raise SystemExit("ActionResolution is not single-valued per ExternalAction")
+          print("ActionResolution finality + uniqueness: PASS")
+          PY
+
+      - name: Run independent E3 acceptance gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ./scripts/validate_stage31_containerized.sh
