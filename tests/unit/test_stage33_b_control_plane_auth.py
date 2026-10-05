@@ -195,9 +195,7 @@ def test_governed_get_hides_cross_scope_and_requires_read_any_for_non_requester(
     )
     assert cross_scope.get(f"/v1/runs/{run.id}").status_code == 404
 
-    same_scope_no_role = TestClient(
-        create_app(store, TrustedResolver(_principal("other")))
-    )
+    same_scope_no_role = TestClient(create_app(store, TrustedResolver(_principal("other"))))
     assert same_scope_no_role.get(f"/v1/runs/{run.id}").status_code == 403
 
     owner = TestClient(create_app(store, TrustedResolver(_principal("owner"))))
