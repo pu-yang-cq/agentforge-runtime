@@ -1,1 +1,2 @@
 trigger independent Stage 3.2-F2 acceptance
+retry after source-package path fix
