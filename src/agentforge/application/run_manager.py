@@ -2255,7 +2255,51 @@ class RunManager:
                         governed_plan.evaluation.effective_decision
                         is GovernanceDecision.REQUIRE_APPROVAL
                     ):
-                        raise RuntimeError("REQUIRE_APPROVAL consequence belongs to Stage 3.3-C")
+                        assert governed_plan.pending_call is not None
+                        try:
+                            if governed_plan.pending_snapshot is None:
+                                await recorder.record_governed_model_read_approval_pending(
+                                    invocation,
+                                    proposal,
+                                    governed_plan.pending_call,
+                                    governed_plan.intent,
+                                    governed_plan.evaluation,
+                                    governance_policy.id,
+                                    expected_generation=expected_generation,
+                                )
+                            else:
+                                assert governed_plan.pending_action is not None
+                                await recorder.record_governed_model_side_effect_approval_pending(
+                                    invocation,
+                                    proposal,
+                                    governed_plan.pending_call,
+                                    governed_plan.pending_snapshot,
+                                    governed_plan.pending_action,
+                                    governed_plan.intent,
+                                    governed_plan.evaluation,
+                                    governance_policy.id,
+                                    expected_generation=expected_generation,
+                                )
+                        except BusinessProgressionBlockedError as blocked:
+                            if blocked.code == "CANCEL_REQUESTED":
+                                run.request_cancel()
+                                await recorder.record_model_result_discarded_and_cancel_run(
+                                    invocation,
+                                    run,
+                                    blocked.failure_reason,
+                                    expected_generation=expected_generation,
+                                )
+                                return None
+                            run.fail(blocked.failure_reason)
+                            await recorder.record_model_result_discarded_and_fail_run(
+                                invocation,
+                                run,
+                                blocked.failure_reason,
+                                expected_generation=expected_generation,
+                            )
+                            raise RunExecutionFailedError(run.failure_reason) from blocked
+                        run.wait_for_approval()
+                        return None
                     if governed_plan.evaluation.effective_decision is GovernanceDecision.DENY:
                         assert governed_plan.denied_call is not None
                         call = governed_plan.denied_call
