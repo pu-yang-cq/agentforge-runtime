@@ -82,6 +82,11 @@ def test_pending_domain_states_enter_without_resume_semantics() -> None:
     assert action.status is ExternalActionStatus.AWAITING_APPROVAL
     assert action.current_attempt_id is None
 
+    with pytest.raises(ValueError, match="cannot complete run"):
+        run.complete("must not complete while approval is pending")
+    with pytest.raises(ValueError, match="cannot fail run"):
+        run.fail("must not fail through unrelated terminal path")
+
     assert not hasattr(Run, "resume_after_approval")
     assert not hasattr(ApprovalRequest, "approve")
     assert not hasattr(ApprovalRequest, "deny")
