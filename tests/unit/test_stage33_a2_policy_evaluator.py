@@ -240,7 +240,10 @@ def test_capability_envelope_never_broadens_tool_binding() -> None:
         effect_type=ToolEffectType.DESTRUCTIVE,
     )
 
-    def decision(binding: ToolBinding, policy: GovernancePolicyVersion = allow) -> GovernanceDecision:
+    def decision(
+        binding: ToolBinding,
+        policy: GovernancePolicyVersion = allow,
+    ) -> GovernanceDecision:
         return evaluate_policy(
             policy,
             principal=principal,
