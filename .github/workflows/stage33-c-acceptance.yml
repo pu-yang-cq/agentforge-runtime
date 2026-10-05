@@ -26,6 +26,11 @@ jobs:
           test -f docs/acceptance/stage3.3-governance-acceptance-v1.0-frozen.md
           test -f docs/implementation/stage3.3-a-accepted.md
           test -f docs/implementation/stage3.3-b-accepted.md
+          test -f docs/design/stage3.3-governance-amendment-001-approval-metadata.md
+          test -f docs/acceptance/stage3.3-governance-amendment-001-approval-metadata.md
+          test -f docs/implementation/stage3.3-governance-amendment-001-accepted.md
+          grep -Fq '8d7b214c9ce38e201da364af59dcc35a90565205'             docs/implementation/stage3.3-governance-amendment-001-accepted.md
+          grep -Fq '37325262562'             docs/implementation/stage3.3-governance-amendment-001-accepted.md
           test -f docs/implementation/stage3.3-slices-frozen.md
           test -f tests/unit/test_stage33_c_approval_intent.py
           test -f tests/integration/test_stage33_c_postgres.py
