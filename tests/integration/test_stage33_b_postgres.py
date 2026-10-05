@@ -25,6 +25,7 @@ if not DATABASE_URL:
 
 from agentforge.application.errors import BusinessProgressionBlockedError
 from agentforge.application.governed_consequence import plan_governed_tool_consequence
+from agentforge.application.worker import CoreWorker
 from agentforge.domain.enums import (
     EventType,
     ExternalActionStatus,
@@ -38,7 +39,10 @@ from agentforge.domain.enums import (
 )
 from agentforge.domain.governance import GovernancePolicyRule, PrincipalContext
 from agentforge.domain.models import ToolProposal
-from agentforge.infrastructure.db.execution_recorder import PostgresExecutionRecorder
+from agentforge.infrastructure.db.execution_recorder import (
+    PostgresExecutionRecorder,
+    PostgresExecutionRecorderFactory,
+)
 from agentforge.infrastructure.db.governance_store import PostgresGovernancePolicyStore
 from agentforge.infrastructure.db.models import (
     AgentRow,
@@ -59,7 +63,12 @@ from agentforge.infrastructure.db.models import (
 )
 from agentforge.infrastructure.db.runtime_store import PostgresRuntimeStore
 from agentforge.infrastructure.db.session import create_engine, create_session_factory
-from agentforge.runtime.tool_coordinator import PreparedExternalAction, PreparedToolCall, ToolCoordinator
+from agentforge.runtime.fake_model import FinalStep, ScriptedFakeModel, ToolStep
+from agentforge.runtime.tool_coordinator import (
+    PreparedExternalAction,
+    PreparedToolCall,
+    ToolCoordinator,
+)
 from agentforge.runtime.tools import FunctionTool, InMemoryToolRegistry, SideEffectFunctionTool
 
 
@@ -480,3 +489,216 @@ async def test_b_cancel_wins_before_consequence_and_rolls_back_policy_business_f
     assert invocation is not None and invocation.status.value == "STARTED"
     assert fx.physical_calls == []
     await fx.engine.dispose()
+
+
+
+async def _seed_worker_read_case(*, decision: GovernanceDecision):
+    _reset_head()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    policy_store = PostgresGovernancePolicyStore(sessions)
+
+    agent_id = uuid4()
+    agent_version_id = uuid4()
+    tool_id = uuid4()
+    tool_version_id = uuid4()
+    rule = GovernancePolicyRule(
+        rule_id="worker-rule",
+        priority=100,
+        decision=decision,
+    )
+    draft = await policy_store.create_draft(
+        policy_key=f"worker-policy-{uuid4()}",
+        version_number=1,
+        rules=(rule,),
+    )
+    policy = await policy_store.publish(draft.id)
+
+    async with sessions() as session, session.begin():
+        session.add_all(
+            [
+                AgentRow(id=agent_id, name=f"worker-agent-{agent_id}", description=""),
+                ToolDefinitionRow(id=tool_id, name=f"worker-read-{tool_id}", description=""),
+            ]
+        )
+        await session.flush()
+        session.add_all(
+            [
+                ToolVersionRow(
+                    id=tool_version_id,
+                    tool_id=tool_id,
+                    version_number=1,
+                    input_schema={"type": "object"},
+                    effect_type=ToolEffectType.READ,
+                    implementation_ref="test://worker-read",
+                ),
+                AgentVersionRow(
+                    id=agent_version_id,
+                    agent_id=agent_id,
+                    version_number=1,
+                    instructions="worker governed read",
+                    governance_mode=GovernanceMode.GOVERNED,
+                    policy_version_id=policy.id,
+                ),
+            ]
+        )
+        await session.flush()
+        session.add(
+            AgentVersionToolRow(
+                agent_version_id=agent_version_id,
+                tool_version_id=tool_version_id,
+                tool_alias="lookup",
+            )
+        )
+
+    principal = PrincipalContext(
+        principal_id="worker-user",
+        principal_type=PrincipalType.USER,
+        roles=("runtime:run:create", "operator"),
+        principal_scope="worker-tenant",
+        authn_source="test-oidc",
+    )
+    store = PostgresRuntimeStore(sessions)
+    run = await store.create_run(
+        agent_version_id=agent_version_id,
+        input_text="worker governed request",
+        idempotency_key=f"worker-b-{uuid4()}",
+        principal_scope="ignored",
+        principal=principal,
+    )
+    physical_calls: list[str] = []
+    registry = InMemoryToolRegistry(
+        [
+            FunctionTool(
+                version_id=tool_version_id,
+                name="lookup",
+                description="lookup",
+                input_schema={"type": "object"},
+                func=lambda q: physical_calls.append(q) or {"q": q},
+            )
+        ]
+    )
+    return engine, sessions, policy_store, store, run, registry, physical_calls
+
+
+@pytest.mark.asyncio
+async def test_b_worker_governed_allow_runs_through_policy_audit_before_physical_read() -> None:
+    engine, sessions, policy_store, store, run, registry, physical_calls = (
+        await _seed_worker_read_case(decision=GovernanceDecision.ALLOW)
+    )
+    worker = CoreWorker(
+        runtime_store=store,
+        recorder_factory=PostgresExecutionRecorderFactory(sessions),
+        tool_registry=registry,
+        model_factory=lambda _: ScriptedFakeModel(
+            [
+                ToolStep("lookup", {"q": "worker-allow"}),
+                FinalStep("worker complete"),
+            ]
+        ),
+        worker_id="stage33-b-allow-worker",
+        lease_seconds=30,
+        governance_policy_store=policy_store,
+    )
+
+    assert await worker.run_once() is True
+    durable = await store.get_run(run.id)
+    assert durable is not None
+    assert durable.status is RunStatus.COMPLETED
+    assert physical_calls == ["worker-allow"]
+
+    async with sessions() as session:
+        decisions = (
+            (
+                await session.execute(
+                    select(PolicyDecisionRow).where(PolicyDecisionRow.run_id == run.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        attempts = (
+            (
+                await session.execute(
+                    select(ToolExecutionAttemptRow).where(
+                        ToolExecutionAttemptRow.run_id == run.id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        events = (
+            (
+                await session.execute(
+                    select(DomainEventRow.event_type)
+                    .where(DomainEventRow.run_id == run.id)
+                    .order_by(DomainEventRow.sequence)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert len(decisions) == 1
+    assert decisions[0].effective_decision is GovernanceDecision.ALLOW
+    assert len(attempts) == 1
+    assert attempts[0].status is ToolExecutionAttemptStatus.SUCCEEDED
+    assert EventType.POLICY_DECIDED.value in events
+    assert events.index(EventType.POLICY_DECIDED.value) < events.index(
+        EventType.TOOL_STARTED.value
+    )
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_b_worker_governed_deny_records_audit_and_performs_zero_physical_io() -> None:
+    engine, sessions, policy_store, store, run, registry, physical_calls = (
+        await _seed_worker_read_case(decision=GovernanceDecision.DENY)
+    )
+    worker = CoreWorker(
+        runtime_store=store,
+        recorder_factory=PostgresExecutionRecorderFactory(sessions),
+        tool_registry=registry,
+        model_factory=lambda _: ScriptedFakeModel(
+            [ToolStep("lookup", {"q": "worker-deny"})]
+        ),
+        worker_id="stage33-b-deny-worker",
+        lease_seconds=30,
+        governance_policy_store=policy_store,
+    )
+
+    assert await worker.run_once() is True
+    durable = await store.get_run(run.id)
+    assert durable is not None
+    assert durable.status is RunStatus.FAILED
+    assert physical_calls == []
+
+    async with sessions() as session:
+        decision = (
+            await session.execute(
+                select(PolicyDecisionRow).where(PolicyDecisionRow.run_id == run.id)
+            )
+        ).scalar_one()
+        call = (
+            await session.execute(
+                select(ToolCallRow).where(ToolCallRow.run_id == run.id)
+            )
+        ).scalar_one()
+        attempt_count = await session.scalar(
+            select(func.count())
+            .select_from(ToolExecutionAttemptRow)
+            .where(ToolExecutionAttemptRow.run_id == run.id)
+        )
+        action_count = await session.scalar(
+            select(func.count())
+            .select_from(ExternalActionRow)
+            .where(ExternalActionRow.run_id == run.id)
+        )
+
+    assert decision.effective_decision is GovernanceDecision.DENY
+    assert call.status is ToolCallStatus.DENIED
+    assert call.tool_version_id is not None
+    assert attempt_count == 0
+    assert action_count == 0
+    await engine.dispose()
