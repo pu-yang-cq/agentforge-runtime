@@ -322,7 +322,7 @@ class RunRow(Base):
     requester_principal_type: Mapped[PrincipalType | None] = mapped_column(
         Enum(PrincipalType, name="principal_type"), nullable=True
     )
-    requester_roles: Mapped[list[str] | None] = mapped_column(JSONB)
+    requester_roles: Mapped[list[str] | None] = mapped_column(JSONB(none_as_null=True))
     requester_scope: Mapped[str | None] = mapped_column(String(200))
     requester_authn_source: Mapped[str | None] = mapped_column(String(100))
     input_text: Mapped[str] = mapped_column(Text, nullable=False)
