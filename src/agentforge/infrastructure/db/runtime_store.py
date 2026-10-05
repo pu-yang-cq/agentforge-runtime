@@ -23,6 +23,7 @@ from agentforge.domain.checkpoints import (
 )
 from agentforge.domain.enums import (
     ActionResolutionOutcome,
+    ApprovalRequestStatus,
     EventType,
     ExternalActionStatus,
     GovernanceMode,
@@ -54,6 +55,7 @@ from agentforge.infrastructure.db.models import (
     ActionResolutionRow,
     AgentVersionRow,
     AgentVersionToolRow,
+    ApprovalRequestRow,
     CheckpointRow,
     DomainEventRow,
     ExternalActionRow,
@@ -468,10 +470,107 @@ class PostgresRuntimeStore(RuntimeStore):
             action = (
                 await session.execute(
                     select(ExternalActionRow)
-                    .where(ExternalActionRow.run_id == run_id)
+                    .where(
+                        ExternalActionRow.run_id == run_id,
+                        ExternalActionRow.status.in_(
+                            [
+                                ExternalActionStatus.AWAITING_APPROVAL,
+                                ExternalActionStatus.READY,
+                                ExternalActionStatus.EXECUTING,
+                                ExternalActionStatus.UNKNOWN,
+                                ExternalActionStatus.RECONCILING,
+                                ExternalActionStatus.MANUAL_REVIEW,
+                            ]
+                        ),
+                    )
                     .with_for_update()
                 )
             ).scalar_one_or_none()
+
+            # Stage 3.3-C pending cancellation is a local durable stabilization.
+            # Lock order is Run -> ExternalAction when present -> ToolCall -> ApprovalRequest.
+            if row.status is RunStatus.WAITING_APPROVAL:
+                if action is not None:
+                    if action.status is not ExternalActionStatus.AWAITING_APPROVAL:
+                        raise RuntimeError(
+                            "WAITING_APPROVAL Run has a non-pending ExternalAction"
+                        )
+                    pending_call = (
+                        await session.execute(
+                            select(ToolCallRow)
+                            .where(
+                                ToolCallRow.id == action.tool_call_id,
+                                ToolCallRow.run_id == run_id,
+                            )
+                            .with_for_update()
+                        )
+                    ).scalar_one()
+                else:
+                    pending_call = (
+                        await session.execute(
+                            select(ToolCallRow)
+                            .where(
+                                ToolCallRow.run_id == run_id,
+                                ToolCallRow.status == ToolCallStatus.AWAITING_APPROVAL,
+                            )
+                            .with_for_update()
+                        )
+                    ).scalar_one_or_none()
+                    if pending_call is None:
+                        raise RuntimeError(
+                            "WAITING_APPROVAL Run is missing AWAITING_APPROVAL ToolCall"
+                        )
+
+                if pending_call.status is not ToolCallStatus.AWAITING_APPROVAL:
+                    raise RuntimeError(
+                        "WAITING_APPROVAL Run does not project to AWAITING_APPROVAL ToolCall"
+                    )
+
+                pending_request = (
+                    await session.execute(
+                        select(ApprovalRequestRow)
+                        .where(
+                            ApprovalRequestRow.run_id == run_id,
+                            ApprovalRequestRow.status == ApprovalRequestStatus.PENDING,
+                        )
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                if pending_request is None:
+                    raise RuntimeError("WAITING_APPROVAL Run is missing PENDING ApprovalRequest")
+                if pending_request.tool_call_id != pending_call.id:
+                    raise RuntimeError("PENDING ApprovalRequest ToolCall binding mismatch")
+                if pending_request.external_action_id != (
+                    None if action is None else action.id
+                ):
+                    raise RuntimeError("PENDING ApprovalRequest ExternalAction binding mismatch")
+
+                db_now = await session.scalar(select(func.clock_timestamp()))
+                if db_now is None:
+                    raise RuntimeError("database clock_timestamp() returned no value")
+
+                pending_request.status = ApprovalRequestStatus.CANCELLED
+                pending_request.decided_at = db_now
+                pending_call.status = ToolCallStatus.NOT_EXECUTED
+                pending_call.error = "CANCEL_REQUESTED: approval pending work cancelled"
+
+                if action is not None:
+                    if action.current_attempt_id is not None:
+                        raise RuntimeError(
+                            "AWAITING_APPROVAL ExternalAction cannot have current_attempt_id"
+                        )
+                    action.status = ExternalActionStatus.ABORTED
+                    action.updated_at = db_now
+                    events.append(
+                        (
+                            EventType.ACTION_ABORTED,
+                            {
+                                "external_action_id": str(action.id),
+                                "operation_id": str(action.operation_id),
+                                "reason": "CANCEL_REQUESTED_WHILE_AWAITING_APPROVAL",
+                            },
+                        )
+                    )
 
             # Cancel before Action Commit is a local DB stabilization, never rollback.
             if action is not None and action.status is ExternalActionStatus.READY:
