@@ -6,6 +6,10 @@ class ActionResolutionConflictError(RuntimeError):
     """Manual resolution conflicts with durable action/run truth."""
 
 
+class GovernanceDecisionConflictError(RuntimeError):
+    """A proposal already has a different immutable governance decision."""
+
+
 class RunExecutionFailedError(RuntimeError):
     """A Run reached a durable FAILED outcome; the Worker itself may continue."""
 
