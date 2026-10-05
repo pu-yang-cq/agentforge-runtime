@@ -131,7 +131,11 @@ class GovernanceApprovalRequirement:
         role = record.get("required_approver_role")
         separation = record.get("separation_of_duties")
         ttl = record.get("ttl_seconds")
-        if not isinstance(role, str) or not isinstance(separation, bool) or not isinstance(ttl, int):
+        if (
+            not isinstance(role, str)
+            or not isinstance(separation, bool)
+            or not isinstance(ttl, int)
+        ):
             raise ValueError("malformed approval requirement")
         return cls(role, separation, ttl)
 
