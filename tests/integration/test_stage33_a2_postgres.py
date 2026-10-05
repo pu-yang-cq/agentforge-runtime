@@ -86,15 +86,19 @@ async def test_a2_forward_migration_from_frozen_a1_head() -> None:
     engine = create_engine(DATABASE_URL)
     async with engine.connect() as connection:
         tables = (
-            await connection.execute(
-                text(
-                    "SELECT table_name FROM information_schema.tables "
-                    "WHERE table_schema = 'public' "
-                    "AND table_name IN ('governance_intents', 'policy_decisions') "
-                    "ORDER BY table_name"
+            (
+                await connection.execute(
+                    text(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema = 'public' "
+                        "AND table_name IN ('governance_intents', 'policy_decisions') "
+                        "ORDER BY table_name"
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     assert list(tables) == ["governance_intents", "policy_decisions"]
     await engine.dispose()
 
@@ -270,9 +274,7 @@ async def test_a2_decision_is_exact_immutable_audited_and_creates_zero_physical_
     async with sessions() as session:
         intent_row = (
             await session.execute(
-                select(GovernanceIntentRow).where(
-                    GovernanceIntentRow.proposal_id == proposal_id
-                )
+                select(GovernanceIntentRow).where(GovernanceIntentRow.proposal_id == proposal_id)
             )
         ).scalar_one()
         decision_row = (
@@ -281,17 +283,19 @@ async def test_a2_decision_is_exact_immutable_audited_and_creates_zero_physical_
             )
         ).scalar_one()
         audit_events = (
-            await session.execute(
-                select(DomainEventRow).where(
-                    DomainEventRow.run_id == run.id,
-                    DomainEventRow.event_type == EventType.POLICY_DECIDED.value,
+            (
+                await session.execute(
+                    select(DomainEventRow).where(
+                        DomainEventRow.run_id == run.id,
+                        DomainEventRow.event_type == EventType.POLICY_DECIDED.value,
+                    )
                 )
             )
-        ).scalars().all()
-        tool_calls = await session.scalar(select(func.count()).select_from(ToolCallRow))
-        attempts = await session.scalar(
-            select(func.count()).select_from(ToolExecutionAttemptRow)
+            .scalars()
+            .all()
         )
+        tool_calls = await session.scalar(select(func.count()).select_from(ToolCallRow))
+        attempts = await session.scalar(select(func.count()).select_from(ToolExecutionAttemptRow))
 
         assert intent_row.digest == intent.digest
         assert intent_row.canonical_json == intent.canonical_json
@@ -306,8 +310,7 @@ async def test_a2_decision_is_exact_immutable_audited_and_creates_zero_physical_
         with pytest.raises(DBAPIError):
             await session.execute(
                 text(
-                    "UPDATE policy_decisions SET matched_rule_id = 'tamper' "
-                    "WHERE id = :decision_id"
+                    "UPDATE policy_decisions SET matched_rule_id = 'tamper' WHERE id = :decision_id"
                 ),
                 {"decision_id": decision.id},
             )
@@ -466,9 +469,7 @@ async def test_a2_malformed_durable_policy_fails_closed_to_deny() -> None:
     assert decision.matched_rule_id is None
 
     async with sessions() as session:
-        attempts = await session.scalar(
-            select(func.count()).select_from(ToolExecutionAttemptRow)
-        )
+        attempts = await session.scalar(select(func.count()).select_from(ToolExecutionAttemptRow))
         assert attempts == 0
 
     await engine.dispose()
