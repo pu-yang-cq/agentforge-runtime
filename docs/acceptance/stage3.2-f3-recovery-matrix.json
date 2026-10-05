@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "windows": [
+    {
+      "id": 1,
+      "barrier": "before_action_preparation_commit",
+      "pytest_nodes": [
+        "tests/integration/test_postgres_runtime.py::test_side_effect_preparation_stale_lease_creates_no_intent"
+      ],
+      "safety": "No ActionSnapshot, ExternalAction, ToolCall, or external effect survives a rejected pre-intent commit."
+    },
+    {
+      "id": 2,
+      "barrier": "after_ready_commit",
+      "pytest_nodes": [
+        "tests/integration/test_postgres_runtime.py::test_ready_action_recovery_uses_same_operation_id_without_model_reproposal"
+      ],
+      "safety": "READY recovery reuses durable operation identity and does not re-propose through the model."
+    },
+    {
+      "id": 3,
+      "barrier": "before_action_commit",
+      "pytest_nodes": [
+        "tests/integration/test_postgres_runtime.py::test_action_commit_deadline_block_aborts_ready_action_without_external_call"
+      ],
+      "safety": "Pre-commit business stop produces zero physical attempts and zero external effects."
+    },
+    {
+      "id": 4,
+      "barrier": "after_action_commit_before_external_call",
+      "pytest_nodes": [
+        "tests/integration/test_postgres_runtime.py::test_f3_crash_post_commit_pre_call_no_duplicate_effect"
+      ],
+      "safety": "Orphan STARTED becomes UNKNOWN; authoritative NOT_EXECUTED permits one safe retry with one business effect."
+    },
+    {
+      "id": 5,
+      "barrier": "during_external_call",
+      "pytest_nodes": [
+        "tests/integration/test_postgres_runtime.py::test_f3_crash_during_external_call_recovers_without_duplicate_effect"
+      ],
+      "safety": "A transport-level duplicate request after takeover may occur only after reconciliation proves NOT_EXECUTED; effect_count remains one."
+    },
+    {
+      "id": 6,
+      "barrier": "after_external_effect_before_response",
+      "pytest_nodes": [
+        "tests/integration/test_postgres_runtime.py::test_f3_crash_after_external_effect_before_response_reconciles_without_replay"
+      ],
+      "safety": "Committed external truth is reconciled to SUCCEEDED and the physical side effect is never replayed."
+    },
+    {
+      "id": 7,
+      "barrier": "after_response_before_db_result_commit",
+      "pytest_nodes": [
+        "tests/integration/test_postgres_runtime.py::test_f3_crash_after_response_before_result_commit_reconciles_without_replay"
+      ],
+      "safety": "Lost local result commit becomes UNKNOWN on takeover; reconciliation preserves the single external effect."
+    },
+    {
+      "id": 8,
+      "barrier": "during_result_commit",
+      "pytest_nodes": [
+        "tests/integration/test_postgres_runtime.py::test_e3_result_wins_then_cancellation_does_not_rollback_succeeded_action"
+      ],
+      "safety": "A durable successful business result remains authoritative across cancellation/race boundaries."
+    },
+    {
+      "id": 9,
+      "barrier": "during_reconciliation_request",
+      "pytest_nodes": [
+        "tests/integration/test_postgres_runtime.py::test_orphaned_reconciliation_attempt_closes_failed_and_preserves_truth"
+      ],
+      "safety": "Orphaned reconciliation closes FAILED(LEASE_LOST) without changing ExternalAction business truth."
+    },
+    {
+      "id": 10,
+      "barrier": "after_reconciliation_response_before_result_commit",
+      "pytest_nodes": [
+        "tests/integration/test_postgres_runtime.py::test_e3_cancellation_wins_reconciliation_success_truth_without_continuation"
+      ],
+      "safety": "Returned reconciliation truth may update Action truth while cancellation still fences continuation."
+    },
+    {
+      "id": 11,
+      "barrier": "during_durable_retry_yield",
+      "pytest_nodes": [
+        "tests/integration/test_postgres_runtime.py::test_side_effect_safe_retry_reuses_action_and_operation_id_across_claims"
+      ],
+      "safety": "RETRY is durable scheduling with stable Action identity and monotonic physical attempt number."
+    },
+    {
+      "id": 12,
+      "barrier": "during_cancellation_model_result_race",
+      "pytest_nodes": [
+        "tests/integration/test_postgres_runtime.py::test_e3_cancel_wins_side_effect_result_records_truth_and_fences_worker"
+      ],
+      "safety": "Cancellation fences new progression while late physical truth is still durably recorded."
+    }
+  ]
+}

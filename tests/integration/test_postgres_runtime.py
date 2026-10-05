@@ -4860,3 +4860,331 @@ async def test_f1_newer_cancellation_fact_stales_checkpoint() -> None:
         is None
     )
     await engine.dispose()
+
+
+async def _f3_build_barrier_run(
+    sessions,
+    *,
+    system,
+    tool_name: str,
+    idempotency_key: str,
+):
+    from agentforge.domain.enums import ReconciliationMode
+
+    side_tool_id = uuid4()
+    side_version_id = uuid4()
+    async with sessions() as session, session.begin():
+        session.add(
+            ToolDefinitionRow(id=side_tool_id, name=tool_name, description="F3 side effect")
+        )
+        await session.flush()
+        session.add(
+            ToolVersionRow(
+                id=side_version_id,
+                tool_id=side_tool_id,
+                version_number=1,
+                input_schema={"type": "object"},
+                effect_type=ToolEffectType.EXTERNAL_SIDE_EFFECT,
+                implementation_ref=f"tests:{tool_name}",
+                allow_no_approval_execution=True,
+                idempotency_supported=False,
+                reconciliation_mode=ReconciliationMode.AUTHORITATIVE,
+                side_effect_retry_max_attempts=2,
+                side_effect_retry_initial_backoff_seconds=0,
+                side_effect_retry_max_backoff_seconds=0,
+                reconciliation_max_attempts=2,
+                reconciliation_initial_backoff_seconds=0,
+                reconciliation_max_backoff_seconds=0,
+            )
+        )
+        await session.flush()
+        session.add(
+            AgentVersionToolRow(
+                agent_version_id=DEMO_AGENT_VERSION_ID,
+                tool_version_id=side_version_id,
+                tool_alias=tool_name,
+            )
+        )
+
+    registry = InMemoryToolRegistry(
+        [
+            FunctionTool(
+                version_id=DEMO_TOOL_VERSION_ID,
+                name="echo_read",
+                description="read",
+                input_schema={"type": "object"},
+                func=lambda text: {"echo": text},
+            ),
+            SideEffectFunctionTool(
+                version_id=side_version_id,
+                name=tool_name,
+                description="F3 observable side effect",
+                input_schema={"type": "object"},
+                func=system.invoke,
+                reconcile_func=system.reconcile,
+            ),
+        ]
+    )
+    store = PostgresRuntimeStore(sessions)
+    created = await store.create_run(
+        agent_version_id=DEMO_AGENT_VERSION_ID,
+        input_text=f"F3 barrier {tool_name}",
+        idempotency_key=idempotency_key,
+        principal_scope="test-user",
+    )
+    claimed = await store.claim_next_run(worker_id=f"{tool_name}-a", lease_seconds=30)
+    assert claimed is not None
+    version = await store.load_agent_version(DEMO_AGENT_VERSION_ID)
+    manager = RunManager(
+        NativeRunner(
+            ScriptedFakeModel(
+                [
+                    ToolStep(tool_name, {"value": "same logical action"}),
+                    FinalStep("done"),
+                ]
+            ),
+            registry,
+        ),
+        ToolCoordinator(registry),
+    )
+    recorder = PostgresExecutionRecorder(
+        sessions,
+        run_id=created.id,
+        generation=claimed.execution_generation,
+    )
+    return store, created, claimed, version, registry, manager, recorder
+
+
+async def _f3_expire_and_claim(sessions, store, run_id, *, worker_id: str):
+    from datetime import UTC, datetime, timedelta
+
+    from agentforge.infrastructure.db.models import RunRow
+
+    async with sessions() as session, session.begin():
+        row = await session.get(RunRow, run_id)
+        assert row is not None
+        row.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    claimed = await store.claim_next_run(worker_id=worker_id, lease_seconds=30)
+    assert claimed is not None
+    return claimed
+
+
+async def _f3_assert_pre_effect_crash_recovery(barrier_point, *, key: str, tool_name: str) -> None:
+    from contextlib import suppress
+
+    from agentforge.testing.fake_external_system import (
+        CrashBarrierController,
+        StatefulFakeExternalSystem,
+    )
+
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+    barriers = CrashBarrierController()
+    barriers.arm(barrier_point)
+    system = StatefulFakeExternalSystem(barriers=barriers)
+    store, created, claimed1, version, registry, manager1, recorder1 = await _f3_build_barrier_run(
+        sessions,
+        system=system,
+        tool_name=tool_name,
+        idempotency_key=key,
+    )
+
+    task = asyncio.create_task(
+        manager1.execute(
+            run=claimed1,
+            run_state=await store.load_run_state(created.id),
+            agent_version=version,
+            recorder=recorder1,
+        )
+    )
+    await barriers.wait_until_hit(barrier_point)
+    operation = system.records()[0]
+    assert operation.call_count == 1
+    assert operation.effect_count == 0
+
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+    barriers.clear(barrier_point)
+
+    claimed2 = await _f3_expire_and_claim(
+        sessions,
+        store,
+        created.id,
+        worker_id=f"{tool_name}-b",
+    )
+    manager2 = RunManager(
+        NativeRunner(ScriptedFakeModel([FinalStep("must not reason before retry")]), registry),
+        ToolCoordinator(registry),
+    )
+    recorder2 = PostgresExecutionRecorder(
+        sessions,
+        run_id=created.id,
+        generation=claimed2.execution_generation,
+    )
+    assert (
+        await manager2.execute(
+            run=claimed2,
+            run_state=await store.load_run_state(created.id),
+            agent_version=version,
+            recorder=recorder2,
+        )
+        is None
+    )
+    operation = system.records()[0]
+    assert operation.effect_count == 0
+    assert operation.reconciliation_query_count == 1
+
+    claimed3 = await store.claim_next_run(worker_id=f"{tool_name}-c", lease_seconds=30)
+    assert claimed3 is not None
+    manager3 = RunManager(
+        NativeRunner(ScriptedFakeModel([FinalStep("done")]), registry),
+        ToolCoordinator(registry),
+    )
+    recorder3 = PostgresExecutionRecorder(
+        sessions,
+        run_id=created.id,
+        generation=claimed3.execution_generation,
+    )
+    assert (
+        await manager3.execute(
+            run=claimed3,
+            run_state=await store.load_run_state(created.id),
+            agent_version=version,
+            recorder=recorder3,
+        )
+        == "done"
+    )
+    operation = system.records()[0]
+    assert operation.call_count == 2
+    assert operation.duplicate_request_count == 1
+    assert operation.effect_count == 1
+    assert operation.reconciliation_query_count == 1
+    durable = await store.get_run(created.id)
+    assert durable is not None and durable.status is RunStatus.COMPLETED
+    await engine.dispose()
+
+
+async def _f3_assert_post_effect_crash_recovery(
+    barrier_point,
+    *,
+    key: str,
+    tool_name: str,
+) -> None:
+    from contextlib import suppress
+
+    from agentforge.testing.fake_external_system import (
+        CrashBarrierController,
+        StatefulFakeExternalSystem,
+    )
+
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+    barriers = CrashBarrierController()
+    barriers.arm(barrier_point)
+    system = StatefulFakeExternalSystem(barriers=barriers)
+    store, created, claimed1, version, registry, manager1, recorder1 = await _f3_build_barrier_run(
+        sessions,
+        system=system,
+        tool_name=tool_name,
+        idempotency_key=key,
+    )
+
+    task = asyncio.create_task(
+        manager1.execute(
+            run=claimed1,
+            run_state=await store.load_run_state(created.id),
+            agent_version=version,
+            recorder=recorder1,
+        )
+    )
+    await barriers.wait_until_hit(barrier_point)
+    operation = system.records()[0]
+    assert operation.call_count == 1
+    assert operation.effect_count == 1
+
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+    barriers.clear(barrier_point)
+
+    claimed2 = await _f3_expire_and_claim(
+        sessions,
+        store,
+        created.id,
+        worker_id=f"{tool_name}-b",
+    )
+    manager2 = RunManager(
+        NativeRunner(ScriptedFakeModel([FinalStep("done")]), registry),
+        ToolCoordinator(registry),
+    )
+    recorder2 = PostgresExecutionRecorder(
+        sessions,
+        run_id=created.id,
+        generation=claimed2.execution_generation,
+    )
+    assert (
+        await manager2.execute(
+            run=claimed2,
+            run_state=await store.load_run_state(created.id),
+            agent_version=version,
+            recorder=recorder2,
+        )
+        == "done"
+    )
+    operation = system.records()[0]
+    assert operation.call_count == 1
+    assert operation.effect_count == 1
+    assert operation.duplicate_request_count == 0
+    assert operation.reconciliation_query_count == 1
+    durable = await store.get_run(created.id)
+    assert durable is not None and durable.status is RunStatus.COMPLETED
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_f3_crash_post_commit_pre_call_no_duplicate_effect() -> None:
+    from agentforge.testing.fake_external_system import CrashBarrierPoint
+
+    await _f3_assert_pre_effect_crash_recovery(
+        CrashBarrierPoint.AFTER_ACTION_COMMIT_BEFORE_EXTERNAL_CALL,
+        key="f3-window-4",
+        tool_name="f3_window_4",
+    )
+
+
+@pytest.mark.asyncio
+async def test_f3_crash_during_external_call_recovers_without_duplicate_effect() -> None:
+    from agentforge.testing.fake_external_system import CrashBarrierPoint
+
+    await _f3_assert_pre_effect_crash_recovery(
+        CrashBarrierPoint.DURING_EXTERNAL_CALL,
+        key="f3-window-5",
+        tool_name="f3_window_5",
+    )
+
+
+@pytest.mark.asyncio
+async def test_f3_crash_after_external_effect_before_response_reconciles_without_replay() -> None:
+    from agentforge.testing.fake_external_system import CrashBarrierPoint
+
+    await _f3_assert_post_effect_crash_recovery(
+        CrashBarrierPoint.AFTER_EXTERNAL_EFFECT_BEFORE_RESPONSE,
+        key="f3-window-6",
+        tool_name="f3_window_6",
+    )
+
+
+@pytest.mark.asyncio
+async def test_f3_crash_after_response_before_result_commit_reconciles_without_replay() -> None:
+    from agentforge.testing.fake_external_system import CrashBarrierPoint
+
+    await _f3_assert_post_effect_crash_recovery(
+        CrashBarrierPoint.AFTER_RESPONSE_BEFORE_DB_RESULT_COMMIT,
+        key="f3-window-7",
+        tool_name="f3_window_7",
+    )
