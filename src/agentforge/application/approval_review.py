@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from hashlib import sha256
 from uuid import UUID
 
 from agentforge.domain.actions import ActionSnapshot, ExternalAction, canonical_json_v1
@@ -81,6 +82,29 @@ def build_pending_approval_review_projection(
     ):
         raise ValueError("approval review requester authority mismatch")
 
+    expected_intent = canonical_json_v1(
+        {
+            "agent_version_id": str(intent.agent_version_id),
+            "arguments": call.arguments,
+            "effect_type": intent.effect_type.value,
+            "format_version": intent.format_version,
+            "principal_scope": intent.principal_scope,
+            "proposal_id": str(intent.proposal_id),
+            "requester": {
+                "principal_id": intent.requester_principal_id,
+                "principal_type": intent.requester_principal_type.value,
+                "roles": list(intent.requester_roles),
+            },
+            "run_id": str(intent.run_id),
+            "tool_version_id": str(intent.tool_version_id),
+        }
+    ).decode("utf-8")
+    if (
+        intent.canonical_json != expected_intent
+        or sha256(expected_intent.encode("utf-8")).hexdigest() != intent.digest
+    ):
+        raise ValueError("approval review GovernanceIntent canonical identity mismatch")
+
     operation_id: UUID | None = None
     if request.external_action_id is None:
         if snapshot is not None or action is not None:
@@ -90,6 +114,8 @@ def build_pending_approval_review_projection(
         if intent.effect_type is not ToolEffectType.READ:
             raise ValueError("approval review without ExternalAction must be READ")
     else:
+        if intent.effect_type is ToolEffectType.READ:
+            raise ValueError("side-effect approval review cannot bind READ intent")
         if snapshot is None or action is None:
             raise ValueError("side-effect approval review requires action and snapshot")
         if action.status is not ExternalActionStatus.AWAITING_APPROVAL:
@@ -114,6 +140,21 @@ def build_pending_approval_review_projection(
             and snapshot.operation_id == action.operation_id
         ):
             raise ValueError("approval review ActionSnapshot identity mismatch")
+        expected_snapshot = canonical_json_v1(
+            {
+                "arguments": call.arguments,
+                "credential_ref": snapshot.credential_ref,
+                "effect_type": snapshot.effect_type.value,
+                "format_version": snapshot.format_version,
+                "operation_id": str(snapshot.operation_id),
+                "tool_version_id": str(snapshot.tool_version_id),
+            }
+        ).decode("utf-8")
+        if (
+            snapshot.canonical_json != expected_snapshot
+            or sha256(expected_snapshot.encode("utf-8")).hexdigest() != snapshot.digest
+        ):
+            raise ValueError("approval review ActionSnapshot canonical identity mismatch")
         operation_id = action.operation_id
 
     return ApprovalReviewProjection(
