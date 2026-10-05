@@ -260,10 +260,10 @@ Stage 3.3-A1
 ✅ ACCEPTED / FROZEN
 
 Stage 3.3-A2
-🔓 UNLOCKED
+✅ ACCEPTED / FROZEN
 
 Stage 3.3-A Aggregate
-🔒 LOCKED
+🔓 UNLOCKED
 
 Stage 3.3-B
 🔒 LOCKED
