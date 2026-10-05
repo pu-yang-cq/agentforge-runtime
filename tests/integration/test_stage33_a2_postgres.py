@@ -163,6 +163,7 @@ async def test_a2_decision_is_exact_immutable_audited_and_creates_zero_physical_
                 policy_version_id=policy.id,
             )
         )
+        await session.flush()
         session.add(
             AgentVersionToolRow(
                 agent_version_id=agent_version_id,
@@ -388,6 +389,7 @@ async def test_a2_malformed_durable_policy_fails_closed_to_deny() -> None:
                 policy_version_id=policy_id,
             )
         )
+        await session.flush()
         session.add(
             AgentVersionToolRow(
                 agent_version_id=agent_version_id,
