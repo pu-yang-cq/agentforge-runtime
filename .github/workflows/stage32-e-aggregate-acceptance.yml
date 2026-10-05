@@ -1,0 +1,144 @@
+name: Stage 3.2-E Aggregate Acceptance
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/RUN_STAGE32_E_AGGREGATE
+
+permissions:
+  contents: read
+
+jobs:
+  accept:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Verify frozen E slices
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f docs/implementation/stage3.2-e1-cancellation.md
+          test -f docs/implementation/stage3.2-e2-action-resolution.md
+          test -f docs/implementation/stage3.2-e3-late-result-authority.md
+          test -f docs/implementation/stage3.2-e-slices-frozen.md
+          test -f docs/implementation/stage3.2-d-accepted.md
+
+      - name: Verify E state-machine surface
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          grep -R 'WAITING_ACTION_RESOLUTION' -n src tests
+          grep -R 'cancel_requested' -n src tests
+          grep -R 'ActionResolutionOutcome' -n src tests
+          grep -R 'ACTION_RESOLVED' -n src tests
+          grep -R 'CANCEL_WON_BEFORE_SIDE_EFFECT_RESULT' -n src tests
+          grep -R 'CANCEL_WON_BEFORE_RECONCILIATION_RESULT' -n src tests
+
+      - name: Prove terminal and waiting Runs are not claimable
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          source = Path("src/agentforge/infrastructure/db/runtime_store.py").read_text()
+          required = [
+              "RunRow.status == RunStatus.QUEUED",
+              "RunRow.status == RunStatus.RUNNING",
+              "RunRow.lease_expires_at < func.clock_timestamp()",
+          ]
+          for token in required:
+              if token not in source:
+                  raise SystemExit(f"claim predicate missing invariant: {token}")
+          forbidden = [
+              "RunRow.status == RunStatus.CANCELLED",
+              "RunRow.status == RunStatus.WAITING_ACTION_RESOLUTION",
+          ]
+          claim = source[source.index("def build_claim_candidate_stmt"):source.index("def _lease_deadline_expr")]
+          for token in forbidden:
+              if token in claim:
+                  raise SystemExit(f"claim predicate illegally includes non-runnable state: {token}")
+          print("claim state isolation: PASS")
+          PY
+
+      - name: Prove cancellation and resolution both serialize on Run
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          source = Path("src/agentforge/infrastructure/db/runtime_store.py").read_text()
+          tree = ast.parse(source)
+          for name in ("cancel_run", "resolve_action"):
+              fn = next(
+                  n for n in ast.walk(tree)
+                  if isinstance(n, ast.AsyncFunctionDef) and n.name == name
+              )
+              text = ast.get_source_segment(source, fn) or ""
+              if ".with_for_update()" not in text:
+                  raise SystemExit(f"{name} lacks durable row locking")
+              run_pos = text.find("RunRow")
+              action_pos = text.find("ExternalActionRow")
+              if name == "resolve_action" and not (0 <= run_pos < action_pos):
+                  raise SystemExit("resolve_action must lock Run before ExternalAction")
+          print("cancel/resolve Run-row serialization: PASS")
+          PY
+
+      - name: Prove manual resolution cannot reopen cancelled Run
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          source = Path("src/agentforge/infrastructure/db/runtime_store.py").read_text()
+          fn = source[source.index("    async def resolve_action("):]
+          required = [
+              "RunStatus.CANCELLED",
+              "Post-terminal resolution updates facts only. Cancellation remains final.",
+              "external action already has a contradictory final resolution",
+          ]
+          for token in required:
+              if token not in fn:
+                  raise SystemExit(f"missing resolution finality invariant: {token}")
+          print("cancelled manual-resolution finality: PASS")
+          PY
+
+      - name: Prove late-result fences remain active
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          source = Path("src/agentforge/infrastructure/db/execution_recorder.py").read_text()
+          required = [
+              "CANCEL_WON_BEFORE_SIDE_EFFECT_RESULT",
+              "CANCEL_WON_BEFORE_RECONCILIATION_RESULT",
+              "progression authority is fenced",
+              "cancellation_fenced = run_row.cancel_requested",
+          ]
+          for token in required:
+              if token not in source:
+                  raise SystemExit(f"missing E3 late-result fence: {token}")
+          print("late-result fences: PASS")
+          PY
+
+      - name: Verify E regression cases
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          grep -R 'test_cancelled_manual_review_resolution_never_reopens_run_and_is_idempotent' -n tests
+          grep -R 'test_manual_resolution_rejects_non_manual_review_action' -n tests
+          grep -R 'test_e3_result_wins_then_cancellation_does_not_rollback_succeeded_action' -n tests
+          grep -R 'test_e3_cancel_wins_side_effect_result_records_truth_and_fences_worker' -n tests
+          grep -R 'test_e3_cancellation_wins_reconciliation_success_truth_without_continuation' -n tests
+          grep -R 'test_e3_manual_resolution_wins_late_stale_result_cannot_overwrite' -n tests
+
+      - name: Run Stage 3.2-E aggregate regression gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ./scripts/validate_stage31_containerized.sh
