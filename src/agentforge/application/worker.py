@@ -8,11 +8,13 @@ from uuid import UUID
 from agentforge.application.errors import RunExecutionFailedError, StaleExecutorError
 from agentforge.application.ports import (
     ExecutionRecorderFactory,
+    GovernancePolicyStore,
     ModelGateway,
     RuntimeStore,
     ToolRegistry,
 )
 from agentforge.application.run_manager import RunManager
+from agentforge.domain.enums import GovernanceMode
 from agentforge.runtime.native_runner import NativeRunner
 from agentforge.runtime.tool_coordinator import ToolCoordinator
 
@@ -33,12 +35,14 @@ class CoreWorker:
         model_factory: Callable[[str], ModelGateway],
         worker_id: str,
         lease_seconds: int,
+        governance_policy_store: GovernancePolicyStore | None = None,
         max_progression_steps_per_claim: int = 8,
     ) -> None:
         self._runtime_store = runtime_store
         self._recorder_factory = recorder_factory
         self._tool_registry = tool_registry
         self._model_factory = model_factory
+        self._governance_policy_store = governance_policy_store
         self._worker_id = worker_id
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
@@ -78,6 +82,22 @@ class CoreWorker:
         )
         try:
             agent_version = await self._runtime_store.load_agent_version(run.agent_version_id)
+            governance_policy = None
+            if agent_version.governance_mode is GovernanceMode.GOVERNED:
+                if (
+                    self._governance_policy_store is None
+                    or agent_version.policy_version_id is None
+                ):
+                    raise RuntimeError(
+                        "GOVERNED Worker requires an exact GovernancePolicyStore"
+                    )
+                governance_policy = await self._governance_policy_store.get(
+                    agent_version.policy_version_id
+                )
+                if governance_policy is None:
+                    raise RuntimeError(
+                        "GOVERNED Worker could not load the exact pinned policy"
+                    )
             run_state = await self._runtime_store.load_run_state(run.id)
             recorder = self._recorder_factory(
                 run_id=run.id,
@@ -94,6 +114,7 @@ class CoreWorker:
                     run_state=run_state,
                     agent_version=agent_version,
                     recorder=recorder,
+                    governance_policy=governance_policy,
                 )
             except RunExecutionFailedError:
                 # The Run was durably marked FAILED; this is not a Worker-process failure.
