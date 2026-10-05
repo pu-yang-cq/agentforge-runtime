@@ -91,6 +91,22 @@ def test_policy_rule_schema_is_bounded_normalized_and_requires_approval_metadata
             priority=1,
             decision=GovernanceDecision.REQUIRE_APPROVAL,
         )
+    allow_fallback = GovernancePolicyRule(
+        rule_id="allow-with-fallback",
+        priority=9,
+        decision=GovernanceDecision.ALLOW,
+        approval=approval,
+    )
+    assert GovernancePolicyRule.from_record(allow_fallback.to_record()) == allow_fallback
+
+    with pytest.raises(ValueError, match="DENY rule cannot carry approval metadata"):
+        GovernancePolicyRule(
+            rule_id="deny-with-metadata",
+            priority=8,
+            decision=GovernanceDecision.DENY,
+            approval=approval,
+        )
+
     with pytest.raises(ValueError):
         normalize_policy_rules((rule, rule))
 
