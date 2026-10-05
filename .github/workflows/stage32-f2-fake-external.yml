@@ -42,8 +42,8 @@ jobs:
           set -Eeuo pipefail
           grep -R 'class StatefulFakeExternalSystem' -n src/agentforge/testing
           grep -R 'external_resource_id' -n src/agentforge/testing/fake_external_system.py
-          grep -R 'duplicate_request_count' -n tests/support/fake_external_system.py
-          grep -R 'reconciliation_query_count' -n tests/support/fake_external_system.py
+          grep -R 'duplicate_request_count' -n src/agentforge/testing/fake_external_system.py
+          grep -R 'reconciliation_query_count' -n src/agentforge/testing/fake_external_system.py
           grep -R 'COMMIT_RESPONSE_LOSS' -n src/agentforge/testing tests/unit
           grep -R 'DEFINITE_NO_EFFECT' -n src/agentforge/testing tests/unit
           grep -R 'AMBIGUOUS_TIMEOUT' -n src/agentforge/testing tests/unit
