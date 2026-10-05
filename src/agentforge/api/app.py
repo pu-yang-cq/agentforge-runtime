@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Annotated
 from uuid import UUID
 
@@ -27,6 +28,7 @@ from agentforge.application.errors import (
 )
 from agentforge.application.ports import PrincipalResolver, RuntimeStore
 from agentforge.domain.actions import ActionResolution
+from agentforge.domain.governance import PrincipalContext
 from agentforge.domain.models import Run
 
 
@@ -62,7 +64,7 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(title="AgentForge", version="0.1.0")
 
-    def governed_principal():
+    def governed_principal() -> PrincipalContext | None:
         if principal_resolver is None:
             return None
         try:
@@ -70,7 +72,11 @@ def create_app(
         except GovernedForbiddenError as exc:
             raise HTTPException(status_code=403, detail="forbidden") from exc
 
-    def authorize_or_http(operation, run, principal) -> None:
+    def authorize_or_http(
+        operation: Callable[[Run, PrincipalContext], None],
+        run: Run,
+        principal: PrincipalContext,
+    ) -> None:
         try:
             operation(run, principal)
         except GovernedResourceHiddenError as exc:
