@@ -328,7 +328,7 @@ async def test_run_manager_governed_deny_records_bound_denial_and_zero_io() -> N
 
 
 @pytest.mark.asyncio
-async def test_run_manager_require_approval_preserves_zero_io_until_later_execution_bridge() -> None:
+async def test_run_manager_require_approval_remains_zero_io_until_execution_bridge() -> None:
     run, version, policy, registry, calls = _runtime_fixture(GovernanceDecision.REQUIRE_APPROVAL)
     manager = RunManager(
         NativeRunner(
