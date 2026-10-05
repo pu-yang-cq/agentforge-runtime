@@ -51,10 +51,18 @@ Stage 3.3 implementation is in progress.
 - accepted Stage 3.3-B semantic candidate: `bdeef5adbda0408b7b17af9042ce1dd731ab3804`
 - successful B gate: `37300886491`
 - B acceptance: `docs/implementation/stage3.3-b-accepted.md`
-- Stage 3.3-C Durable Approval Intent: **UNLOCKED**
+- Governance Amendment 001 Approval Metadata Source: **ACCEPTED / FROZEN**
+- accepted Amendment 001 semantic candidate: `8d7b214c9ce38e201da364af59dcc35a90565205`
+- successful Amendment 001 gate: `37325262562`
+- Amendment 001 acceptance:
+  `docs/implementation/stage3.3-governance-amendment-001-accepted.md`
+- Stage 3.3-C Durable Approval Intent: **ACTIVE**
+- C1 Domain / Schema / Migration: **IMPLEMENTED / READ-BACK VERIFIED**
+- C2 Atomic REQUIRE_APPROVAL Pending Consequence: **IMPLEMENTED / READ-BACK VERIFIED**
+- C3 Restart / Claim / Terminal Guards + Review Projection: **ACTIVE**
 
-Stage 3.3-D and later Stage 3.3 runtime acceptance remain **LOCKED** until their frozen
-implementation gates pass.
+Stage 3.3-C is not yet accepted. Stage 3.3-D and later Stage 3.3 runtime acceptance remain
+**LOCKED** until the complete frozen Stage 3.3-C gate passes.
 
 Stage 3.1 accepted immutable source:
 
