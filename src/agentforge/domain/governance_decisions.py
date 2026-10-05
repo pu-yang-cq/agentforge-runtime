@@ -165,7 +165,10 @@ def evaluate_policy(
     agent_version_id: UUID,
     binding: ToolBinding,
 ) -> PolicyEvaluation:
-    if policy.status is not GovernancePolicyStatus.PUBLISHED:
+    if policy.status not in {
+        GovernancePolicyStatus.PUBLISHED,
+        GovernancePolicyStatus.RETIRED,
+    }:
         return PolicyEvaluation(
             raw_decision=GovernanceDecision.DENY,
             effective_decision=GovernanceDecision.DENY,
