@@ -58,6 +58,12 @@ def test_alembic_offline_upgrade_compiles_core_schema_and_model_lifecycle() -> N
     assert "ALLOW_NO_APPROVAL_EXECUTION" in ddl
     assert "RECONCILIATION_MODE" in ddl
     assert "CK_TOOL_VERSIONS_APPROVAL_EXECUTION_EXCLUSIVE" in ddl
+    assert "0019_APPROVAL_INTENT" in ddl
+    assert "CREATE TABLE APPROVAL_REQUESTS" in ddl
+    assert "WAITING_APPROVAL" in ddl
+    assert "AWAITING_APPROVAL" in ddl
+    assert "APPROVAL_REQUEST_STATUS" in ddl
+    assert "UQ_APPROVAL_REQUESTS_ONE_PENDING_PER_RUN" in ddl
 
 
 def test_run_terminal_shape_migration_is_present() -> None:
