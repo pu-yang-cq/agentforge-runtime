@@ -196,8 +196,8 @@ class GovernancePolicyRule:
         if self.decision is GovernanceDecision.REQUIRE_APPROVAL:
             if self.approval is None:
                 raise ValueError("REQUIRE_APPROVAL rule requires approval metadata")
-        elif self.approval is not None:
-            raise ValueError("approval metadata is only valid for REQUIRE_APPROVAL")
+        elif self.decision is GovernanceDecision.DENY and self.approval is not None:
+            raise ValueError("DENY rule cannot carry approval metadata")
 
     def to_record(self) -> dict[str, object]:
         return {
