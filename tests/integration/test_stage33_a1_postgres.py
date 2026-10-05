@@ -188,6 +188,54 @@ async def test_a1_policy_lifecycle_agent_version_pin_and_immutability() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a1_legacy_run_preserves_sql_null_governance_snapshot() -> None:
+    _reset_head()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+
+    agent_id = uuid4()
+    version_id = uuid4()
+    async with sessions() as session, session.begin():
+        session.add(AgentRow(id=agent_id, name=f"legacy-run-{agent_id}", description=""))
+        await session.flush()
+        session.add(
+            AgentVersionRow(
+                id=version_id,
+                agent_id=agent_id,
+                version_number=1,
+                instructions="legacy Stage 3.2 compatibility",
+            )
+        )
+
+    store = PostgresRuntimeStore(sessions)
+    run = await store.create_run(
+        agent_version_id=version_id,
+        input_text="legacy compatibility",
+        idempotency_key="legacy-a1-compatibility",
+        principal_scope="legacy-user",
+    )
+
+    assert run.policy_version_id is None
+    assert run.requester_principal_id is None
+    assert run.requester_principal_type is None
+    assert run.requester_roles is None
+    assert run.requester_scope is None
+    assert run.requester_authn_source is None
+
+    async with sessions() as session:
+        durable = await session.get(RunRow, run.id)
+        assert durable is not None
+        assert durable.requester_roles is None
+        roles_is_sql_null = await session.scalar(
+            text("SELECT requester_roles IS NULL FROM runs WHERE id = :run_id"),
+            {"run_id": run.id},
+        )
+        assert roles_is_sql_null is True
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a1_governed_run_pins_policy_and_normalized_requester_snapshot() -> None:
     _reset_head()
     engine = create_engine(DATABASE_URL)
