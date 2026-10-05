@@ -12,11 +12,20 @@ from agentforge.api.schemas import (
     RunCreate,
     RunView,
 )
+from agentforge.application.control_plane_auth import (
+    GovernedForbiddenError,
+    GovernedResourceHiddenError,
+    authorize_action_resolution,
+    authorize_cancel,
+    authorize_create,
+    authorize_read,
+    resolve_trusted_principal,
+)
 from agentforge.application.errors import (
     ActionResolutionConflictError,
     IdempotencyConflictError,
 )
-from agentforge.application.ports import RuntimeStore
+from agentforge.application.ports import PrincipalResolver, RuntimeStore
 from agentforge.domain.actions import ActionResolution
 from agentforge.domain.models import Run
 
@@ -47,8 +56,27 @@ def _resolution_view(resolution: ActionResolution) -> ActionResolutionView:
     )
 
 
-def create_app(store: RuntimeStore) -> FastAPI:
+def create_app(
+    store: RuntimeStore,
+    principal_resolver: PrincipalResolver | None = None,
+) -> FastAPI:
     app = FastAPI(title="AgentForge", version="0.1.0")
+
+    def governed_principal():
+        if principal_resolver is None:
+            return None
+        try:
+            return resolve_trusted_principal(principal_resolver)
+        except GovernedForbiddenError as exc:
+            raise HTTPException(status_code=403, detail="forbidden") from exc
+
+    def authorize_or_http(operation, run, principal) -> None:
+        try:
+            operation(run, principal)
+        except GovernedResourceHiddenError as exc:
+            raise HTTPException(status_code=404, detail="run not found") from exc
+        except GovernedForbiddenError as exc:
+            raise HTTPException(status_code=403, detail="forbidden") from exc
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -61,22 +89,41 @@ def create_app(store: RuntimeStore) -> FastAPI:
             str, Header(alias="Idempotency-Key", min_length=8, max_length=200)
         ],
     ) -> RunView:
+        principal = governed_principal()
         try:
-            run = await store.create_run(
-                agent_version_id=request.agent_version_id,
-                input_text=request.input,
-                idempotency_key=idempotency_key,
-                principal_scope="wave1:anonymous",
-            )
+            if principal is None:
+                run = await store.create_run(
+                    agent_version_id=request.agent_version_id,
+                    input_text=request.input,
+                    idempotency_key=idempotency_key,
+                    principal_scope="wave1:anonymous",
+                )
+            else:
+                authorize_create(principal)
+                run = await store.create_run(
+                    agent_version_id=request.agent_version_id,
+                    input_text=request.input,
+                    idempotency_key=idempotency_key,
+                    principal_scope=principal.principal_scope,
+                    principal=principal,
+                )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="agent version not found") from exc
+        except GovernedForbiddenError as exc:
+            raise HTTPException(status_code=403, detail="forbidden") from exc
         except IdempotencyConflictError as exc:
             raise HTTPException(status_code=409, detail="idempotency conflict") from exc
         return _run_view(run)
 
     @app.post("/v1/runs/{run_id}/cancel", response_model=RunView)
     async def cancel_run(run_id: UUID) -> RunView:
+        principal = governed_principal()
         try:
+            if principal is not None:
+                visible_run = await store.get_run(run_id)
+                if visible_run is None:
+                    raise KeyError(run_id)
+                authorize_or_http(authorize_cancel, visible_run, principal)
             run = await store.cancel_run(run_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="run not found") from exc
@@ -91,14 +138,22 @@ def create_app(store: RuntimeStore) -> FastAPI:
         action_id: UUID,
         request: ActionResolutionCreate,
     ) -> ActionResolutionResultView:
+        principal = governed_principal()
         try:
+            resolver_identity = request.resolver_identity
+            if principal is not None:
+                visible_run = await store.get_run(run_id)
+                if visible_run is None:
+                    raise KeyError(run_id)
+                authorize_or_http(authorize_action_resolution, visible_run, principal)
+                resolver_identity = principal.principal_id
             run, resolution = await store.resolve_action(
                 run_id=run_id,
                 action_id=action_id,
                 outcome=request.outcome,
                 evidence=request.evidence,
                 reason=request.reason,
-                resolver_identity=request.resolver_identity,
+                resolver_identity=resolver_identity,
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="run or action not found") from exc
@@ -114,6 +169,9 @@ def create_app(store: RuntimeStore) -> FastAPI:
         run = await store.get_run(run_id)
         if run is None:
             raise HTTPException(status_code=404, detail="run not found")
+        principal = governed_principal()
+        if principal is not None:
+            authorize_or_http(authorize_read, run, principal)
         return _run_view(run)
 
     return app
