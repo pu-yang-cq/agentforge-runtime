@@ -60,8 +60,8 @@ from agentforge.infrastructure.db.mappers import (
 from agentforge.infrastructure.db.models import (
     ActionSnapshotRow,
     AgentVersionRow,
-    ApprovalRequestRow,
     AgentVersionToolRow,
+    ApprovalRequestRow,
     DomainEventRow,
     ExternalActionRow,
     GovernanceIntentRow,
