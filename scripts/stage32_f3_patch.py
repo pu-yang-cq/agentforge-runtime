@@ -152,21 +152,21 @@ def test_f3_recovery_matrix_covers_exact_frozen_crash_windows_and_real_tests() -
 
 def test_f3_matrix_has_effect_count_assertions_for_ambiguous_external_windows() -> None:
     source = Path("tests/integration/test_postgres_runtime.py").read_text()
-    for function_name in (
-        "test_f3_crash_after_action_commit_before_external_call_recovers_without_duplicate_effect",
-        "test_f3_crash_during_external_call_recovers_without_duplicate_effect",
-        "test_f3_crash_after_external_effect_before_response_reconciles_without_replay",
-        "test_f3_crash_after_response_before_result_commit_reconciles_without_replay",
-    ):
-        tree = ast.parse(source)
-        fn = next(
-            n
-            for n in ast.walk(tree)
-            if isinstance(n, ast.AsyncFunctionDef) and n.name == function_name
-        )
-        fn_text = ast.get_source_segment(source, fn) or ""
-        assert "effect_count" in fn_text
-        assert "reconciliation_query_count" in fn_text
+    tree = ast.parse(source)
+    helper_names = {
+        "_f3_assert_pre_effect_crash_recovery",
+        "_f3_assert_post_effect_crash_recovery",
+    }
+    helpers = {
+        n.name: (ast.get_source_segment(source, n) or "")
+        for n in ast.walk(tree)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name in helper_names
+    }
+    assert set(helpers) == helper_names
+    for helper_text in helpers.values():
+        assert "effect_count" in helper_text
+        assert "reconciliation_query_count" in helper_text
+        assert "duplicate_request_count" in helper_text
 '''
 
 Path("tests/unit/test_stage32_f3_recovery_matrix.py").write_text(contract)
