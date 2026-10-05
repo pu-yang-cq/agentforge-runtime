@@ -23,6 +23,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from agentforge.domain.enums import (
     ActionResolutionOutcome,
     ExternalActionStatus,
+    GovernanceDecision,
     GovernanceMode,
     GovernancePolicyStatus,
     PrincipalType,
@@ -430,6 +431,84 @@ class ToolProposalRow(Base):
     )
     tool_name: Mapped[str] = mapped_column(String(200), nullable=False)
     arguments: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+
+
+class GovernanceIntentRow(Base):
+    __tablename__ = "governance_intents"
+    __table_args__ = (
+        CheckConstraint("format_version = 1", name="ck_governance_intents_format_v1"),
+        CheckConstraint(
+            "jsonb_typeof(requester_roles) = 'array'",
+            name="ck_governance_intents_roles_array",
+        ),
+        CheckConstraint("length(digest) = 64", name="ck_governance_intents_digest_length"),
+        UniqueConstraint("proposal_id", name="uq_governance_intents_proposal"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    format_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False
+    )
+    agent_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("agent_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    proposal_id: Mapped[UUID] = mapped_column(
+        ForeignKey("tool_proposals.id", ondelete="RESTRICT"), nullable=False
+    )
+    tool_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("tool_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    effect_type: Mapped[ToolEffectType] = mapped_column(
+        Enum(ToolEffectType, name="tool_effect_type", create_type=False), nullable=False
+    )
+    requester_principal_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    requester_principal_type: Mapped[PrincipalType] = mapped_column(
+        Enum(PrincipalType, name="principal_type", create_type=False), nullable=False
+    )
+    requester_roles: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    principal_scope: Mapped[str] = mapped_column(String(200), nullable=False)
+    canonical_json: Mapped[str] = mapped_column(Text, nullable=False)
+    digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+
+
+class PolicyDecisionRow(Base):
+    __tablename__ = "policy_decisions"
+    __table_args__ = (
+        CheckConstraint("length(intent_digest) = 64", name="ck_policy_decisions_digest_length"),
+        UniqueConstraint("proposal_id", name="uq_policy_decisions_proposal"),
+        UniqueConstraint("governance_intent_id", name="uq_policy_decisions_intent"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    governance_intent_id: Mapped[UUID] = mapped_column(
+        ForeignKey("governance_intents.id", ondelete="RESTRICT"), nullable=False
+    )
+    run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False
+    )
+    proposal_id: Mapped[UUID] = mapped_column(
+        ForeignKey("tool_proposals.id", ondelete="RESTRICT"), nullable=False
+    )
+    tool_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("tool_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    policy_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("governance_policy_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    requester_principal_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    principal_scope: Mapped[str] = mapped_column(String(200), nullable=False)
+    effective_decision: Mapped[GovernanceDecision] = mapped_column(
+        Enum(GovernanceDecision, name="governance_decision"), nullable=False
+    )
+    matched_rule_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    intent_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
 
 
 class ToolCallRow(Base):
