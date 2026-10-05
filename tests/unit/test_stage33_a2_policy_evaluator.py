@@ -191,12 +191,23 @@ def test_policy_match_dimensions_and_no_match_fail_closed() -> None:
 def test_capability_envelope_never_broadens_tool_binding() -> None:
     principal = _principal()
     agent_version_id = uuid4()
+    approval = GovernanceApprovalRequirement("approver", True, 600)
     allow = _policy(
         (
             GovernancePolicyRule(
                 rule_id="allow",
                 priority=1,
                 decision=GovernanceDecision.ALLOW,
+            ),
+        )
+    )
+    allow_with_fallback = _policy(
+        (
+            GovernancePolicyRule(
+                rule_id="allow-with-fallback",
+                priority=1,
+                decision=GovernanceDecision.ALLOW,
+                approval=approval,
             ),
         )
     )
@@ -240,25 +251,42 @@ def test_capability_envelope_never_broadens_tool_binding() -> None:
         effect_type=ToolEffectType.DESTRUCTIVE,
     )
 
-    def decision(
+    def evaluate(
         binding: ToolBinding,
         policy: GovernancePolicyVersion = allow,
-    ) -> GovernanceDecision:
+    ):
         return evaluate_policy(
             policy,
             principal=principal,
             agent_version_id=agent_version_id,
             binding=binding,
-        ).effective_decision
+        )
 
-    assert decision(read) is GovernanceDecision.ALLOW
-    assert decision(read_approval) is GovernanceDecision.REQUIRE_APPROVAL
-    assert decision(write_no_capability) is GovernanceDecision.REQUIRE_APPROVAL
-    assert decision(write_allowed) is GovernanceDecision.ALLOW
-    assert decision(external_allowed) is GovernanceDecision.ALLOW
-    assert decision(destructive) is GovernanceDecision.REQUIRE_APPROVAL
-    assert decision(destructive, deny) is GovernanceDecision.DENY
+    read_allow = evaluate(read)
+    assert read_allow.effective_decision is GovernanceDecision.ALLOW
+    assert read_allow.approval is None
 
+    assert evaluate(read_approval).effective_decision is GovernanceDecision.DENY
+    assert evaluate(write_no_capability).effective_decision is GovernanceDecision.DENY
+    assert evaluate(destructive).effective_decision is GovernanceDecision.DENY
+
+    read_pending = evaluate(read_approval, allow_with_fallback)
+    write_pending = evaluate(write_no_capability, allow_with_fallback)
+    destructive_pending = evaluate(destructive, allow_with_fallback)
+    assert read_pending.effective_decision is GovernanceDecision.REQUIRE_APPROVAL
+    assert write_pending.effective_decision is GovernanceDecision.REQUIRE_APPROVAL
+    assert destructive_pending.effective_decision is GovernanceDecision.REQUIRE_APPROVAL
+    assert read_pending.approval == approval
+    assert write_pending.approval == approval
+    assert destructive_pending.approval == approval
+
+    write_allow = evaluate(write_allowed, allow_with_fallback)
+    external_allow = evaluate(external_allowed, allow_with_fallback)
+    assert write_allow.effective_decision is GovernanceDecision.ALLOW
+    assert external_allow.effective_decision is GovernanceDecision.ALLOW
+    assert write_allow.approval is None
+    assert external_allow.approval is None
+    assert evaluate(destructive, deny).effective_decision is GovernanceDecision.DENY
 
 def test_draft_and_malformed_policy_fail_closed_but_retired_pinned_policy_still_evaluates() -> None:
     principal = _principal()
