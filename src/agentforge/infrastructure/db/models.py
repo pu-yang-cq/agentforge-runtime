@@ -23,6 +23,9 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from agentforge.domain.enums import (
     ActionResolutionOutcome,
     ExternalActionStatus,
+    GovernanceMode,
+    GovernancePolicyStatus,
+    PrincipalType,
     QueueReason,
     ReconciliationAttemptStatus,
     ReconciliationBusinessResult,
@@ -168,9 +171,50 @@ class ToolVersionRow(Base):
     )
 
 
+class GovernancePolicyVersionRow(Base):
+    __tablename__ = "governance_policy_versions"
+    __table_args__ = (
+        UniqueConstraint("policy_key", "version_number"),
+        CheckConstraint("version_number > 0", name="ck_governance_policy_versions_positive_version"),
+        CheckConstraint(
+            "jsonb_typeof(rules) = 'array' AND jsonb_array_length(rules) <= 128",
+            name="ck_governance_policy_versions_bounded_rules",
+        ),
+        CheckConstraint(
+            "(status = 'DRAFT' AND published_at IS NULL AND retired_at IS NULL) OR "
+            "(status = 'PUBLISHED' AND published_at IS NOT NULL AND retired_at IS NULL) OR "
+            "(status = 'RETIRED' AND published_at IS NOT NULL AND retired_at IS NOT NULL)",
+            name="ck_governance_policy_versions_lifecycle_shape",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    policy_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[GovernancePolicyStatus] = mapped_column(
+        Enum(GovernancePolicyStatus, name="governance_policy_status"), nullable=False
+    )
+    rules: Mapped[list[dict[str, object]]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+
+
 class AgentVersionRow(Base):
     __tablename__ = "agent_versions"
-    __table_args__ = (UniqueConstraint("agent_id", "version_number"),)
+    __table_args__ = (
+        UniqueConstraint("agent_id", "version_number"),
+        CheckConstraint(
+            "(governance_mode = 'LEGACY_STAGE32' AND policy_version_id IS NULL) OR "
+            "(governance_mode = 'GOVERNED' AND policy_version_id IS NOT NULL)",
+            name="ck_agent_versions_governance_shape",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
     agent_id: Mapped[UUID] = mapped_column(
@@ -178,6 +222,15 @@ class AgentVersionRow(Base):
     )
     version_number: Mapped[int] = mapped_column(Integer, nullable=False)
     instructions: Mapped[str] = mapped_column(Text, nullable=False)
+    governance_mode: Mapped[GovernanceMode] = mapped_column(
+        Enum(GovernanceMode, name="governance_mode"),
+        nullable=False,
+        default=GovernanceMode.LEGACY_STAGE32,
+        server_default=text("'LEGACY_STAGE32'"),
+    )
+    policy_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("governance_policy_versions.id", ondelete="RESTRICT"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
     )
@@ -238,6 +291,19 @@ class RunRow(Base):
             "max_tool_attempts > 0",
             name="ck_runs_positive_tool_budget",
         ),
+        CheckConstraint(
+            "(policy_version_id IS NULL AND requester_principal_id IS NULL AND "
+            "requester_principal_type IS NULL AND requester_roles IS NULL AND "
+            "requester_scope IS NULL AND requester_authn_source IS NULL) OR "
+            "(policy_version_id IS NOT NULL AND requester_principal_id IS NOT NULL AND "
+            "requester_principal_type IS NOT NULL AND requester_roles IS NOT NULL AND "
+            "requester_scope IS NOT NULL AND requester_authn_source IS NOT NULL)",
+            name="ck_runs_governance_snapshot_shape",
+        ),
+        CheckConstraint(
+            "requester_roles IS NULL OR jsonb_typeof(requester_roles) = 'array'",
+            name="ck_runs_requester_roles_array",
+        ),
         Index("ix_runs_runnable", "status", "available_at", "created_at"),
         Index("ix_runs_lease", "status", "lease_expires_at"),
     )
@@ -246,6 +312,16 @@ class RunRow(Base):
     agent_version_id: Mapped[UUID] = mapped_column(
         ForeignKey("agent_versions.id", ondelete="RESTRICT"), nullable=False
     )
+    policy_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("governance_policy_versions.id", ondelete="RESTRICT"), nullable=True
+    )
+    requester_principal_id: Mapped[str | None] = mapped_column(String(200))
+    requester_principal_type: Mapped[PrincipalType | None] = mapped_column(
+        Enum(PrincipalType, name="principal_type"), nullable=True
+    )
+    requester_roles: Mapped[list[str] | None] = mapped_column(JSONB)
+    requester_scope: Mapped[str | None] = mapped_column(String(200))
+    requester_authn_source: Mapped[str | None] = mapped_column(String(100))
     input_text: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[RunStatus] = mapped_column(Enum(RunStatus, name="run_status"), nullable=False)
     queue_reason: Mapped[QueueReason | None] = mapped_column(
