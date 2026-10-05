@@ -47,9 +47,13 @@ Stage 3.3 implementation is in progress.
 - successful A2 gate: `37275301253`
 - successful A aggregate gate: `37281068420`
 - aggregate acceptance: `docs/implementation/stage3.3-a-accepted.md`
-- Stage 3.3-B Governed ALLOW / DENY + Control-plane Authorization: **UNLOCKED**
+- Stage 3.3-B Governed ALLOW / DENY + Control-plane Authorization: **ACCEPTED / FROZEN**
+- accepted Stage 3.3-B semantic candidate: `bdeef5adbda0408b7b17af9042ce1dd731ab3804`
+- successful B gate: `37300886491`
+- B acceptance: `docs/implementation/stage3.3-b-accepted.md`
+- Stage 3.3-C Durable Approval Intent: **UNLOCKED**
 
-Stage 3.3-C and later Stage 3.3 runtime acceptance remain **LOCKED** until their frozen
+Stage 3.3-D and later Stage 3.3 runtime acceptance remain **LOCKED** until their frozen
 implementation gates pass.
 
 Stage 3.1 accepted immutable source:
