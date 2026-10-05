@@ -23,33 +23,25 @@ jobs:
         run: |
           set -Eeuo pipefail
           baseline=46b97f7e7d73cf8239a00014ef7d51ded9fecc2d
+
           test -f docs/design/stage3.3-governance-amendment-001-approval-metadata.md
           test -f docs/acceptance/stage3.3-governance-amendment-001-approval-metadata.md
 
-          git diff --exit-code "$stage32" --             docs/design/stage3.3-governance-v1.0-frozen.md             docs/acceptance/stage3.3-governance-acceptance-v1.0-frozen.md
-          git diff --exit-code "$a2" -- docs/implementation/stage3.3-a2-accepted.md
-          git diff --exit-code "$b" -- docs/implementation/stage3.3-b-accepted.md
-          git diff --exit-code "$baseline" -- migrations
+          git diff --exit-code "$baseline" --             docs/design/stage3.3-governance-v1.0-frozen.md             docs/acceptance/stage3.3-governance-acceptance-v1.0-frozen.md             docs/implementation/stage3.3-a2-accepted.md             docs/implementation/stage3.3-b-accepted.md             migrations
 
-          allowed='^(
-            docs/design/stage3\.3-governance-amendment-001-approval-metadata\.md|
-            docs/acceptance/stage3\.3-governance-amendment-001-approval-metadata\.md|
-            src/agentforge/domain/governance\.py|
-            src/agentforge/domain/governance_decisions\.py|
-            tests/unit/test_stage33_a1_governance_foundation\.py|
-            tests/unit/test_stage33_a2_policy_evaluator\.py|
-            tests/unit/test_stage33_c_approval_intent\.py|
-            \.github/workflows/stage33-amendment001-acceptance\.yml|
-            rc/RUN_STAGE33_AMENDMENT001_ACCEPTANCE
-          )$'
           changed="$(git diff --name-only "$baseline"..HEAD)"
           while IFS= read -r path; do
             [ -z "$path" ] && continue
-            if ! printf '%s\n' "$path" | grep -Eq "$allowed"; then
-              echo "unexpected amendment file: $path" >&2
-              exit 1
-            fi
+            case "$path" in
+              docs/design/stage3.3-governance-amendment-001-approval-metadata.md|              docs/acceptance/stage3.3-governance-amendment-001-approval-metadata.md|              src/agentforge/domain/governance.py|              src/agentforge/domain/governance_decisions.py|              tests/unit/test_stage33_a1_governance_foundation.py|              tests/unit/test_stage33_a2_policy_evaluator.py|              tests/unit/test_stage33_c_approval_intent.py|              .github/workflows/stage33-amendment001-acceptance.yml|              rc/RUN_STAGE33_AMENDMENT001_ACCEPTANCE)
+                ;;
+              *)
+                echo "unexpected amendment file: $path" >&2
+                exit 1
+                ;;
+            esac
           done <<< "$changed"
+
           echo "amendment surface and frozen authorities: PASS"
 
       - name: Run amendment unit contracts
