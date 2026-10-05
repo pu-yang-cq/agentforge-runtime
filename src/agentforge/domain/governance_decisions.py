@@ -211,7 +211,7 @@ def evaluate_policy(
             if effective is GovernanceDecision.REQUIRE_APPROVAL
             else None,
         )
-    except (AttributeError, KeyError, TypeError, ValueError):
+    except AttributeError, KeyError, TypeError, ValueError:
         return PolicyEvaluation(
             raw_decision=GovernanceDecision.DENY,
             effective_decision=GovernanceDecision.DENY,
