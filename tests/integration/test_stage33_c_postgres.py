@@ -289,9 +289,7 @@ async def test_c_read_require_approval_atomically_enters_waiting_with_zero_io() 
             )
         ).scalar_one()
         call = (
-            await session.execute(
-                select(ToolCallRow).where(ToolCallRow.run_id == fx.claimed.id)
-            )
+            await session.execute(select(ToolCallRow).where(ToolCallRow.run_id == fx.claimed.id))
         ).scalar_one()
         decision = (
             await session.execute(
@@ -384,9 +382,7 @@ async def test_c_side_effect_require_approval_freezes_exact_action_identity(
     async with fx.sessions() as session:
         run = await session.get(RunRow, fx.claimed.id)
         call = (
-            await session.execute(
-                select(ToolCallRow).where(ToolCallRow.run_id == fx.claimed.id)
-            )
+            await session.execute(select(ToolCallRow).where(ToolCallRow.run_id == fx.claimed.id))
         ).scalar_one()
         action = (
             await session.execute(
