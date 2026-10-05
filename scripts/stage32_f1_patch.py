@@ -251,9 +251,11 @@ replace_once(
     "src/agentforge/infrastructure/db/runtime_store.py",
     '''    ActionResolutionRow,
     AgentVersionRow,
+    AgentVersionToolRow,
 ''',
     '''    ActionResolutionRow,
     AgentVersionRow,
+    AgentVersionToolRow,
     CheckpointRow,
 ''',
 )
