@@ -153,6 +153,24 @@ class ExternalAction:
             operation_id=operation_id,
         )
 
+    @classmethod
+    def awaiting_approval(
+        cls,
+        *,
+        run_id: UUID,
+        tool_call_id: UUID,
+        action_snapshot_id: UUID,
+        operation_id: UUID,
+    ) -> ExternalAction:
+        return cls(
+            id=uuid4(),
+            run_id=run_id,
+            tool_call_id=tool_call_id,
+            action_snapshot_id=action_snapshot_id,
+            operation_id=operation_id,
+            status=ExternalActionStatus.AWAITING_APPROVAL,
+        )
+
     def start(self, attempt_id: UUID) -> None:
         if self.status is not ExternalActionStatus.READY or self.current_attempt_id is not None:
             raise ValueError(
