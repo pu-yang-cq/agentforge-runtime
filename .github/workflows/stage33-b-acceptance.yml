@@ -1,0 +1,82 @@
+name: Stage 3.3-B Governed Allow Deny Authorization
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/RUN_STAGE33_B_ACCEPTANCE
+
+permissions:
+  contents: read
+
+jobs:
+  accept:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Verify frozen Stage 3.3 lineage and B surface
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f docs/design/stage3.3-governance-v1.0-frozen.md
+          test -f docs/acceptance/stage3.3-governance-acceptance-v1.0-frozen.md
+          test -f docs/implementation/stage3.3-a-accepted.md
+          test -f docs/implementation/stage3.3-slices-frozen.md
+          test -f tests/unit/test_stage33_b_governed_consequence.py
+          test -f tests/unit/test_stage33_b_control_plane_auth.py
+          test -f tests/integration/test_stage33_b_postgres.py
+
+      - name: Prove accepted Stage 3.2 A1 and A2 migration lineage unchanged
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          stage32=fa747268cfbf1d5b57e5796b9cbc767abc3d4e0c
+          a1=cf1c7571b67210bedfe411865bb940c83e6da4f0
+          a2=9b8a9bd45dd8f76f93a06d1ece4a2846e7043af9
+
+          for path in migrations/versions/00{01,02,03,04,05,06,07,08,09}_*.py                       migrations/versions/001{0,1,2,3,4,5,6}_*.py; do
+            git diff --exit-code "$stage32" -- "$path"
+          done
+          git diff --exit-code "$a1" -- migrations/versions/0017_governance_identity_policy.py
+          git diff --exit-code "$a2" -- migrations/versions/0018_governance_decision.py
+          echo "frozen migration lineage through 0018 unchanged: PASS"
+
+      - name: Run Stage 3.3-B unit contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm             -v "$PWD:/workspace"             -w /workspace             -e UV_PROJECT_ENVIRONMENT=/tmp/agentforge-stage33-b-unit-venv             -e UV_CACHE_DIR=/tmp/agentforge-stage33-b-unit-cache             ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim             sh -lc "uv sync --locked --all-groups >/dev/null && uv run --locked pytest -q               tests/unit/test_stage33_a1_governance_foundation.py               tests/unit/test_stage33_a2_policy_evaluator.py               tests/unit/test_stage33_a2_governance_intent.py               tests/unit/test_stage33_b_governed_consequence.py               tests/unit/test_stage33_b_control_plane_auth.py               tests/unit/test_migration_contract.py               tests/unit/test_alembic_revision_width.py"
+
+      - name: Run Stage 3.3-B PostgreSQL contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          compose='docker compose -f docker-compose.acceptance.yml'
+          trap '$compose down -v --remove-orphans >/dev/null 2>&1 || true' EXIT
+          $compose up -d postgres
+          $compose run --rm validator /bin/sh -lc '
+            uv sync --locked --all-groups >/dev/null &&
+            uv run --locked pytest -q               tests/integration/test_stage33_a1_postgres.py               tests/integration/test_stage33_a2_postgres.py               tests/integration/test_stage33_b_postgres.py
+          '
+          $compose down -v --remove-orphans
+          trap - EXIT
+
+      - name: Prove B does not implement approval waiting early
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if grep -R -n -E             'WAITING_APPROVAL|AWAITING_APPROVAL|class ApprovalRequest|class ApprovalDecision'             src/agentforge migrations/versions; then
+            echo "Stage 3.3-B must not implement approval waiting/decision states" >&2
+            exit 1
+          fi
+          echo "no early approval-state implementation: PASS"
+
+      - name: Run complete Stage 3.2 regression on Stage 3.3-B head
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ./scripts/validate_stage31_containerized.sh
