@@ -15,6 +15,8 @@ from agentforge.domain.actions import ActionSnapshot, ExternalAction
 from agentforge.domain.enums import (
     EventType,
     ExternalActionStatus,
+    GovernanceDecision,
+    GovernanceMode,
     MessageRole,
     ModelInvocationStatus,
     QueueReason,
@@ -25,6 +27,16 @@ from agentforge.domain.enums import (
     ToolCallStatus,
     ToolEffectType,
     ToolExecutionAttemptStatus,
+)
+from agentforge.domain.governance import (
+    GovernancePolicyRule,
+    GovernancePolicyVersion,
+    PrincipalContext,
+)
+from agentforge.domain.governance_decisions import (
+    GovernanceIntentV1,
+    PolicyEvaluation,
+    evaluate_policy,
 )
 from agentforge.domain.models import (
     ModelInvocation,
@@ -46,10 +58,14 @@ from agentforge.infrastructure.db.mappers import (
 )
 from agentforge.infrastructure.db.models import (
     ActionSnapshotRow,
+    AgentVersionRow,
     AgentVersionToolRow,
     DomainEventRow,
     ExternalActionRow,
+    GovernanceIntentRow,
+    GovernancePolicyVersionRow,
     ModelInvocationRow,
+    PolicyDecisionRow,
     ReconciliationAttemptRow,
     RunCounterRow,
     RunMessageRow,
@@ -263,6 +279,178 @@ async def _lock_stage32_side_effect_tool_version(
     if row.credential_ref is not None and not row.credential_ref.strip():
         raise PermissionError("ToolVersion credential_ref configuration is invalid")
     return row
+
+
+def _fail_closed_governance_evaluation() -> PolicyEvaluation:
+    return PolicyEvaluation(
+        raw_decision=GovernanceDecision.DENY,
+        effective_decision=GovernanceDecision.DENY,
+        matched_rule_id=None,
+    )
+
+
+async def _persist_governance_audit_in_consequence(
+    session: AsyncSession,
+    *,
+    run: RunRow,
+    proposal: ToolProposal,
+    intent: GovernanceIntentV1,
+    evaluation: PolicyEvaluation,
+    policy_version_id: UUID,
+) -> PolicyDecisionRow:
+    if run.policy_version_id != policy_version_id or run.policy_version_id is None:
+        raise ValueError("governed consequence policy does not match pinned Run policy")
+    if run.agent_version_id != intent.agent_version_id or intent.run_id != run.id:
+        raise ValueError("GovernanceIntent does not match durable Run identity")
+    if intent.proposal_id != proposal.id or proposal.run_id != run.id:
+        raise ValueError("GovernanceIntent does not match durable ToolProposal identity")
+    if (
+        run.requester_principal_id is None
+        or run.requester_principal_type is None
+        or run.requester_roles is None
+        or run.requester_scope is None
+        or run.requester_authn_source is None
+    ):
+        raise ValueError("GOVERNED Run is missing durable requester snapshot")
+    if (
+        intent.requester_principal_id != run.requester_principal_id
+        or intent.requester_principal_type is not run.requester_principal_type
+        or intent.requester_roles != tuple(run.requester_roles)
+        or intent.principal_scope != run.requester_scope
+    ):
+        raise ValueError("GovernanceIntent requester does not match durable Run snapshot")
+
+    agent_version = (
+        await session.execute(
+            select(AgentVersionRow)
+            .where(AgentVersionRow.id == run.agent_version_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if agent_version is None:
+        raise KeyError(f"agent version not found: {run.agent_version_id}")
+    if (
+        agent_version.governance_mode is not GovernanceMode.GOVERNED
+        or agent_version.policy_version_id != policy_version_id
+    ):
+        raise ValueError("Run AgentVersion is not governed by the exact pinned policy")
+
+    binding_row = (
+        await session.execute(
+            select(AgentVersionToolRow)
+            .where(
+                AgentVersionToolRow.agent_version_id == run.agent_version_id,
+                AgentVersionToolRow.tool_version_id == intent.tool_version_id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if binding_row is None or binding_row.tool_alias != proposal.tool_name:
+        raise ValueError("GovernanceIntent ToolVersion is not the immutable proposal binding")
+
+    tool_version = (
+        await session.execute(
+            select(ToolVersionRow)
+            .where(ToolVersionRow.id == intent.tool_version_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if tool_version is None:
+        raise KeyError(f"tool version not found: {intent.tool_version_id}")
+
+    binding = ToolBinding(
+        tool_version_id=tool_version.id,
+        name=binding_row.tool_alias,
+        effect_type=tool_version.effect_type,
+        approval_required=tool_version.approval_required,
+        allow_no_approval_execution=tool_version.allow_no_approval_execution,
+    )
+    principal = PrincipalContext(
+        principal_id=run.requester_principal_id,
+        principal_type=run.requester_principal_type,
+        roles=tuple(run.requester_roles),
+        principal_scope=run.requester_scope,
+        authn_source=run.requester_authn_source,
+    )
+    durable_intent = GovernanceIntentV1.create(
+        run_id=run.id,
+        agent_version_id=run.agent_version_id,
+        proposal_id=proposal.id,
+        binding=binding,
+        arguments=proposal.arguments,
+        principal=principal,
+    )
+    if durable_intent != intent:
+        raise ValueError("GovernanceIntent does not match durable governed consequence facts")
+
+    policy_row = (
+        await session.execute(
+            select(GovernancePolicyVersionRow)
+            .where(GovernancePolicyVersionRow.id == policy_version_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if policy_row is None:
+        raise KeyError(f"governance policy not found: {policy_version_id}")
+    try:
+        policy = GovernancePolicyVersion(
+            id=policy_row.id,
+            policy_key=policy_row.policy_key,
+            version_number=policy_row.version_number,
+            status=policy_row.status,
+            rules=tuple(
+                GovernancePolicyRule.from_record(record) for record in policy_row.rules
+            ),
+            created_at=policy_row.created_at,
+            published_at=policy_row.published_at,
+            retired_at=policy_row.retired_at,
+        )
+        durable_evaluation = evaluate_policy(
+            policy,
+            principal=principal,
+            agent_version_id=run.agent_version_id,
+            binding=binding,
+        )
+    except (AttributeError, TypeError, ValueError):
+        durable_evaluation = _fail_closed_governance_evaluation()
+
+    if durable_evaluation != evaluation:
+        raise ValueError("PolicyEvaluation does not match durable pinned policy")
+
+    intent_row = GovernanceIntentRow(
+        id=uuid4(),
+        format_version=intent.format_version,
+        run_id=intent.run_id,
+        agent_version_id=intent.agent_version_id,
+        proposal_id=intent.proposal_id,
+        tool_version_id=intent.tool_version_id,
+        effect_type=intent.effect_type,
+        requester_principal_id=intent.requester_principal_id,
+        requester_principal_type=intent.requester_principal_type,
+        requester_roles=list(intent.requester_roles),
+        principal_scope=intent.principal_scope,
+        canonical_json=intent.canonical_json,
+        digest=intent.digest,
+    )
+    session.add(intent_row)
+    await session.flush()
+
+    decision_row = PolicyDecisionRow(
+        id=uuid4(),
+        governance_intent_id=intent_row.id,
+        run_id=intent.run_id,
+        proposal_id=intent.proposal_id,
+        tool_version_id=intent.tool_version_id,
+        policy_version_id=policy_version_id,
+        requester_principal_id=intent.requester_principal_id,
+        principal_scope=intent.principal_scope,
+        effective_decision=evaluation.effective_decision,
+        matched_rule_id=evaluation.matched_rule_id,
+        intent_digest=intent.digest,
+    )
+    session.add(decision_row)
+    await session.flush()
+    return decision_row
 
 
 async def _assert_no_started_model_invocations(session: AsyncSession, run_id: UUID) -> None:
