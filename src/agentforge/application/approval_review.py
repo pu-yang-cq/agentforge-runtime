@@ -70,9 +70,7 @@ def build_pending_approval_review_projection(
         and intent.tool_version_id == decision.tool_version_id == tool_version_id
     ):
         raise ValueError("approval review durable identity mismatch")
-    if not (
-        request.governance_intent_digest == intent.digest == decision.intent_digest
-    ):
+    if not (request.governance_intent_digest == intent.digest == decision.intent_digest):
         raise ValueError("approval review GovernanceIntent digest mismatch")
     if (
         request.requested_by_principal != intent.requester_principal_id
