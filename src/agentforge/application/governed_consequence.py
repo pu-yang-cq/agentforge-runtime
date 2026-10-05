@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from uuid import uuid4
 
 from agentforge.domain.enums import GovernanceDecision, GovernanceMode, ToolCallStatus
 from agentforge.domain.governance import GovernancePolicyVersion, PrincipalContext
@@ -116,7 +117,7 @@ def plan_governed_tool_consequence(
 
     if evaluation.effective_decision is GovernanceDecision.DENY:
         denied_call = ToolCall(
-            id=__import__("uuid").uuid4(),
+            id=uuid4(),
             run_id=proposal.run_id,
             proposal_id=proposal.id,
             tool_version_id=binding.tool_version_id,
