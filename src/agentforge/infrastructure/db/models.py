@@ -175,7 +175,10 @@ class GovernancePolicyVersionRow(Base):
     __tablename__ = "governance_policy_versions"
     __table_args__ = (
         UniqueConstraint("policy_key", "version_number"),
-        CheckConstraint("version_number > 0", name="ck_governance_policy_versions_positive_version"),
+        CheckConstraint(
+            "version_number > 0",
+            name="ck_governance_policy_versions_positive_version",
+        ),
         CheckConstraint(
             "jsonb_typeof(rules) = 'array' AND jsonb_array_length(rules) <= 128",
             name="ck_governance_policy_versions_bounded_rules",
