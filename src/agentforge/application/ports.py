@@ -301,6 +301,18 @@ class ExecutionRecorder(Protocol):
         expected_generation: int,
     ) -> RunState: ...
 
+    async def record_governed_model_read_allowed_started(
+        self,
+        invocation: ModelInvocation,
+        proposal: ToolProposal,
+        call: ToolCall,
+        intent: GovernanceIntentV1,
+        evaluation: PolicyEvaluation,
+        policy_version_id: UUID,
+        *,
+        expected_generation: int,
+    ) -> RunState: ...
+
     async def record_model_side_effect_prepared(
         self,
         invocation: ModelInvocation,
@@ -312,12 +324,39 @@ class ExecutionRecorder(Protocol):
         expected_generation: int,
     ) -> RunState: ...
 
+    async def record_governed_model_side_effect_allowed_prepared(
+        self,
+        invocation: ModelInvocation,
+        proposal: ToolProposal,
+        call: ToolCall,
+        snapshot: ActionSnapshot,
+        action: ExternalAction,
+        intent: GovernanceIntentV1,
+        evaluation: PolicyEvaluation,
+        policy_version_id: UUID,
+        *,
+        expected_generation: int,
+    ) -> RunState: ...
+
     async def record_model_tool_denied_and_fail_run(
         self,
         invocation: ModelInvocation,
         proposal: ToolProposal,
         call: ToolCall,
         run: Run,
+        *,
+        expected_generation: int,
+    ) -> None: ...
+
+    async def record_governed_model_tool_denied_and_fail_run(
+        self,
+        invocation: ModelInvocation,
+        proposal: ToolProposal,
+        call: ToolCall,
+        run: Run,
+        intent: GovernanceIntentV1,
+        evaluation: PolicyEvaluation,
+        policy_version_id: UUID,
         *,
         expected_generation: int,
     ) -> None: ...
