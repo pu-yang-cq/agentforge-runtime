@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from agentforge.application.approval_review import (
@@ -10,6 +9,7 @@ from agentforge.application.approval_review import (
     build_pending_approval_review_projection,
 )
 from agentforge.domain.approvals import ApprovalRequest
+from agentforge.domain.enums import ApprovalRequestStatus
 from agentforge.domain.governance_decisions import GovernanceIntentV1, PolicyDecision
 from agentforge.infrastructure.db.mappers import (
     action_snapshot_from_row,
@@ -33,7 +33,7 @@ class PostgresApprovalReviewStore:
     async def get_pending(self, approval_request_id: UUID) -> ApprovalReviewProjection | None:
         async with self._sessions() as session:
             request_row = await session.get(ApprovalRequestRow, approval_request_id)
-            if request_row is None:
+            if request_row is None or request_row.status is not ApprovalRequestStatus.PENDING:
                 return None
 
             decision_row = await session.get(PolicyDecisionRow, request_row.policy_decision_id)
