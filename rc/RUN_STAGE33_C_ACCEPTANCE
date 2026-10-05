@@ -1,7 +1,9 @@
 Stage 3.3-C Durable Approval Intent acceptance
 
-Candidate: 0341b1ee1f0247533613d61bb45e45faaa66349c
+Candidate: e3a10c5f27494ec4adc3d2564a96a4088f78c422
 Governance Amendment 001: 8d7b214c9ce38e201da364af59dcc35a90565205
 Amendment acceptance run: 37325262562
+Previous run: 37328632050
+Previous result: FAILED_RUFF_FORMAT_ONLY
 Scope: C1 + C2 + C3 durable approval intent
-Attempt: 1
+Attempt: 2
