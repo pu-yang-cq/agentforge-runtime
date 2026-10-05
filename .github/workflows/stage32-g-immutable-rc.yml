@@ -1,0 +1,106 @@
+name: Stage 3.2-G Immutable RC Gate
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/RUN_STAGE32_G_RC
+
+permissions:
+  contents: read
+
+jobs:
+  rc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - name: Checkout immutable RC commit
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: 3286e348166bc4e704121e5057444767a9cab8ac
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Prove exact RC identity and ref immutability
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          expected=3286e348166bc4e704121e5057444767a9cab8ac
+          test "$(git rev-parse HEAD)" = "$expected"
+          remote="$(git ls-remote origin refs/heads/rc/stage3.2-v1.0 | awk '{print $1}')"
+          test "$remote" = "$expected"
+          echo "immutable RC ref -> exact accepted SHA: PASS"
+
+      - name: Prove pinned toolchain and Stage 3.1 migration lineage
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(cat .python-version)" = "3.14"
+          grep -F 'requires-python = "==3.14.*"' uv.lock
+          grep -F 'postgres:18.6-bookworm' docker-compose.acceptance.yml
+
+          test "$(git hash-object .python-version)" = "6324d401a069f4020efcf0ff07442724b52f47c2"
+          test "$(git hash-object uv.lock)" = "1c9cb3de493f1abc48c30fb8c537ede6fda3feda"
+          test "$(git hash-object pyproject.toml)" = "ddd68ded78b4a83af9e176c68108cc06f6d59860"
+          test "$(git hash-object docker-compose.acceptance.yml)" = "9c7456d4eca97175c3ce373980f3aced6d360ca9"
+          test "$(git hash-object alembic.ini)" = "47bec5a1ac75841382f0acef23c4a957a951de4c"
+
+          test "$(git hash-object migrations/versions/0001_core_runtime.py)" = "e461dd96a319f4eb615ae113d8658cf2ba4654e5"
+          test "$(git hash-object migrations/versions/0002_model_invocation_lifecycle.py)" = "59ddb1437dd79d720227b21df66ba3f629f00df9"
+          test "$(git hash-object migrations/versions/0003_denied_tool_calls.py)" = "4b77fbe5327ca15b0862091c52f41a5d58de73db"
+          test "$(git hash-object migrations/versions/0004_active_progression_invariants.py)" = "edc912a7259c883560e8139e02c432d3b8cc0ab4"
+          test "$(git hash-object migrations/versions/0005_run_terminal_shape.py)" = "9a8c3db7dcbaf6c0d543f8cce7b874fa9278f4ef"
+          echo "Stage 3.1 migration lineage unchanged: PASS"
+
+      - name: Prove forward migration from frozen Stage 3.1 head to Stage 3.2 head
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          compose='docker compose -f docker-compose.acceptance.yml'
+          trap '$compose down -v --remove-orphans >/dev/null 2>&1 || true' EXIT
+          $compose up -d postgres
+          $compose run --rm validator /bin/sh -lc '
+            set -Eeuo pipefail
+            uv sync --locked --all-groups >/dev/null
+            uv run --locked alembic upgrade 0005_run_terminal_shape
+            current=$(uv run --locked alembic current | tr -d "\r")
+            echo "$current" | grep -F "0005_run_terminal_shape"
+            uv run --locked alembic upgrade head
+            current=$(uv run --locked alembic current | tr -d "\r")
+            echo "$current" | grep -F "0016_checkpoint_overlay"
+            uv run --locked alembic heads | grep -F "0016_checkpoint_overlay"
+          '
+          $compose down -v --remove-orphans
+          trap - EXIT
+
+      - name: Run immutable RC 12-window crash matrix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          compose='docker compose -f docker-compose.acceptance.yml'
+          trap '$compose down -v --remove-orphans >/dev/null 2>&1 || true' EXIT
+          $compose up -d postgres
+          $compose run --rm validator /bin/sh -lc '
+            uv sync --locked --all-groups >/dev/null &&
+            uv run --locked pytest -q \
+              tests/integration/test_postgres_runtime.py::test_side_effect_preparation_stale_lease_creates_no_intent \
+              tests/integration/test_postgres_runtime.py::test_ready_action_recovery_uses_same_operation_id_without_model_reproposal \
+              tests/integration/test_postgres_runtime.py::test_action_commit_deadline_block_aborts_ready_action_without_external_call \
+              tests/integration/test_postgres_runtime.py::test_f3_crash_post_commit_pre_call_no_duplicate_effect \
+              tests/integration/test_postgres_runtime.py::test_f3_crash_during_external_call_recovers_without_duplicate_effect \
+              tests/integration/test_postgres_runtime.py::test_f3_crash_after_external_effect_before_response_reconciles_without_replay \
+              tests/integration/test_postgres_runtime.py::test_f3_crash_after_response_before_result_commit_reconciles_without_replay \
+              tests/integration/test_postgres_runtime.py::test_e3_result_wins_then_cancellation_does_not_rollback_succeeded_action \
+              tests/integration/test_postgres_runtime.py::test_orphaned_reconciliation_attempt_closes_failed_and_preserves_truth \
+              tests/integration/test_postgres_runtime.py::test_e3_cancellation_wins_reconciliation_success_truth_without_continuation \
+              tests/integration/test_postgres_runtime.py::test_side_effect_safe_retry_reuses_action_and_operation_id_across_claims \
+              tests/integration/test_postgres_runtime.py::test_e3_cancel_wins_side_effect_result_records_truth_and_fences_worker
+          '
+          $compose down -v --remove-orphans
+          trap - EXIT
+
+      - name: Run immutable RC final Python 3.14 + PostgreSQL 18 gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ./scripts/validate_stage31_containerized.sh
