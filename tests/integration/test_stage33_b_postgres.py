@@ -226,8 +226,9 @@ async def _fixture(
                     name=tool_name,
                     description="side effect",
                     input_schema={"type": "object"},
-                    func=lambda invocation: physical_calls.append(str(invocation.operation_id))
-                    or {"ok": True},
+                    func=lambda invocation: (
+                        physical_calls.append(str(invocation.operation_id)) or {"ok": True}
+                    ),
                 )
             ]
         )
