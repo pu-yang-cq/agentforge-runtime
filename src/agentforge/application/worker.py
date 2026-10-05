@@ -84,20 +84,13 @@ class CoreWorker:
             agent_version = await self._runtime_store.load_agent_version(run.agent_version_id)
             governance_policy = None
             if agent_version.governance_mode is GovernanceMode.GOVERNED:
-                if (
-                    self._governance_policy_store is None
-                    or agent_version.policy_version_id is None
-                ):
-                    raise RuntimeError(
-                        "GOVERNED Worker requires an exact GovernancePolicyStore"
-                    )
+                if self._governance_policy_store is None or agent_version.policy_version_id is None:
+                    raise RuntimeError("GOVERNED Worker requires an exact GovernancePolicyStore")
                 governance_policy = await self._governance_policy_store.get(
                     agent_version.policy_version_id
                 )
                 if governance_policy is None:
-                    raise RuntimeError(
-                        "GOVERNED Worker could not load the exact pinned policy"
-                    )
+                    raise RuntimeError("GOVERNED Worker could not load the exact pinned policy")
             run_state = await self._runtime_store.load_run_state(run.id)
             recorder = self._recorder_factory(
                 run_id=run.id,
