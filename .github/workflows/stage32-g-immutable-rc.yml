@@ -4,7 +4,7 @@ name: Stage 3.2-G Immutable RC Gate
   push:
     branches: [main]
     paths:
-      - rc/RUN_STAGE32_G_RC
+      - rc/RUN_STAGE32_G_RC2
 
 permissions:
   contents: read
@@ -17,7 +17,7 @@ jobs:
       - name: Checkout immutable RC commit
         uses: actions/checkout@v7.0.1
         with:
-          ref: 3286e348166bc4e704121e5057444767a9cab8ac
+          ref: fa747268cfbf1d5b57e5796b9cbc767abc3d4e0c
           fetch-depth: 0
           persist-credentials: true
 
@@ -25,9 +25,9 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          expected=3286e348166bc4e704121e5057444767a9cab8ac
+          expected=fa747268cfbf1d5b57e5796b9cbc767abc3d4e0c
           test "$(git rev-parse HEAD)" = "$expected"
-          remote="$(git ls-remote origin refs/heads/rc/stage3.2-v1.0 | awk '{print $1}')"
+          remote="$(git ls-remote origin refs/heads/rc/stage3.2-v1.0-r2 | awk '{print $1}')"
           test "$remote" = "$expected"
           echo "immutable RC ref -> exact accepted SHA: PASS"
 
@@ -50,7 +50,8 @@ jobs:
           test "$(git hash-object migrations/versions/0003_denied_tool_calls.py)" = "4b77fbe5327ca15b0862091c52f41a5d58de73db"
           test "$(git hash-object migrations/versions/0004_active_progression_invariants.py)" = "edc912a7259c883560e8139e02c432d3b8cc0ab4"
           test "$(git hash-object migrations/versions/0005_run_terminal_shape.py)" = "9a8c3db7dcbaf6c0d543f8cce7b874fa9278f4ef"
-          echo "Stage 3.1 migration lineage unchanged: PASS"
+          test "$(git hash-object migrations/versions/0009_external_action_intent.py)" = "6becaf625042262b2fbd43f94b69564738fe2238"
+          echo "Stage 3.1 migration lineage unchanged + RC2 enum-resume fix pinned: PASS"
 
       - name: Prove forward migration from frozen Stage 3.1 head to Stage 3.2 head
         shell: bash
