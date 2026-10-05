@@ -54,6 +54,7 @@ from agentforge.infrastructure.db.models import (
     ToolCallRow,
     ToolDefinitionRow,
     ToolExecutionAttemptRow,
+    ToolProposalRow,
     ToolVersionRow,
 )
 from agentforge.infrastructure.db.runtime_store import PostgresRuntimeStore
