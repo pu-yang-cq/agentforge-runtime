@@ -1,1 +1,1 @@
-trigger Stage 3.2-F1 checkpoint overlay
+trigger Stage 3.2-F1 checkpoint overlay retry 2 diagnostics
