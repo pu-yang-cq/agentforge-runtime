@@ -1,8 +1,8 @@
 Stage 3.3 Governance Amendment 001 acceptance
 
-Candidate: 32171b6a7fd9a0e623b8313e7ad26afaa8706e6e
+Candidate: d8bb686794974547e523b32d34a87d71e3315ad6
 Pre-amendment baseline: 46b97f7e7d73cf8239a00014ef7d51ded9fecc2d
 Scope: approval metadata for capability-derived REQUIRE_APPROVAL
-Previous run: 37322613462
-Previous result: FAILED_GATE_SCRIPT_STALE_REFERENCE_ONLY
-Attempt: 2
+Previous run: 37323322736
+Previous result: FAILED_RUFF_E501_ONLY
+Attempt: 3
