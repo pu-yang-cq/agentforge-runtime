@@ -55,7 +55,6 @@ from agentforge.infrastructure.db.models import (
     GovernanceIntentRow,
     PolicyDecisionRow,
     RunRow,
-    RunStateRow,
     ToolCallRow,
     ToolDefinitionRow,
     ToolExecutionAttemptRow,
