@@ -46,7 +46,7 @@ jobs:
           grep -R 'CANCEL_WON_BEFORE_RECONCILIATION_RESULT' -n src tests
           grep -R 'progression authority is fenced' -n src tests
           grep -R 'test_e3_manual_resolution_wins_late_stale_result_cannot_overwrite' -n tests
-          grep -R 'test_e3_cancellation_wins_inflight_side_effect_result_records_truth_but_fences_worker' -n tests
+          grep -R 'test_e3_cancel_wins_side_effect_result_records_truth_and_fences_worker' -n tests
           grep -R 'test_e3_cancellation_wins_reconciliation_success_truth_without_continuation' -n tests
 
       - name: Prove side-effect result still locks Run first
