@@ -7,7 +7,9 @@ from uuid import UUID, uuid4
 
 from .enums import (
     EventType,
+    GovernanceMode,
     MessageRole,
+    PrincipalType,
     ModelInvocationStatus,
     QueueReason,
     ReconciliationAttemptStatus,
@@ -132,6 +134,15 @@ class AgentVersion:
     version_number: int
     instructions: str
     tool_bindings: tuple[ToolBinding, ...] = ()
+    governance_mode: GovernanceMode = GovernanceMode.LEGACY_STAGE32
+    policy_version_id: UUID | None = None
+
+    def __post_init__(self) -> None:
+        if self.governance_mode is GovernanceMode.LEGACY_STAGE32:
+            if self.policy_version_id is not None:
+                raise ValueError("LEGACY_STAGE32 AgentVersion cannot pin governance policy")
+        elif self.policy_version_id is None:
+            raise ValueError("GOVERNED AgentVersion requires policy_version_id")
 
 
 @dataclass(slots=True)
@@ -154,6 +165,12 @@ class Run:
     max_model_invocations: int = DEFAULT_MAX_MODEL_INVOCATIONS
     max_tool_attempts: int = DEFAULT_MAX_TOOL_ATTEMPTS
     deadline_at: datetime = field(default_factory=default_deadline_at)
+    policy_version_id: UUID | None = None
+    requester_principal_id: str | None = None
+    requester_principal_type: PrincipalType | None = None
+    requester_roles: tuple[str, ...] | None = None
+    requester_scope: str | None = None
+    requester_authn_source: str | None = None
 
     def queue(self, reason: QueueReason = QueueReason.INITIAL) -> None:
         if self.status is not RunStatus.CREATED:
