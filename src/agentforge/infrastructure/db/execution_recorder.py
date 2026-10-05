@@ -13,6 +13,7 @@ from agentforge.application.errors import BusinessProgressionBlockedError, Stale
 from agentforge.application.ports import ExecutionRecorder, ReconciliationResult
 from agentforge.domain.actions import ActionSnapshot, ExternalAction
 from agentforge.domain.enums import (
+    ApprovalRequestStatus,
     EventType,
     ExternalActionStatus,
     GovernanceDecision,
@@ -59,6 +60,7 @@ from agentforge.infrastructure.db.mappers import (
 from agentforge.infrastructure.db.models import (
     ActionSnapshotRow,
     AgentVersionRow,
+    ApprovalRequestRow,
     AgentVersionToolRow,
     DomainEventRow,
     ExternalActionRow,
@@ -172,7 +174,13 @@ async def _assert_no_active_tool_calls(session: AsyncSession, run_id: UUID) -> N
         select(ToolCallRow.id)
         .where(
             ToolCallRow.run_id == run_id,
-            ToolCallRow.status.in_([ToolCallStatus.READY, ToolCallStatus.EXECUTING]),
+            ToolCallRow.status.in_(
+                [
+                    ToolCallStatus.AWAITING_APPROVAL,
+                    ToolCallStatus.READY,
+                    ToolCallStatus.EXECUTING,
+                ]
+            ),
         )
         .limit(1)
     )
@@ -187,6 +195,7 @@ async def _assert_no_unresolved_actions(session: AsyncSession, run_id: UUID) -> 
             ExternalActionRow.run_id == run_id,
             ExternalActionRow.status.in_(
                 [
+                    ExternalActionStatus.AWAITING_APPROVAL,
                     ExternalActionStatus.UNKNOWN,
                     ExternalActionStatus.RECONCILING,
                     ExternalActionStatus.MANUAL_REVIEW,
@@ -276,6 +285,43 @@ async def _lock_stage32_side_effect_tool_version(
         raise PermissionError("ToolVersion is not an executable Stage-3.2 side effect")
     if row.approval_required or not row.allow_no_approval_execution:
         raise PermissionError("ToolVersion is not eligible for no-approval Stage-3.2 execution")
+    if row.credential_ref is not None and not row.credential_ref.strip():
+        raise PermissionError("ToolVersion credential_ref configuration is invalid")
+    return row
+
+
+async def _lock_governed_approval_side_effect_tool_version(
+    session: AsyncSession,
+    *,
+    run: RunRow,
+    proposal: ToolProposal,
+    call: ToolCall,
+) -> ToolVersionRow:
+    if call.tool_version_id is None:
+        raise PermissionError("approval ToolCall must bind a ToolVersion")
+    row = (
+        await session.execute(
+            select(ToolVersionRow)
+            .join(
+                AgentVersionToolRow,
+                AgentVersionToolRow.tool_version_id == ToolVersionRow.id,
+            )
+            .where(
+                AgentVersionToolRow.agent_version_id == run.agent_version_id,
+                AgentVersionToolRow.tool_alias == proposal.tool_name,
+                ToolVersionRow.id == call.tool_version_id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise PermissionError("approval ToolVersion is no longer bound to the Run AgentVersion")
+    if row.effect_type not in {
+        ToolEffectType.WRITE,
+        ToolEffectType.EXTERNAL_SIDE_EFFECT,
+        ToolEffectType.DESTRUCTIVE,
+    }:
+        raise PermissionError("approval ExternalAction requires a side-effect ToolVersion")
     if row.credential_ref is not None and not row.credential_ref.strip():
         raise PermissionError("ToolVersion credential_ref configuration is invalid")
     return row
