@@ -288,6 +288,7 @@ def test_capability_envelope_never_broadens_tool_binding() -> None:
     assert external_allow.approval is None
     assert evaluate(destructive, deny).effective_decision is GovernanceDecision.DENY
 
+
 def test_draft_and_malformed_policy_fail_closed_but_retired_pinned_policy_still_evaluates() -> None:
     principal = _principal()
     agent_version_id = uuid4()
