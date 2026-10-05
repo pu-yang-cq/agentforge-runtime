@@ -24,7 +24,10 @@ def append_once(path: str, marker: str, block: str) -> None:
 # ---------------------------------------------------------------------------
 replace_once(
     "src/agentforge/infrastructure/db/execution_recorder.py",
-    '''        async with self._sessions() as session, session.begin():
+    '''        if action.current_attempt_id != attempt.id:
+            raise ValueError("side-effect success attempt is not current")
+
+        async with self._sessions() as session, session.begin():
             await _lock_owned_run(
                 session,
                 run_id=call.run_id,
@@ -32,7 +35,10 @@ replace_once(
             )
             action_row = (
 ''',
-    '''        cancellation_fenced = False
+    '''        if action.current_attempt_id != attempt.id:
+            raise ValueError("side-effect success attempt is not current")
+
+        cancellation_fenced = False
         async with self._sessions() as session, session.begin():
             run_row = await _lock_owned_run(
                 session,
