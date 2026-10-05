@@ -251,8 +251,7 @@ def downgrade() -> None:
     op.execute("DROP TRIGGER IF EXISTS trg_agent_version_governance ON agent_versions")
     op.execute("DROP FUNCTION IF EXISTS guard_agent_version_governance()")
     op.execute(
-        "DROP TRIGGER IF EXISTS trg_governance_policy_version_update "
-        "ON governance_policy_versions"
+        "DROP TRIGGER IF EXISTS trg_governance_policy_version_update ON governance_policy_versions"
     )
     op.execute("DROP FUNCTION IF EXISTS guard_governance_policy_version_update()")
 
