@@ -108,6 +108,20 @@ Only after A aggregate is green does B unlock.
 
 ## 3. Stage 3.3-B — Governed ALLOW / DENY + Control-plane Authorization
 
+Status: **ACCEPTED / FROZEN**
+
+Accepted semantic candidate:
+- `bdeef5adbda0408b7b17af9042ce1dd731ab3804`
+
+Successful independent gate:
+- `37300886491`
+
+Acceptance artifact:
+- `docs/implementation/stage3.3-b-accepted.md`
+
+Execution record:
+- `docs/execution/stage3.3-b-execution-record.md`
+
 Scope:
 - integrate deterministic policy consequence into model Tool proposal path;
 - preserve Stage 3.2 ModelInvocation consequence fencing;
@@ -133,6 +147,8 @@ Acceptance focus:
 - legacy Stage 3.2 API tests remain green.
 
 ## 4. Stage 3.3-C — Durable Approval Intent
+
+Status: **UNLOCKED**
 
 Scope:
 - Run WAITING_APPROVAL;
