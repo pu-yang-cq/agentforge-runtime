@@ -4,9 +4,10 @@ from uuid import uuid4
 
 import pytest
 
+from agentforge.application.approval_review import build_pending_approval_review_projection
 from agentforge.application.governed_consequence import plan_governed_tool_consequence
 from agentforge.application.run_manager import ExecutionJournal, RunManager
-from agentforge.domain.actions import ExternalAction
+from agentforge.domain.actions import ActionSnapshot, ExternalAction
 from agentforge.domain.approvals import ApprovalRequest
 from agentforge.domain.enums import (
     ApprovalRequestStatus,
@@ -23,7 +24,9 @@ from agentforge.domain.governance import (
     GovernanceApprovalRequirement,
     GovernancePolicyRule,
     GovernancePolicyVersion,
+    PrincipalContext,
 )
+from agentforge.domain.governance_decisions import GovernanceIntentV1, PolicyDecision
 from agentforge.domain.models import (
     AgentVersion,
     Run,
@@ -144,6 +147,116 @@ def test_side_effect_approval_request_requires_both_action_bindings() -> None:
             status=ApprovalRequestStatus.PENDING,
             expires_at=NOW + timedelta(minutes=5),
             created_at=NOW,
+        )
+
+
+def test_pending_approval_review_projection_rejects_durable_digest_drift() -> None:
+    run_id = uuid4()
+    agent_version_id = uuid4()
+    tool_version_id = uuid4()
+    policy_version_id = uuid4()
+    principal = PrincipalContext(
+        principal_id="requester",
+        principal_type=PrincipalType.USER,
+        roles=("operator",),
+        principal_scope="tenant-a",
+        authn_source="test",
+    )
+    proposal = ToolProposal.create(
+        run_id=run_id,
+        model_invocation_id=uuid4(),
+        tool_name="destroy",
+        arguments={"resource": "exact"},
+    )
+    binding = ToolBinding(
+        tool_version_id=tool_version_id,
+        name="destroy",
+        effect_type=ToolEffectType.DESTRUCTIVE,
+        credential_ref="credential://destroy",
+    )
+    intent = GovernanceIntentV1.create(
+        run_id=run_id,
+        agent_version_id=agent_version_id,
+        proposal_id=proposal.id,
+        binding=binding,
+        arguments=proposal.arguments,
+        principal=principal,
+    )
+    call = ToolCall.from_proposal(proposal, tool_version_id=tool_version_id)
+    call.await_approval()
+    snapshot = ActionSnapshot.create(
+        operation_id=uuid4(),
+        tool_version_id=tool_version_id,
+        effect_type=ToolEffectType.DESTRUCTIVE,
+        arguments=proposal.arguments,
+        credential_ref="credential://destroy",
+    )
+    action = ExternalAction.awaiting_approval(
+        run_id=run_id,
+        tool_call_id=call.id,
+        action_snapshot_id=snapshot.id,
+        operation_id=snapshot.operation_id,
+    )
+    decision = PolicyDecision(
+        id=uuid4(),
+        run_id=run_id,
+        proposal_id=proposal.id,
+        tool_version_id=tool_version_id,
+        policy_version_id=policy_version_id,
+        requester_principal_id=principal.principal_id,
+        principal_scope=principal.principal_scope,
+        effective_decision=GovernanceDecision.REQUIRE_APPROVAL,
+        matched_rule_id="require",
+        intent_digest=intent.digest,
+        created_at=NOW,
+    )
+    request = ApprovalRequest(
+        id=uuid4(),
+        run_id=run_id,
+        tool_call_id=call.id,
+        external_action_id=action.id,
+        policy_decision_id=decision.id,
+        governance_intent_digest=intent.digest,
+        action_snapshot_digest=snapshot.digest,
+        requested_by_principal=principal.principal_id,
+        principal_scope=principal.principal_scope,
+        required_approver_role="risk-approver",
+        separation_of_duties=True,
+        status=ApprovalRequestStatus.PENDING,
+        expires_at=NOW + timedelta(minutes=5),
+        created_at=NOW,
+    )
+
+    first = build_pending_approval_review_projection(
+        request=request,
+        intent=intent,
+        decision=decision,
+        call=call,
+        snapshot=snapshot,
+        action=action,
+    )
+    second = build_pending_approval_review_projection(
+        request=request,
+        intent=intent,
+        decision=decision,
+        call=call,
+        snapshot=snapshot,
+        action=action,
+    )
+    assert first == second
+    assert first.operation_id == snapshot.operation_id
+    assert first.action_snapshot_digest == snapshot.digest
+    assert first.arguments_canonical_json == '{"resource":"exact"}'
+
+    request.governance_intent_digest = "b" * 64
+    with pytest.raises(ValueError, match="GovernanceIntent digest mismatch"):
+        build_pending_approval_review_projection(
+            request=request,
+            intent=intent,
+            decision=decision,
+            call=call,
+            snapshot=snapshot,
+            action=action,
         )
 
 
