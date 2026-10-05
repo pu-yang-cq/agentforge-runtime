@@ -1,9 +1,10 @@
 Stage 3.3-A2 acceptance trigger
 
-Candidate: 9d40b0179897a346ce5ff9aabf06d8e49510dc70
-Attempt: 3
+Candidate: 9b8a9bd45dd8f76f93a06d1ece4a2846e7043af9
+Attempt: 4
 Previous rejected runs:
 - 37274722249
 - 37274891436
+- 37275054761
 A1 accepted candidate: cf1c7571b67210bedfe411865bb940c83e6da4f0
 A1 successful gate: 37268108885
