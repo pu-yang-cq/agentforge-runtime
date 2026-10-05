@@ -1,5 +1,7 @@
 Stage 3.3-A1 acceptance trigger
 
-Candidate: b85a782c40fa855b5f2c742e9e16ce5848f3e4a2
-Attempt: 2
-Previous rejected run: 37267459937
+Candidate: e6714d6f8037057e1a552c60e1c6635f37eeb3a5
+Attempt: 3
+Previous rejected runs:
+- 37267459937
+- 37267652894
