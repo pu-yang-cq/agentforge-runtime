@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
+from agentforge.application.approval_review import ApprovalReviewProjection
 from agentforge.domain.actions import ActionResolution, ActionSnapshot, ExternalAction
 from agentforge.domain.checkpoints import RuntimeCheckpoint
 from agentforge.domain.enums import ActionResolutionOutcome, ReconciliationBusinessResult
@@ -135,6 +136,13 @@ class GovernanceDecisionStore(Protocol):
     ) -> PolicyDecision: ...
 
     async def get_by_proposal(self, proposal_id: UUID) -> PolicyDecision | None: ...
+
+
+class ApprovalReviewStore(Protocol):
+    async def get_pending(
+        self,
+        approval_request_id: UUID,
+    ) -> ApprovalReviewProjection | None: ...
 
 
 class ExecutionRecorder(Protocol):
