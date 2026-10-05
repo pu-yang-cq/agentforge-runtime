@@ -3,7 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from uuid import uuid4
 
-from agentforge.domain.enums import GovernanceDecision, GovernanceMode, ToolCallStatus
+from agentforge.domain.actions import ActionSnapshot, ExternalAction
+from agentforge.domain.enums import (
+    GovernanceDecision,
+    GovernanceMode,
+    ToolCallStatus,
+    ToolEffectType,
+)
 from agentforge.domain.governance import GovernancePolicyVersion, PrincipalContext
 from agentforge.domain.governance_decisions import (
     GovernanceIntentV1,
@@ -25,16 +31,49 @@ class GovernedToolPlan:
     binding: ToolBinding
     prepared: PreparedToolCall | PreparedExternalAction | None = None
     denied_call: ToolCall | None = None
+    pending_call: ToolCall | None = None
+    pending_snapshot: ActionSnapshot | None = None
+    pending_action: ExternalAction | None = None
 
     def __post_init__(self) -> None:
         if self.evaluation.effective_decision is GovernanceDecision.ALLOW:
-            if self.prepared is None or self.denied_call is not None:
+            if (
+                self.prepared is None
+                or self.denied_call is not None
+                or self.pending_call is not None
+                or self.pending_snapshot is not None
+                or self.pending_action is not None
+            ):
                 raise ValueError("ALLOW plan requires exactly one prepared Stage 3.2 consequence")
-        elif self.evaluation.effective_decision is GovernanceDecision.DENY:
-            if self.denied_call is None or self.prepared is not None:
+            return
+
+        if self.evaluation.effective_decision is GovernanceDecision.DENY:
+            if (
+                self.denied_call is None
+                or self.prepared is not None
+                or self.pending_call is not None
+                or self.pending_snapshot is not None
+                or self.pending_action is not None
+            ):
                 raise ValueError("DENY plan requires exactly one denied ToolCall")
-        elif self.prepared is not None or self.denied_call is not None:
-            raise ValueError("REQUIRE_APPROVAL cannot create B execution consequence")
+            return
+
+        if self.prepared is not None or self.denied_call is not None or self.pending_call is None:
+            raise ValueError("REQUIRE_APPROVAL requires exactly one pending ToolCall")
+        if self.evaluation.approval is None:
+            raise ValueError("REQUIRE_APPROVAL consequence requires approval metadata")
+        if self.binding.effect_type is ToolEffectType.READ:
+            if self.pending_snapshot is not None or self.pending_action is not None:
+                raise ValueError("READ approval cannot create ExternalAction intent")
+            return
+        if self.pending_snapshot is None or self.pending_action is None:
+            raise ValueError("side-effect approval requires ActionSnapshot and ExternalAction")
+        if self.pending_action.tool_call_id != self.pending_call.id:
+            raise ValueError("pending ExternalAction must bind pending ToolCall")
+        if self.pending_action.action_snapshot_id != self.pending_snapshot.id:
+            raise ValueError("pending ExternalAction must bind pending ActionSnapshot")
+        if self.pending_action.operation_id != self.pending_snapshot.operation_id:
+            raise ValueError("pending action operation_id must match ActionSnapshot")
 
 
 def _principal_from_run(run: Run) -> PrincipalContext:
@@ -133,8 +172,39 @@ def plan_governed_tool_consequence(
             denied_call=denied_call,
         )
 
+    pending_call = ToolCall.from_proposal(
+        proposal,
+        tool_version_id=binding.tool_version_id,
+    )
+    pending_call.await_approval()
+
+    if binding.effect_type is ToolEffectType.READ:
+        return GovernedToolPlan(
+            intent=intent,
+            evaluation=evaluation,
+            binding=binding,
+            pending_call=pending_call,
+        )
+
+    operation_id = uuid4()
+    snapshot = ActionSnapshot.create(
+        operation_id=operation_id,
+        tool_version_id=binding.tool_version_id,
+        effect_type=binding.effect_type,
+        arguments=proposal.arguments,
+        credential_ref=binding.credential_ref,
+    )
+    action = ExternalAction.awaiting_approval(
+        run_id=proposal.run_id,
+        tool_call_id=pending_call.id,
+        action_snapshot_id=snapshot.id,
+        operation_id=operation_id,
+    )
     return GovernedToolPlan(
         intent=intent,
         evaluation=evaluation,
         binding=binding,
+        pending_call=pending_call,
+        pending_snapshot=snapshot,
+        pending_action=action,
     )
