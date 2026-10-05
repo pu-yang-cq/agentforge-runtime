@@ -39,7 +39,7 @@ matrix = {
       "id": 4,
       "barrier": "after_action_commit_before_external_call",
       "pytest_nodes": [
-        "tests/integration/test_postgres_runtime.py::test_f3_crash_after_action_commit_before_external_call_recovers_without_duplicate_effect"
+        "tests/integration/test_postgres_runtime.py::test_f3_crash_post_commit_pre_call_no_duplicate_effect"
       ],
       "safety": "Orphan STARTED becomes UNKNOWN; authoritative NOT_EXECUTED permits one safe retry with one business effect."
     },
@@ -461,7 +461,7 @@ async def _f3_assert_post_effect_crash_recovery(
 
 
 @pytest.mark.asyncio
-async def test_f3_crash_after_action_commit_before_external_call_recovers_without_duplicate_effect() -> None:
+async def test_f3_crash_post_commit_pre_call_no_duplicate_effect() -> None:
     from agentforge.testing.fake_external_system import CrashBarrierPoint
 
     await _f3_assert_pre_effect_crash_recovery(
@@ -505,6 +505,6 @@ async def test_f3_crash_after_response_before_result_commit_reconciles_without_r
 '''
 append_once(
     "tests/integration/test_postgres_runtime.py",
-    "test_f3_crash_after_action_commit_before_external_call_recovers_without_duplicate_effect",
+    "test_f3_crash_post_commit_pre_call_no_duplicate_effect",
     integration,
 )
