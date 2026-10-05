@@ -490,6 +490,7 @@ class PostgresRuntimeStore(RuntimeStore):
             # Stage 3.3-C pending cancellation is a local durable stabilization.
             # Lock order is Run -> ExternalAction when present -> ToolCall -> ApprovalRequest.
             if row.status is RunStatus.WAITING_APPROVAL:
+                pending_call: ToolCallRow | None
                 if action is not None:
                     if action.status is not ExternalActionStatus.AWAITING_APPROVAL:
                         raise RuntimeError("WAITING_APPROVAL Run has a non-pending ExternalAction")
