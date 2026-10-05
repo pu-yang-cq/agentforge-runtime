@@ -25,6 +25,7 @@ from agentforge.domain.enums import (
     ActionResolutionOutcome,
     EventType,
     ExternalActionStatus,
+    GovernanceMode,
     MessageRole,
     ModelInvocationStatus,
     QueueReason,
@@ -34,6 +35,7 @@ from agentforge.domain.enums import (
     ToolEffectType,
     ToolExecutionAttemptStatus,
 )
+from agentforge.domain.governance import PrincipalContext
 from agentforge.domain.models import (
     DEFAULT_MAX_MODEL_INVOCATIONS,
     DEFAULT_MAX_TOOL_ATTEMPTS,
@@ -313,16 +315,37 @@ class PostgresRuntimeStore(RuntimeStore):
         input_text: str,
         idempotency_key: str,
         principal_scope: str,
+        principal: PrincipalContext | None = None,
     ) -> Run:
         run_id = uuid4()
         endpoint = "POST:/v1/runs"
-        request_hash = sha256(f"{agent_version_id}\n{input_text}".encode()).hexdigest()
         async with self._sessions() as session, session.begin():
+            version = await session.get(AgentVersionRow, agent_version_id)
+            if version is None:
+                raise KeyError(f"agent version not found: {agent_version_id}")
+
+            governed = version.governance_mode is GovernanceMode.GOVERNED
+            if governed:
+                if principal is None:
+                    raise ValueError("GOVERNED Run requires trusted PrincipalContext")
+                if version.policy_version_id is None:
+                    raise RuntimeError("GOVERNED AgentVersion lost pinned policy_version_id")
+                effective_scope = principal.principal_scope
+                request_hash = sha256(
+                    (
+                        f"{agent_version_id}\n{input_text}\n{principal.principal_id}\n"
+                        f"{principal.principal_scope}\n{version.policy_version_id}"
+                    ).encode()
+                ).hexdigest()
+            else:
+                effective_scope = principal_scope
+                request_hash = sha256(f"{agent_version_id}\n{input_text}".encode()).hexdigest()
+
             inserted = await session.scalar(
                 pg_insert(IdempotencyRecordRow)
                 .values(
                     id=uuid4(),
-                    principal_scope=principal_scope,
+                    principal_scope=effective_scope,
                     endpoint=endpoint,
                     idempotency_key=idempotency_key,
                     request_hash=request_hash,
@@ -342,7 +365,7 @@ class PostgresRuntimeStore(RuntimeStore):
                 existing_record = (
                     await session.execute(
                         select(IdempotencyRecordRow).where(
-                            IdempotencyRecordRow.principal_scope == principal_scope,
+                            IdempotencyRecordRow.principal_scope == effective_scope,
                             IdempotencyRecordRow.endpoint == endpoint,
                             IdempotencyRecordRow.idempotency_key == idempotency_key,
                         )
@@ -357,15 +380,17 @@ class PostgresRuntimeStore(RuntimeStore):
                     raise RuntimeError("idempotency record points to a missing run")
                 return run_from_row(existing_run)
 
-            exists = await session.scalar(
-                select(AgentVersionRow.id).where(AgentVersionRow.id == agent_version_id)
-            )
-            if exists is None:
-                raise KeyError(f"agent version not found: {agent_version_id}")
-
             row = RunRow(
                 id=run_id,
                 agent_version_id=agent_version_id,
+                policy_version_id=version.policy_version_id if governed else None,
+                requester_principal_id=principal.principal_id if governed and principal else None,
+                requester_principal_type=(
+                    principal.principal_type if governed and principal else None
+                ),
+                requester_roles=list(principal.roles) if governed and principal else None,
+                requester_scope=principal.principal_scope if governed and principal else None,
+                requester_authn_source=principal.authn_source if governed and principal else None,
                 input_text=input_text,
                 status=RunStatus.QUEUED,
                 queue_reason=QueueReason.INITIAL,
@@ -400,7 +425,12 @@ class PostgresRuntimeStore(RuntimeStore):
                         run_id=run_id,
                         sequence=1,
                         event_type=EventType.RUN_CREATED.value,
-                        payload={"agent_version_id": str(agent_version_id)},
+                        payload={
+                            "agent_version_id": str(agent_version_id),
+                            "policy_version_id": (
+                                str(version.policy_version_id) if governed else None
+                            ),
+                        },
                     ),
                     DomainEventRow(
                         id=uuid4(),
@@ -1169,6 +1199,8 @@ class PostgresRuntimeStore(RuntimeStore):
                 agent_id=version.agent_id,
                 version_number=version.version_number,
                 instructions=version.instructions,
+                governance_mode=version.governance_mode,
+                policy_version_id=version.policy_version_id,
                 bindings=[
                     (
                         tool_version_id,
