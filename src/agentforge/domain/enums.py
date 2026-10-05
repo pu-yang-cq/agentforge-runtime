@@ -129,3 +129,25 @@ class EventType(StrEnum):
     RUN_COMPLETED = "RUN_COMPLETED"
     RUN_FAILED = "RUN_FAILED"
     RUN_YIELDED = "RUN_YIELDED"
+
+
+class GovernanceMode(StrEnum):
+    LEGACY_STAGE32 = "LEGACY_STAGE32"
+    GOVERNED = "GOVERNED"
+
+
+class PrincipalType(StrEnum):
+    USER = "USER"
+    SERVICE = "SERVICE"
+
+
+class GovernancePolicyStatus(StrEnum):
+    DRAFT = "DRAFT"
+    PUBLISHED = "PUBLISHED"
+    RETIRED = "RETIRED"
+
+
+class GovernanceDecision(StrEnum):
+    ALLOW = "ALLOW"
+    DENY = "DENY"
+    REQUIRE_APPROVAL = "REQUIRE_APPROVAL"
