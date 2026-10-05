@@ -200,6 +200,14 @@ class ExecutionJournal(ExecutionRecorder):
                 "run deadline has expired",
             )
 
+    def _assert_business_progression_allowed(self, run_id: UUID) -> None:
+        run, _ = self._limits(run_id)
+        if run.cancel_requested:
+            raise BusinessProgressionBlockedError(
+                "CANCEL_REQUESTED",
+                "run cancellation owns business progression",
+            )
+
     def _assert_model_budget(self, run_id: UUID) -> None:
         run, state = self._limits(run_id)
         if state.model_invocations_used >= run.max_model_invocations:
@@ -1147,6 +1155,228 @@ class ExecutionJournal(ExecutionRecorder):
             raise ValueError("governed journal policy does not match seeded Run")
         self.governance_intents.append(intent)
         self.governance_evaluations.append(evaluation)
+
+    async def record_governed_model_read_approval_pending(
+        self,
+        invocation: ModelInvocation,
+        proposal: ToolProposal,
+        call: ToolCall,
+        intent: GovernanceIntentV1,
+        evaluation: PolicyEvaluation,
+        policy_version_id: UUID,
+        *,
+        expected_generation: int,
+    ) -> RunState:
+        if self.run_state is None:
+            raise RuntimeError("journal run state is not seeded")
+        approval = evaluation.approval
+        if evaluation.effective_decision is not GovernanceDecision.REQUIRE_APPROVAL:
+            raise ValueError("READ approval journal requires REQUIRE_APPROVAL")
+        if approval is None:
+            raise ValueError("READ approval journal requires approval metadata")
+        if call.status is not ToolCallStatus.AWAITING_APPROVAL:
+            raise ValueError("READ approval ToolCall must be AWAITING_APPROVAL")
+        if call.tool_version_id != intent.tool_version_id:
+            raise ValueError("READ approval ToolCall does not match GovernanceIntent")
+
+        self._assert_business_progression_allowed(call.run_id)
+        self._assert_no_active_tool_calls(call.run_id)
+        self._assert_no_started_tool_attempts(call.run_id)
+        self._assert_deadline_not_expired(call.run_id)
+        self._assert_tool_budget(call.run_id)
+        self._persist_completed_invocation(invocation)
+        self._append_event(
+            self.seeded_run,
+            EventType.MODEL_COMPLETED,
+            {"turn": invocation.turn, "outcome_type": invocation.outcome_type},
+        )
+        self.proposals.append(proposal)
+        self._append_event(
+            self.seeded_run,
+            EventType.TOOL_PROPOSED,
+            {"proposal_id": str(proposal.id), "tool_name": proposal.tool_name},
+        )
+        self._record_governance_candidate(intent, evaluation, policy_version_id)
+        decision_id = uuid4()
+        self._append_event(
+            self.seeded_run,
+            EventType.POLICY_DECIDED,
+            {
+                "policy_decision_id": str(decision_id),
+                "proposal_id": str(proposal.id),
+                "tool_version_id": str(intent.tool_version_id),
+                "policy_version_id": str(policy_version_id),
+                "effective_decision": evaluation.effective_decision.value,
+                "matched_rule_id": evaluation.matched_rule_id,
+                "intent_digest": intent.digest,
+            },
+        )
+
+        self.run_state.tool_call_count += 1
+        self.run_state.state_version += 1
+        self.tool_calls.append(call)
+
+        now = utcnow()
+        expires_at = min(
+            now + timedelta(seconds=approval.ttl_seconds),
+            self.seeded_run.deadline_at,
+        )
+        request = ApprovalRequest(
+            id=uuid4(),
+            run_id=call.run_id,
+            tool_call_id=call.id,
+            external_action_id=None,
+            policy_decision_id=decision_id,
+            governance_intent_digest=intent.digest,
+            action_snapshot_digest=None,
+            requested_by_principal=intent.requester_principal_id,
+            principal_scope=intent.principal_scope,
+            required_approver_role=approval.required_approver_role,
+            separation_of_duties=approval.separation_of_duties,
+            status=ApprovalRequestStatus.PENDING,
+            expires_at=expires_at,
+            created_at=now,
+        )
+        self.approval_requests.append(request)
+        self._append_event(
+            self.seeded_run,
+            EventType.APPROVAL_REQUESTED,
+            {
+                "approval_request_id": str(request.id),
+                "tool_call_id": str(call.id),
+                "policy_decision_id": str(decision_id),
+                "intent_digest": intent.digest,
+                "required_approver_role": approval.required_approver_role,
+                "separation_of_duties": approval.separation_of_duties,
+                "expires_at": expires_at.isoformat(),
+            },
+        )
+        return self.run_state
+
+    async def record_governed_model_side_effect_approval_pending(
+        self,
+        invocation: ModelInvocation,
+        proposal: ToolProposal,
+        call: ToolCall,
+        snapshot: ActionSnapshot,
+        action: ExternalAction,
+        intent: GovernanceIntentV1,
+        evaluation: PolicyEvaluation,
+        policy_version_id: UUID,
+        *,
+        expected_generation: int,
+    ) -> RunState:
+        if self.run_state is None:
+            raise RuntimeError("journal run state is not seeded")
+        approval = evaluation.approval
+        if evaluation.effective_decision is not GovernanceDecision.REQUIRE_APPROVAL:
+            raise ValueError("side-effect approval journal requires REQUIRE_APPROVAL")
+        if approval is None:
+            raise ValueError("side-effect approval journal requires approval metadata")
+        if call.status is not ToolCallStatus.AWAITING_APPROVAL:
+            raise ValueError("side-effect approval ToolCall must be AWAITING_APPROVAL")
+        if action.status is not ExternalActionStatus.AWAITING_APPROVAL:
+            raise ValueError("approval ExternalAction must be AWAITING_APPROVAL")
+        if action.current_attempt_id is not None:
+            raise ValueError("approval ExternalAction cannot own an attempt")
+        if action.tool_call_id != call.id or action.action_snapshot_id != snapshot.id:
+            raise ValueError("pending ExternalAction binding mismatch")
+        if action.operation_id != snapshot.operation_id:
+            raise ValueError("pending operation_id does not match ActionSnapshot")
+        if snapshot.tool_version_id != call.tool_version_id:
+            raise ValueError("pending ActionSnapshot ToolVersion mismatch")
+        if snapshot.arguments != call.arguments or call.arguments != proposal.arguments:
+            raise ValueError("pending side-effect arguments diverged")
+
+        self._assert_business_progression_allowed(call.run_id)
+        self._assert_no_active_tool_calls(call.run_id)
+        self._assert_no_started_tool_attempts(call.run_id)
+        self._assert_deadline_not_expired(call.run_id)
+        self._assert_tool_budget(call.run_id)
+        self._persist_completed_invocation(invocation)
+        self._append_event(
+            self.seeded_run,
+            EventType.MODEL_COMPLETED,
+            {"turn": invocation.turn, "outcome_type": invocation.outcome_type},
+        )
+        self.proposals.append(proposal)
+        self._append_event(
+            self.seeded_run,
+            EventType.TOOL_PROPOSED,
+            {"proposal_id": str(proposal.id), "tool_name": proposal.tool_name},
+        )
+        self._record_governance_candidate(intent, evaluation, policy_version_id)
+        decision_id = uuid4()
+        self._append_event(
+            self.seeded_run,
+            EventType.POLICY_DECIDED,
+            {
+                "policy_decision_id": str(decision_id),
+                "proposal_id": str(proposal.id),
+                "tool_version_id": str(intent.tool_version_id),
+                "policy_version_id": str(policy_version_id),
+                "effective_decision": evaluation.effective_decision.value,
+                "matched_rule_id": evaluation.matched_rule_id,
+                "intent_digest": intent.digest,
+            },
+        )
+
+        self.run_state.tool_call_count += 1
+        self.run_state.state_version += 1
+        self.tool_calls.append(call)
+        self.action_snapshots.append(snapshot)
+        self.external_actions.append(action)
+        self._append_event(
+            self.seeded_run,
+            EventType.ACTION_PREPARED,
+            {
+                "tool_call_id": str(call.id),
+                "external_action_id": str(action.id),
+                "operation_id": str(action.operation_id),
+                "snapshot_digest": snapshot.digest,
+                "effect_type": snapshot.effect_type.value,
+                "approval_pending": True,
+            },
+        )
+
+        now = utcnow()
+        expires_at = min(
+            now + timedelta(seconds=approval.ttl_seconds),
+            self.seeded_run.deadline_at,
+        )
+        request = ApprovalRequest(
+            id=uuid4(),
+            run_id=call.run_id,
+            tool_call_id=call.id,
+            external_action_id=action.id,
+            policy_decision_id=decision_id,
+            governance_intent_digest=intent.digest,
+            action_snapshot_digest=snapshot.digest,
+            requested_by_principal=intent.requester_principal_id,
+            principal_scope=intent.principal_scope,
+            required_approver_role=approval.required_approver_role,
+            separation_of_duties=approval.separation_of_duties,
+            status=ApprovalRequestStatus.PENDING,
+            expires_at=expires_at,
+            created_at=now,
+        )
+        self.approval_requests.append(request)
+        self._append_event(
+            self.seeded_run,
+            EventType.APPROVAL_REQUESTED,
+            {
+                "approval_request_id": str(request.id),
+                "tool_call_id": str(call.id),
+                "external_action_id": str(action.id),
+                "policy_decision_id": str(decision_id),
+                "intent_digest": intent.digest,
+                "action_snapshot_digest": snapshot.digest,
+                "required_approver_role": approval.required_approver_role,
+                "separation_of_duties": approval.separation_of_duties,
+                "expires_at": expires_at.isoformat(),
+            },
+        )
+        return self.run_state
 
     async def record_governed_model_read_allowed_started(
         self,
