@@ -1,8 +1,8 @@
-Stage 3.3-B acceptance trigger
+Stage 3.3-B acceptance
 
-Candidate: f6ca2b9c468c227e59d4fd5955263b3e1e36b724
-Stage 3.3-A accepted semantic surface: 9b8a9bd45dd8f76f93a06d1ece4a2846e7043af9
+Candidate: a8505ce459537ed40c7cc78cbbc3f67c0930c925
+Stage 3.3-A semantic surface: 9b8a9bd45dd8f76f93a06d1ece4a2846e7043af9
 Stage 3.3-A aggregate gate: 37281068420
-Previous B attempt: 37285889157
-Previous result: FAILED_TEST_ASSERTION_ONLY
-Attempt: 2
+Previous B run: 37291417246
+Previous result: FAILED_RUFF_IMPORT_ORDER_ONLY
+Attempt: 3
