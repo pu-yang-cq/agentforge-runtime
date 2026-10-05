@@ -65,9 +65,7 @@ class PostgresGovernanceDecisionStore(GovernanceDecisionStore):
         async with self._sessions() as session:
             row = (
                 await session.execute(
-                    select(PolicyDecisionRow).where(
-                        PolicyDecisionRow.proposal_id == proposal_id
-                    )
+                    select(PolicyDecisionRow).where(PolicyDecisionRow.proposal_id == proposal_id)
                 )
             ).scalar_one_or_none()
             return None if row is None else _decision_from_row(row)
@@ -207,7 +205,7 @@ class PostgresGovernanceDecisionStore(GovernanceDecisionStore):
                     agent_version_id=run.agent_version_id,
                     binding=binding,
                 )
-            except (AttributeError, TypeError, ValueError):
+            except AttributeError, TypeError, ValueError:
                 durable_evaluation = _fail_closed_evaluation()
 
             if durable_evaluation != evaluation:
