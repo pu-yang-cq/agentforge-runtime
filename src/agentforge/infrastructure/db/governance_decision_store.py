@@ -120,7 +120,9 @@ class PostgresGovernanceDecisionStore(GovernanceDecisionStore):
             if run is None:
                 raise KeyError(f"run not found: {intent.run_id}")
             if run.policy_version_id != policy_version_id:
-                raise ValueError("PolicyDecision policy_version_id does not match pinned Run policy")
+                raise ValueError(
+                    "PolicyDecision policy_version_id does not match pinned Run policy"
+                )
             if run.agent_version_id != intent.agent_version_id:
                 raise ValueError("GovernanceIntent AgentVersion does not match durable Run")
             if (
@@ -148,7 +150,9 @@ class PostgresGovernanceDecisionStore(GovernanceDecisionStore):
                 )
             ).scalar_one_or_none()
             if binding_row is None or binding_row.tool_alias != proposal.tool_name:
-                raise ValueError("GovernanceIntent ToolVersion is not the immutable proposal binding")
+                raise ValueError(
+                    "GovernanceIntent ToolVersion is not the immutable proposal binding"
+                )
 
             tool_version = await session.get(ToolVersionRow, intent.tool_version_id)
             if tool_version is None:
