@@ -155,10 +155,7 @@ async def test_a1_policy_lifecycle_agent_version_pin_and_immutability() -> None:
     async with sessions() as session:
         with pytest.raises(DBAPIError):
             await session.execute(
-                text(
-                    "UPDATE governance_policy_versions "
-                    "SET rules = '[]'::jsonb WHERE id = :id"
-                ),
+                text("UPDATE governance_policy_versions SET rules = '[]'::jsonb WHERE id = :id"),
                 {"id": published.id},
             )
             await session.commit()
@@ -264,10 +261,7 @@ async def test_a1_governed_run_pins_policy_and_normalized_requester_snapshot() -
         assert durable.policy_version_id == published.id
         assert durable.requester_scope == "tenant-a"
         scope = await session.scalar(
-            text(
-                "SELECT principal_scope FROM idempotency_records "
-                "WHERE resource_id = :run_id"
-            ),
+            text("SELECT principal_scope FROM idempotency_records WHERE resource_id = :run_id"),
             {"run_id": run.id},
         )
         assert scope == "tenant-a"
