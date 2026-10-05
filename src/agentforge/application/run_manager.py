@@ -5,6 +5,10 @@ from datetime import timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
+from agentforge.application.governed_consequence import (
+    GovernedToolPlan,
+    plan_governed_tool_consequence,
+)
 from agentforge.application.errors import (
     BusinessProgressionBlockedError,
     RunExecutionFailedError,
@@ -17,6 +21,8 @@ from agentforge.domain.actions import ActionSnapshot, ExternalAction
 from agentforge.domain.enums import (
     EventType,
     ExternalActionStatus,
+    GovernanceDecision,
+    GovernanceMode,
     MessageRole,
     QueueReason,
     ReconciliationAttemptStatus,
@@ -26,6 +32,8 @@ from agentforge.domain.enums import (
     ToolCallStatus,
     ToolExecutionAttemptStatus,
 )
+from agentforge.domain.governance import GovernancePolicyVersion
+from agentforge.domain.governance_decisions import GovernanceIntentV1, PolicyEvaluation
 from agentforge.domain.model_contract import ModelMessage
 from agentforge.domain.models import (
     AgentVersion,
@@ -63,6 +71,8 @@ class ExecutionJournal(ExecutionRecorder):
     reconciliation_attempts: list[ReconciliationAttempt] = field(default_factory=list)
     action_snapshots: list[ActionSnapshot] = field(default_factory=list)
     external_actions: list[ExternalAction] = field(default_factory=list)
+    governance_intents: list[GovernanceIntentV1] = field(default_factory=list)
+    governance_evaluations: list[PolicyEvaluation] = field(default_factory=list)
     run_state: RunState | None = None
     seeded_run: Run | None = None
 
@@ -1118,6 +1128,86 @@ class ExecutionJournal(ExecutionRecorder):
         )
         return self.run_state
 
+    def _record_governance_candidate(
+        self,
+        intent: GovernanceIntentV1,
+        evaluation: PolicyEvaluation,
+        policy_version_id: UUID,
+    ) -> None:
+        if self.seeded_run is None or self.seeded_run.policy_version_id != policy_version_id:
+            raise ValueError("governed journal policy does not match seeded Run")
+        self.governance_intents.append(intent)
+        self.governance_evaluations.append(evaluation)
+
+    async def record_governed_model_read_allowed_started(
+        self,
+        invocation: ModelInvocation,
+        proposal: ToolProposal,
+        call: ToolCall,
+        intent: GovernanceIntentV1,
+        evaluation: PolicyEvaluation,
+        policy_version_id: UUID,
+        *,
+        expected_generation: int,
+    ) -> RunState:
+        if evaluation.effective_decision is not GovernanceDecision.ALLOW:
+            raise ValueError("governed READ journal requires ALLOW")
+        self._record_governance_candidate(intent, evaluation, policy_version_id)
+        return await self.record_model_tool_started(
+            invocation,
+            proposal,
+            call,
+            expected_generation=expected_generation,
+        )
+
+    async def record_governed_model_side_effect_allowed_prepared(
+        self,
+        invocation: ModelInvocation,
+        proposal: ToolProposal,
+        call: ToolCall,
+        snapshot: ActionSnapshot,
+        action: ExternalAction,
+        intent: GovernanceIntentV1,
+        evaluation: PolicyEvaluation,
+        policy_version_id: UUID,
+        *,
+        expected_generation: int,
+    ) -> RunState:
+        if evaluation.effective_decision is not GovernanceDecision.ALLOW:
+            raise ValueError("governed side-effect journal requires ALLOW")
+        self._record_governance_candidate(intent, evaluation, policy_version_id)
+        return await self.record_model_side_effect_prepared(
+            invocation,
+            proposal,
+            call,
+            snapshot,
+            action,
+            expected_generation=expected_generation,
+        )
+
+    async def record_governed_model_tool_denied_and_fail_run(
+        self,
+        invocation: ModelInvocation,
+        proposal: ToolProposal,
+        call: ToolCall,
+        run: Run,
+        intent: GovernanceIntentV1,
+        evaluation: PolicyEvaluation,
+        policy_version_id: UUID,
+        *,
+        expected_generation: int,
+    ) -> None:
+        if evaluation.effective_decision is not GovernanceDecision.DENY:
+            raise ValueError("governed DENY journal requires DENY")
+        self._record_governance_candidate(intent, evaluation, policy_version_id)
+        await self.record_model_tool_denied_and_fail_run(
+            invocation,
+            proposal,
+            call,
+            run,
+            expected_generation=expected_generation,
+        )
+
     async def record_model_side_effect_prepared(
         self,
         invocation: ModelInvocation,
@@ -1633,7 +1723,16 @@ class RunManager:
         run_state: RunState,
         agent_version: AgentVersion,
         recorder: ExecutionRecorder,
+        governance_policy: GovernancePolicyVersion | None = None,
     ) -> str | None:
+        if agent_version.governance_mode is GovernanceMode.GOVERNED:
+            if (
+                governance_policy is None
+                or agent_version.policy_version_id is None
+                or run.policy_version_id != agent_version.policy_version_id
+                or governance_policy.id != agent_version.policy_version_id
+            ):
+                raise ValueError("GOVERNED execution requires the exact pinned policy")
         if isinstance(recorder, ExecutionJournal):
             recorder.seed(run, run_state)
 
@@ -1902,11 +2001,68 @@ class RunManager:
             assert isinstance(decision, ToolDecision)
             invocation.complete("TOOL_PROPOSAL")
             proposal = decision.proposal
+            governed_plan: GovernedToolPlan | None = None
             try:
-                prepared = self._tools.prepare_model_tool(
-                    proposal=proposal,
-                    agent_version=agent_version,
-                )
+                if agent_version.governance_mode is GovernanceMode.GOVERNED:
+                    assert governance_policy is not None
+                    governed_plan = plan_governed_tool_consequence(
+                        run=run,
+                        agent_version=agent_version,
+                        proposal=proposal,
+                        policy=governance_policy,
+                        tools=self._tools,
+                    )
+                    if (
+                        governed_plan.evaluation.effective_decision
+                        is GovernanceDecision.REQUIRE_APPROVAL
+                    ):
+                        raise RuntimeError(
+                            "REQUIRE_APPROVAL consequence belongs to Stage 3.3-C"
+                        )
+                    if governed_plan.evaluation.effective_decision is GovernanceDecision.DENY:
+                        assert governed_plan.denied_call is not None
+                        call = governed_plan.denied_call
+                        run.fail(f"tool {proposal.tool_name} denied by governance policy")
+                        try:
+                            await recorder.record_governed_model_tool_denied_and_fail_run(
+                                invocation,
+                                proposal,
+                                call,
+                                run,
+                                governed_plan.intent,
+                                governed_plan.evaluation,
+                                governance_policy.id,
+                                expected_generation=expected_generation,
+                            )
+                        except BusinessProgressionBlockedError as blocked:
+                            if blocked.code == "CANCEL_REQUESTED":
+                                run.status = RunStatus.RUNNING
+                                run.failure_reason = None
+                                run.completed_at = None
+                                run.request_cancel()
+                                await recorder.record_model_result_discarded_and_cancel_run(
+                                    invocation,
+                                    run,
+                                    blocked.failure_reason,
+                                    expected_generation=expected_generation,
+                                )
+                                return None
+                            run.failure_reason = blocked.failure_reason
+                            await recorder.record_model_result_discarded_and_fail_run(
+                                invocation,
+                                run,
+                                blocked.failure_reason,
+                                expected_generation=expected_generation,
+                            )
+                            raise RunExecutionFailedError(run.failure_reason) from blocked
+                        raise RunExecutionFailedError(run.failure_reason)
+                    assert governed_plan.prepared is not None
+                    prepared = governed_plan.prepared
+                else:
+                    prepared = self._tools.prepare_model_tool(
+                        proposal=proposal,
+                        agent_version=agent_version,
+                    )
             except PermissionError as exc:
                 call = ToolCall.denied_from_proposal(proposal, error=str(exc))
                 run.fail(f"tool {proposal.tool_name} rejected: {exc}")
@@ -1948,14 +2104,30 @@ class RunManager:
             if isinstance(prepared, PreparedExternalAction):
                 call = prepared.call
                 try:
-                    run_state = await recorder.record_model_side_effect_prepared(
-                        invocation,
-                        proposal,
-                        call,
-                        prepared.snapshot,
-                        prepared.action,
-                        expected_generation=expected_generation,
-                    )
+                    if governed_plan is None:
+                        run_state = await recorder.record_model_side_effect_prepared(
+                            invocation,
+                            proposal,
+                            call,
+                            prepared.snapshot,
+                            prepared.action,
+                            expected_generation=expected_generation,
+                        )
+                    else:
+                        assert governance_policy is not None
+                        run_state = (
+                            await recorder.record_governed_model_side_effect_allowed_prepared(
+                                invocation,
+                                proposal,
+                                call,
+                                prepared.snapshot,
+                                prepared.action,
+                                governed_plan.intent,
+                                governed_plan.evaluation,
+                                governance_policy.id,
+                                expected_generation=expected_generation,
+                            )
+                        )
                 except BusinessProgressionBlockedError as exc:
                     if exc.code == "CANCEL_REQUESTED":
                         run.request_cancel()
@@ -1988,12 +2160,24 @@ class RunManager:
 
             call = prepared.call
             try:
-                run_state = await recorder.record_model_tool_started(
-                    invocation,
-                    proposal,
-                    call,
-                    expected_generation=expected_generation,
-                )
+                if governed_plan is None:
+                    run_state = await recorder.record_model_tool_started(
+                        invocation,
+                        proposal,
+                        call,
+                        expected_generation=expected_generation,
+                    )
+                else:
+                    assert governance_policy is not None
+                    run_state = await recorder.record_governed_model_read_allowed_started(
+                        invocation,
+                        proposal,
+                        call,
+                        governed_plan.intent,
+                        governed_plan.evaluation,
+                        governance_policy.id,
+                        expected_generation=expected_generation,
+                    )
             except BusinessProgressionBlockedError as exc:
                 if exc.code == "CANCEL_REQUESTED":
                     run.request_cancel()
