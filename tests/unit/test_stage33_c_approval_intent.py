@@ -302,7 +302,7 @@ async def test_run_manager_side_effect_require_approval_enters_waiting_without_i
     assert journal.tool_attempts == []
 
 
-def test_require_approval_planner_rejects_missing_approver_metadata_without_preparing_io() -> None:
+def test_capability_derived_approval_without_metadata_fails_closed_to_deny_zero_io() -> None:
     tool_version_id = uuid4()
     policy_id = uuid4()
     binding = ToolBinding(
@@ -364,12 +364,102 @@ def test_require_approval_planner_rejects_missing_approver_metadata_without_prep
         ]
     )
 
-    with pytest.raises(ValueError, match="requires approval metadata"):
-        plan_governed_tool_consequence(
-            run=run,
-            agent_version=version,
-            proposal=proposal,
-            policy=policy,
-            tools=ToolCoordinator(registry),
-        )
+    plan = plan_governed_tool_consequence(
+        run=run,
+        agent_version=version,
+        proposal=proposal,
+        policy=policy,
+        tools=ToolCoordinator(registry),
+    )
+
+    assert plan.evaluation.raw_decision is GovernanceDecision.ALLOW
+    assert plan.evaluation.effective_decision is GovernanceDecision.DENY
+    assert plan.evaluation.approval is None
+    assert plan.denied_call is not None
+    assert plan.pending_call is None
+    assert plan.prepared is None
+    assert calls == []
+
+
+def test_capability_derived_approval_uses_exact_allow_fallback_metadata() -> None:
+    tool_version_id = uuid4()
+    policy_id = uuid4()
+    approval = GovernanceApprovalRequirement("risk-approver", True, 900)
+    binding = ToolBinding(
+        tool_version_id=tool_version_id,
+        name="destroy",
+        effect_type=ToolEffectType.DESTRUCTIVE,
+        credential_ref="credential://destructive",
+    )
+    version = AgentVersion(
+        id=uuid4(),
+        agent_id=uuid4(),
+        version_number=1,
+        instructions="fallback approval",
+        tool_bindings=(binding,),
+        governance_mode=GovernanceMode.GOVERNED,
+        policy_version_id=policy_id,
+    )
+    run = Run(
+        id=uuid4(),
+        agent_version_id=version.id,
+        input_text="fallback",
+        policy_version_id=policy_id,
+        requester_principal_id="requester",
+        requester_principal_type=PrincipalType.USER,
+        requester_roles=("operator",),
+        requester_scope="tenant-c",
+        requester_authn_source="test-oidc",
+    )
+    policy = GovernancePolicyVersion(
+        id=policy_id,
+        policy_key="c-fallback",
+        version_number=1,
+        status=GovernancePolicyStatus.PUBLISHED,
+        rules=(
+            GovernancePolicyRule(
+                rule_id="raw-allow-with-fallback",
+                priority=100,
+                decision=GovernanceDecision.ALLOW,
+                approval=approval,
+            ),
+        ),
+        created_at=NOW,
+        published_at=NOW,
+    )
+    proposal = ToolProposal.create(
+        run_id=run.id,
+        model_invocation_id=uuid4(),
+        tool_name="destroy",
+        arguments={"resource": "exact"},
+    )
+    calls: list[str] = []
+    registry = InMemoryToolRegistry(
+        [
+            SideEffectFunctionTool(
+                version_id=tool_version_id,
+                name="destroy",
+                description="destroy",
+                input_schema={"type": "object"},
+                func=lambda invocation: calls.append(str(invocation.operation_id)) or {"ok": True},
+            )
+        ]
+    )
+
+    plan = plan_governed_tool_consequence(
+        run=run,
+        agent_version=version,
+        proposal=proposal,
+        policy=policy,
+        tools=ToolCoordinator(registry),
+    )
+
+    assert plan.evaluation.raw_decision is GovernanceDecision.ALLOW
+    assert plan.evaluation.effective_decision is GovernanceDecision.REQUIRE_APPROVAL
+    assert plan.evaluation.approval == approval
+    assert plan.pending_call is not None
+    assert plan.pending_snapshot is not None
+    assert plan.pending_action is not None
+    assert plan.pending_snapshot.effect_type is ToolEffectType.DESTRUCTIVE
+    assert plan.pending_action.operation_id == plan.pending_snapshot.operation_id
     assert calls == []
