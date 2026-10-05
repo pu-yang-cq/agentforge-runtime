@@ -3109,6 +3109,11 @@ class PostgresExecutionRecorder(ExecutionRecorder):
             await session.flush()
 
             db_now = await _database_now(session)
+            if db_now >= run_row.deadline_at:
+                raise BusinessProgressionBlockedError(
+                    "DEADLINE_EXCEEDED",
+                    "run deadline expired before approval request creation",
+                )
             expires_at = min(
                 db_now + timedelta(seconds=approval.ttl_seconds),
                 run_row.deadline_at,
@@ -3341,6 +3346,11 @@ class PostgresExecutionRecorder(ExecutionRecorder):
             await session.flush()
 
             db_now = await _database_now(session)
+            if db_now >= run_row.deadline_at:
+                raise BusinessProgressionBlockedError(
+                    "DEADLINE_EXCEEDED",
+                    "run deadline expired before approval request creation",
+                )
             expires_at = min(
                 db_now + timedelta(seconds=approval.ttl_seconds),
                 run_row.deadline_at,
