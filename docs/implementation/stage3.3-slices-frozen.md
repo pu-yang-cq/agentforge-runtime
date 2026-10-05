@@ -257,10 +257,10 @@ Implementation Plan
 ✅ FROZEN
 
 Stage 3.3-A1
-🔓 UNLOCKED
+✅ ACCEPTED / FROZEN
 
 Stage 3.3-A2
-🔒 LOCKED
+🔓 UNLOCKED
 
 Stage 3.3-A Aggregate
 🔒 LOCKED
