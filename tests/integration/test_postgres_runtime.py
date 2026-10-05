@@ -53,6 +53,7 @@ from agentforge.domain.enums import (
     ActionResolutionOutcome,
     EventType,
     ExternalActionStatus,
+    MessageRole,
     QueueReason,
     ReconciliationAttemptStatus,
     ReconciliationBusinessResult,
@@ -61,7 +62,7 @@ from agentforge.domain.enums import (
     ToolEffectType,
     ToolExecutionAttemptStatus,
 )
-from agentforge.domain.models import ToolProposal
+from agentforge.domain.models import RunMessage, ToolProposal
 from agentforge.infrastructure.db.execution_recorder import (
     PostgresExecutionRecorder,
     PostgresExecutionRecorderFactory,
@@ -4193,4 +4194,369 @@ async def test_manual_resolution_rejects_non_manual_review_action() -> None:
             reason="cannot overwrite",
             resolver_identity="operator:e2",
         )
+    await engine.dispose()
+
+
+async def _prepare_e3_inflight_side_effect(
+    sessions,
+    *,
+    key: str,
+    tool_name: str,
+    reconciliation_mode=None,
+):
+    from agentforge.domain.enums import ReconciliationMode
+
+    mode = reconciliation_mode or ReconciliationMode.AUTHORITATIVE
+    side_tool_id = uuid4()
+    side_version_id = uuid4()
+    async with sessions() as session, session.begin():
+        session.add(ToolDefinitionRow(id=side_tool_id, name=tool_name, description="e3 write"))
+        await session.flush()
+        session.add(
+            ToolVersionRow(
+                id=side_version_id,
+                tool_id=side_tool_id,
+                version_number=1,
+                input_schema={"type": "object"},
+                effect_type=ToolEffectType.EXTERNAL_SIDE_EFFECT,
+                implementation_ref=f"tests:{tool_name}",
+                allow_no_approval_execution=True,
+                reconciliation_mode=mode,
+                reconciliation_max_attempts=2,
+                reconciliation_initial_backoff_seconds=0,
+                reconciliation_max_backoff_seconds=0,
+            )
+        )
+        await session.flush()
+        session.add(
+            AgentVersionToolRow(
+                agent_version_id=DEMO_AGENT_VERSION_ID,
+                tool_version_id=side_version_id,
+                tool_alias=tool_name,
+            )
+        )
+
+    registry = InMemoryToolRegistry(
+        [
+            FunctionTool(
+                version_id=DEMO_TOOL_VERSION_ID,
+                name="echo_read",
+                description="read",
+                input_schema={"type": "object"},
+                func=lambda text: {"echo": text},
+            ),
+            SideEffectFunctionTool(
+                version_id=side_version_id,
+                name=tool_name,
+                description="e3 write",
+                input_schema={"type": "object"},
+                func=lambda invocation: {"operation_id": str(invocation.operation_id), "ok": True},
+                reconcile_func=lambda invocation: ReconciliationResult(
+                    ReconciliationBusinessResult.SUCCEEDED,
+                    {"operation_id": str(invocation.operation_id)},
+                ),
+            ),
+        ]
+    )
+    store = PostgresRuntimeStore(sessions)
+    created = await store.create_run(
+        agent_version_id=DEMO_AGENT_VERSION_ID,
+        input_text=f"e3 {tool_name}",
+        idempotency_key=key,
+        principal_scope="test-user",
+    )
+    claimed = await store.claim_next_run(worker_id=f"{tool_name}-worker", lease_seconds=30)
+    assert claimed is not None
+    recorder = PostgresExecutionRecorder(
+        sessions,
+        run_id=created.id,
+        generation=claimed.execution_generation,
+    )
+    _, invocation = await recorder.begin_model_invocation(
+        run_id=created.id,
+        invocation_id=uuid4(),
+        expected_generation=claimed.execution_generation,
+    )
+    invocation.complete("TOOL_PROPOSAL")
+    proposal = ToolProposal.create(
+        run_id=created.id,
+        model_invocation_id=invocation.id,
+        tool_name=tool_name,
+        arguments={"v": 1},
+    )
+    version = await store.load_agent_version(DEMO_AGENT_VERSION_ID)
+    prepared = ToolCoordinator(registry).prepare_side_effect(
+        proposal=proposal,
+        agent_version=version,
+    )
+    await recorder.record_model_side_effect_prepared(
+        invocation,
+        proposal,
+        prepared.call,
+        prepared.snapshot,
+        prepared.action,
+        expected_generation=claimed.execution_generation,
+    )
+    attempt = await recorder.record_side_effect_attempt_started(
+        prepared.call,
+        prepared.action,
+        expected_generation=claimed.execution_generation,
+    )
+    return store, claimed, recorder, prepared, attempt, version
+
+
+@pytest.mark.asyncio
+async def test_e3_result_wins_then_cancellation_does_not_rollback_succeeded_action() -> None:
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+    store, claimed, recorder, prepared, attempt, _ = await _prepare_e3_inflight_side_effect(
+        sessions,
+        key="integration-e3-result-wins",
+        tool_name="e3_result_wins",
+    )
+
+    prepared.call = await ToolCoordinator(
+        InMemoryToolRegistry([prepared.tool])
+    ).execute_side_effect(prepared, attempt)
+    message = RunMessage(
+        claimed.id,
+        0,
+        MessageRole.TOOL,
+        '{"ok":true}',
+        prepared.call.id,
+    )
+    await recorder.record_side_effect_succeeded(
+        prepared.call,
+        prepared.action,
+        attempt,
+        message,
+        expected_generation=claimed.execution_generation,
+    )
+
+    cancelled = await store.cancel_run(claimed.id)
+    assert cancelled.status is RunStatus.CANCELLED
+    assert cancelled.cancel_requested is True
+    async with sessions() as session:
+        action = await session.get(ExternalActionRow, prepared.action.id)
+        call = await session.get(ToolCallRow, prepared.call.id)
+        durable_attempt = await session.get(ToolExecutionAttemptRow, attempt.id)
+    assert action is not None and action.status is ExternalActionStatus.SUCCEEDED
+    assert call is not None and call.status is ToolCallStatus.SUCCEEDED
+    assert durable_attempt is not None
+    assert durable_attempt.status is ToolExecutionAttemptStatus.SUCCEEDED
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_e3_cancel_wins_side_effect_result_records_truth_and_fences_worker() -> None:
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+    store, claimed, recorder, prepared, attempt, _ = await _prepare_e3_inflight_side_effect(
+        sessions,
+        key="integration-e3-cancel-wins",
+        tool_name="e3_cancel_wins",
+    )
+
+    cancel_state = await store.cancel_run(claimed.id)
+    assert cancel_state.cancel_requested is True
+    assert cancel_state.status is RunStatus.RUNNING
+
+    prepared.call = await ToolCoordinator(
+        InMemoryToolRegistry([prepared.tool])
+    ).execute_side_effect(prepared, attempt)
+    message = RunMessage(
+        claimed.id,
+        0,
+        MessageRole.TOOL,
+        '{"ok":true}',
+        prepared.call.id,
+    )
+    with pytest.raises(StaleExecutorError, match="progression authority is fenced"):
+        await recorder.record_side_effect_succeeded(
+            prepared.call,
+            prepared.action,
+            attempt,
+            message,
+            expected_generation=claimed.execution_generation,
+        )
+
+    durable = await store.get_run(claimed.id)
+    assert durable is not None
+    assert durable.status is RunStatus.CANCELLED
+    assert durable.cancel_requested is True
+    async with sessions() as session:
+        action = await session.get(ExternalActionRow, prepared.action.id)
+        call = await session.get(ToolCallRow, prepared.call.id)
+        durable_attempt = await session.get(ToolExecutionAttemptRow, attempt.id)
+        event_types = (
+            (
+                await session.execute(
+                    select(DomainEventRow.event_type)
+                    .where(DomainEventRow.run_id == claimed.id)
+                    .order_by(DomainEventRow.sequence)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert action is not None and action.status is ExternalActionStatus.SUCCEEDED
+    assert call is not None and call.status is ToolCallStatus.SUCCEEDED
+    assert durable_attempt is not None
+    assert durable_attempt.status is ToolExecutionAttemptStatus.SUCCEEDED
+    assert EventType.RUN_CANCELLED.value in event_types
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_e3_cancellation_wins_reconciliation_success_truth_without_continuation() -> None:
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+    store, claimed, recorder, prepared, attempt, version = await _prepare_e3_inflight_side_effect(
+        sessions,
+        key="integration-e3-cancel-reconcile",
+        tool_name="e3_cancel_reconcile",
+    )
+
+    await recorder.record_side_effect_unknown(
+        prepared.call,
+        prepared.action,
+        attempt,
+        error="response lost",
+        error_class="RESPONSE_LOST",
+        outcome_reason="SIDE_EFFECT_POSSIBLE_EXECUTION",
+        expected_generation=claimed.execution_generation,
+    )
+    binding = next(item for item in version.tool_bindings if item.name == "e3_cancel_reconcile")
+    reconciliation = await recorder.record_reconciliation_started(
+        prepared.call,
+        prepared.action,
+        claimed,
+        max_attempts=binding.reconciliation_max_attempts,
+        expected_generation=claimed.execution_generation,
+    )
+    assert reconciliation is not None
+
+    cancel_state = await store.cancel_run(claimed.id)
+    assert cancel_state.status is RunStatus.RUNNING
+    assert cancel_state.cancel_requested is True
+
+    returned = await recorder.record_reconciliation_result(
+        prepared.call,
+        prepared.action,
+        reconciliation,
+        claimed,
+        ReconciliationResult(
+            ReconciliationBusinessResult.SUCCEEDED,
+            {"provider": "confirmed"},
+        ),
+        binding=binding,
+        expected_generation=claimed.execution_generation,
+    )
+    assert returned is None
+
+    durable = await store.get_run(claimed.id)
+    assert durable is not None
+    assert durable.status is RunStatus.CANCELLED
+    assert durable.cancel_requested is True
+    async with sessions() as session:
+        action = await session.get(ExternalActionRow, prepared.action.id)
+        call = await session.get(ToolCallRow, prepared.call.id)
+        recon = await session.get(ReconciliationAttemptRow, reconciliation.id)
+    assert action is not None and action.status is ExternalActionStatus.SUCCEEDED
+    assert call is not None and call.status is ToolCallStatus.SUCCEEDED
+    assert recon is not None
+    assert recon.status is ReconciliationAttemptStatus.SUCCEEDED
+    assert recon.business_result is ReconciliationBusinessResult.SUCCEEDED
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_e3_manual_resolution_wins_late_stale_result_cannot_overwrite() -> None:
+    from agentforge.domain.actions import ExternalAction
+    from agentforge.domain.models import ToolCall, ToolExecutionAttempt
+
+    reset_schema()
+    engine = create_engine(DATABASE_URL)
+    sessions = create_session_factory(engine)
+    await seed_demo(sessions)
+    store, run_id, action_id, _ = await _build_manual_review_run_for_e2(
+        sessions,
+        key="integration-e3-resolution-wins",
+        tool_name="e3_resolution_wins",
+    )
+
+    resolved_run, resolution = await store.resolve_action(
+        run_id=run_id,
+        action_id=action_id,
+        outcome=ActionResolutionOutcome.SUCCEEDED,
+        evidence={"operator": "verified"},
+        reason="manual truth wins",
+        resolver_identity="operator:e3",
+    )
+    assert resolved_run.status is RunStatus.QUEUED
+
+    async with sessions() as session:
+        action_row = await session.get(ExternalActionRow, action_id)
+        assert action_row is not None
+        call_row = await session.get(ToolCallRow, action_row.tool_call_id)
+        assert call_row is not None
+
+    fake_attempt_id = uuid4()
+    late_call = ToolCall(
+        call_row.id,
+        run_id,
+        call_row.proposal_id,
+        call_row.tool_version_id,
+        call_row.tool_name,
+        dict(call_row.arguments),
+        status=ToolCallStatus.SUCCEEDED,
+        result={"late": "provider-success"},
+    )
+    late_action = ExternalAction(
+        action_row.id,
+        run_id,
+        action_row.tool_call_id,
+        action_row.action_snapshot_id,
+        action_row.operation_id,
+        status=ExternalActionStatus.EXECUTING,
+        current_attempt_id=fake_attempt_id,
+    )
+    late_attempt = ToolExecutionAttempt(
+        fake_attempt_id,
+        run_id,
+        call_row.id,
+        99,
+        1,
+        external_action_id=action_id,
+    )
+    stale_recorder = PostgresExecutionRecorder(sessions, run_id=run_id, generation=1)
+    with pytest.raises(StaleExecutorError):
+        await stale_recorder.record_side_effect_succeeded(
+            late_call,
+            late_action,
+            late_attempt,
+            RunMessage(run_id, 0, MessageRole.TOOL, '{"late":true}', call_row.id),
+            expected_generation=1,
+        )
+
+    async with sessions() as session:
+        final_action = await session.get(ExternalActionRow, action_id)
+        final_call = await session.get(ToolCallRow, call_row.id)
+        final_resolution = await session.get(ActionResolutionRow, resolution.id)
+    assert final_action is not None
+    assert final_action.status is ExternalActionStatus.SUCCEEDED
+    assert final_call is not None
+    assert final_call.status is ToolCallStatus.SUCCEEDED
+    assert final_call.result == {
+        "manual_resolution": ActionResolutionOutcome.SUCCEEDED.value,
+        "evidence": {"operator": "verified"},
+    }
+    assert final_resolution is not None
+    assert final_resolution.outcome is ActionResolutionOutcome.SUCCEEDED
     await engine.dispose()

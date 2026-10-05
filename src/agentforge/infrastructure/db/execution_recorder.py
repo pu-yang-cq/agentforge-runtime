@@ -814,6 +814,7 @@ class PostgresExecutionRecorder(ExecutionRecorder):
     ) -> RunMessage | None:
         self._assert_generation(expected_generation)
         returned_message: RunMessage | None = None
+        cancellation_fenced = False
         async with self._sessions() as session, session.begin():
             run_row = await _lock_owned_run(
                 session,
@@ -887,6 +888,16 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                     "reconciliation": "SUCCEEDED",
                     "evidence": result.evidence,
                 }
+                if run_row.cancel_requested:
+                    cancellation_fenced = True
+                    run_row.status = RunStatus.CANCELLED
+                    run_row.queue_reason = None
+                    run_row.available_at = None
+                    run_row.final_output = None
+                    run_row.failure_reason = None
+                    run_row.completed_at = db_now
+                    run_row.owner_worker_id = None
+                    run_row.lease_expires_at = None
                 message_seq = await _allocate_message_sequence(session, run.id)
                 session.add(
                     RunMessageRow(
@@ -937,11 +948,22 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                 action_row.updated_at = db_now
                 call_row.status = ToolCallStatus.FAILED
                 call_row.error = "reconciliation confirmed action failure"
-                run_row.status = RunStatus.FAILED
-                run_row.failure_reason = "RECONCILIATION_CONFIRMED_ACTION_FAILED"
-                run_row.completed_at = db_now
-                run_row.owner_worker_id = None
-                run_row.lease_expires_at = None
+                if run_row.cancel_requested:
+                    cancellation_fenced = True
+                    run_row.status = RunStatus.CANCELLED
+                    run_row.queue_reason = None
+                    run_row.available_at = None
+                    run_row.failure_reason = None
+                    run_row.final_output = None
+                    run_row.completed_at = db_now
+                    run_row.owner_worker_id = None
+                    run_row.lease_expires_at = None
+                else:
+                    run_row.status = RunStatus.FAILED
+                    run_row.failure_reason = "RECONCILIATION_CONFIRMED_ACTION_FAILED"
+                    run_row.completed_at = db_now
+                    run_row.owner_worker_id = None
+                    run_row.lease_expires_at = None
                 session.add(
                     DomainEventRow(
                         id=uuid4(),
@@ -960,8 +982,16 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                         id=uuid4(),
                         run_id=run.id,
                         sequence=seqs[2],
-                        event_type=EventType.RUN_FAILED.value,
-                        payload={"reason": "RECONCILIATION_CONFIRMED_ACTION_FAILED"},
+                        event_type=(
+                            EventType.RUN_CANCELLED.value
+                            if cancellation_fenced
+                            else EventType.RUN_FAILED.value
+                        ),
+                        payload=(
+                            {"reason": "CANCEL_WON_BEFORE_RECONCILIATION_RESULT"}
+                            if cancellation_fenced
+                            else {"reason": "RECONCILIATION_CONFIRMED_ACTION_FAILED"}
+                        ),
                     )
                 )
 
@@ -1185,11 +1215,17 @@ class PostgresExecutionRecorder(ExecutionRecorder):
             await session.flush()
 
         attempt.succeed(result.outcome, result.evidence)
+        if cancellation_fenced:
+            run.cancel_requested = True
+            if run.status is RunStatus.RUNNING:
+                run.cancel()
         if result.outcome is ReconciliationBusinessResult.SUCCEEDED:
             action.reconcile_succeeded()
             call.status = ToolCallStatus.SUCCEEDED
             call.error = None
             call.result = {"reconciliation": "SUCCEEDED", "evidence": result.evidence}
+            if cancellation_fenced:
+                return None
         elif result.outcome is ReconciliationBusinessResult.FAILED:
             action.reconcile_failed()
             call.status = ToolCallStatus.FAILED
@@ -1199,6 +1235,10 @@ class PostgresExecutionRecorder(ExecutionRecorder):
             run.completed_at = datetime.now(run.deadline_at.tzinfo)
             run.owner_worker_id = None
             run.lease_expires_at = None
+            if cancellation_fenced:
+                run.status = RunStatus.CANCELLED
+                run.failure_reason = None
+                return None
         elif result.outcome is ReconciliationBusinessResult.NOT_EXECUTED and (
             binding.reconciliation_mode is ReconciliationMode.AUTHORITATIVE
             or (
@@ -1507,12 +1547,14 @@ class PostgresExecutionRecorder(ExecutionRecorder):
         if action.current_attempt_id != attempt.id:
             raise ValueError("side-effect success attempt is not current")
 
+        cancellation_fenced = False
         async with self._sessions() as session, session.begin():
-            await _lock_owned_run(
+            run_row = await _lock_owned_run(
                 session,
                 run_id=call.run_id,
                 expected_generation=expected_generation,
             )
+            cancellation_fenced = run_row.cancel_requested
             action_row = (
                 await session.execute(
                     select(ExternalActionRow)
@@ -1572,37 +1614,60 @@ class PostgresExecutionRecorder(ExecutionRecorder):
                     source_id=message.source_id,
                 )
             )
-            seqs = list(await _allocate_event_sequences(session, call.run_id, 2))
-            session.add_all(
-                [
+            event_count = 3 if cancellation_fenced else 2
+            seqs = list(await _allocate_event_sequences(session, call.run_id, event_count))
+            events = [
+                DomainEventRow(
+                    id=uuid4(),
+                    run_id=call.run_id,
+                    sequence=seqs[0],
+                    event_type=EventType.ACTION_SUCCEEDED.value,
+                    payload={
+                        "tool_call_id": str(call.id),
+                        "external_action_id": str(action.id),
+                        "operation_id": str(action.operation_id),
+                        "attempt_id": str(attempt.id),
+                    },
+                ),
+                DomainEventRow(
+                    id=uuid4(),
+                    run_id=call.run_id,
+                    sequence=seqs[1],
+                    event_type=EventType.TOOL_SUCCEEDED.value,
+                    payload={
+                        "tool_call_id": str(call.id),
+                        "tool_name": call.tool_name,
+                        "attempt_id": str(attempt.id),
+                        "attempt_number": attempt.attempt_number,
+                    },
+                ),
+            ]
+            if cancellation_fenced:
+                run_row.status = RunStatus.CANCELLED
+                run_row.queue_reason = None
+                run_row.available_at = None
+                run_row.final_output = None
+                run_row.failure_reason = None
+                run_row.completed_at = func.clock_timestamp()
+                run_row.owner_worker_id = None
+                run_row.lease_expires_at = None
+                events.append(
                     DomainEventRow(
                         id=uuid4(),
                         run_id=call.run_id,
-                        sequence=seqs[0],
-                        event_type=EventType.ACTION_SUCCEEDED.value,
-                        payload={
-                            "tool_call_id": str(call.id),
-                            "external_action_id": str(action.id),
-                            "operation_id": str(action.operation_id),
-                            "attempt_id": str(attempt.id),
-                        },
-                    ),
-                    DomainEventRow(
-                        id=uuid4(),
-                        run_id=call.run_id,
-                        sequence=seqs[1],
-                        event_type=EventType.TOOL_SUCCEEDED.value,
-                        payload={
-                            "tool_call_id": str(call.id),
-                            "tool_name": call.tool_name,
-                            "attempt_id": str(attempt.id),
-                            "attempt_number": attempt.attempt_number,
-                        },
-                    ),
-                ]
-            )
+                        sequence=seqs[2],
+                        event_type=EventType.RUN_CANCELLED.value,
+                        payload={"reason": "CANCEL_WON_BEFORE_SIDE_EFFECT_RESULT"},
+                    )
+                )
+            session.add_all(events)
             await session.flush()
 
+        if cancellation_fenced:
+            raise StaleExecutorError(
+                "cancellation won before side-effect result persistence; "
+                "external truth was recorded but progression authority is fenced"
+            )
         attempt.succeed(call.result)
         action.succeed()
 
