@@ -37,9 +37,16 @@ Frozen Stage 3.3 design artifacts:
 - `docs/acceptance/stage3.3-governance-design-v1.0-accepted.md`
 - frozen branch: `stage3.3-governance-design-v1.0-frozen`
 
-Stage 3.3 implementation is now **UNLOCKED**.
-Stage 3.3 runtime acceptance remains **LOCKED** until implementation passes the frozen
-Governance Acceptance Criteria V1.0.
+Stage 3.3 implementation is in progress.
+
+- Stage 3.3-A1 Identity / Compatibility / Policy Schema: **ACCEPTED / FROZEN**
+- accepted semantic candidate: `cf1c7571b67210bedfe411865bb940c83e6da4f0`
+- successful A1 gate: `37268108885`
+- acceptance: `docs/implementation/stage3.3-a1-accepted.md`
+- Stage 3.3-A2 Evaluator / Intent / PolicyDecision: **UNLOCKED**
+
+Stage 3.3-A aggregate and later Stage 3.3 runtime acceptance remain **LOCKED** until their
+frozen implementation gates pass.
 
 Stage 3.1 accepted immutable source:
 
