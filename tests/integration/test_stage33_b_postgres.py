@@ -492,7 +492,6 @@ async def test_b_cancel_wins_before_consequence_and_rolls_back_policy_business_f
     await fx.engine.dispose()
 
 
-
 async def _seed_worker_read_case(*, decision: GovernanceDecision):
     _reset_head()
     engine = create_engine(DATABASE_URL)
@@ -584,9 +583,15 @@ async def _seed_worker_read_case(*, decision: GovernanceDecision):
 
 @pytest.mark.asyncio
 async def test_b_worker_governed_allow_runs_through_policy_audit_before_physical_read() -> None:
-    engine, sessions, policy_store, store, run, registry, physical_calls = (
-        await _seed_worker_read_case(decision=GovernanceDecision.ALLOW)
-    )
+    (
+        engine,
+        sessions,
+        policy_store,
+        store,
+        run,
+        registry,
+        physical_calls,
+    ) = await _seed_worker_read_case(decision=GovernanceDecision.ALLOW)
     worker = CoreWorker(
         runtime_store=store,
         recorder_factory=PostgresExecutionRecorderFactory(sessions),
@@ -621,9 +626,7 @@ async def test_b_worker_governed_allow_runs_through_policy_audit_before_physical
         attempts = (
             (
                 await session.execute(
-                    select(ToolExecutionAttemptRow).where(
-                        ToolExecutionAttemptRow.run_id == run.id
-                    )
+                    select(ToolExecutionAttemptRow).where(ToolExecutionAttemptRow.run_id == run.id)
                 )
             )
             .scalars()
@@ -646,24 +649,26 @@ async def test_b_worker_governed_allow_runs_through_policy_audit_before_physical
     assert len(attempts) == 1
     assert attempts[0].status is ToolExecutionAttemptStatus.SUCCEEDED
     assert EventType.POLICY_DECIDED.value in events
-    assert events.index(EventType.POLICY_DECIDED.value) < events.index(
-        EventType.TOOL_STARTED.value
-    )
+    assert events.index(EventType.POLICY_DECIDED.value) < events.index(EventType.TOOL_STARTED.value)
     await engine.dispose()
 
 
 @pytest.mark.asyncio
 async def test_b_worker_governed_deny_records_audit_and_performs_zero_physical_io() -> None:
-    engine, sessions, policy_store, store, run, registry, physical_calls = (
-        await _seed_worker_read_case(decision=GovernanceDecision.DENY)
-    )
+    (
+        engine,
+        sessions,
+        policy_store,
+        store,
+        run,
+        registry,
+        physical_calls,
+    ) = await _seed_worker_read_case(decision=GovernanceDecision.DENY)
     worker = CoreWorker(
         runtime_store=store,
         recorder_factory=PostgresExecutionRecorderFactory(sessions),
         tool_registry=registry,
-        model_factory=lambda _: ScriptedFakeModel(
-            [ToolStep("lookup", {"q": "worker-deny"})]
-        ),
+        model_factory=lambda _: ScriptedFakeModel([ToolStep("lookup", {"q": "worker-deny"})]),
         worker_id="stage33-b-deny-worker",
         lease_seconds=30,
         governance_policy_store=policy_store,
@@ -682,9 +687,7 @@ async def test_b_worker_governed_deny_records_audit_and_performs_zero_physical_i
             )
         ).scalar_one()
         call = (
-            await session.execute(
-                select(ToolCallRow).where(ToolCallRow.run_id == run.id)
-            )
+            await session.execute(select(ToolCallRow).where(ToolCallRow.run_id == run.id))
         ).scalar_one()
         attempt_count = await session.scalar(
             select(func.count())
