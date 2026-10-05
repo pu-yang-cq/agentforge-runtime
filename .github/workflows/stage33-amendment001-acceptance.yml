@@ -29,7 +29,24 @@ jobs:
 
           git diff --exit-code "$baseline" -- docs/design/stage3.3-governance-v1.0-frozen.md docs/acceptance/stage3.3-governance-acceptance-v1.0-frozen.md docs/implementation/stage3.3-a2-accepted.md docs/implementation/stage3.3-b-accepted.md
           git diff --exit-code "$baseline" -- migrations ':(exclude)migrations/versions/0019_approval_intent.py'
-          git diff --ignore-all-space --exit-code "$baseline" -- migrations/versions/0019_approval_intent.py
+          python - "$baseline" <<'PY'
+          import ast
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          path = "migrations/versions/0019_approval_intent.py"
+          baseline_source = subprocess.check_output(
+              ["git", "show", f"{sys.argv[1]}:{path}"],
+              text=True,
+          )
+          current_source = Path(path).read_text()
+          baseline_ast = ast.dump(ast.parse(baseline_source), include_attributes=False)
+          current_ast = ast.dump(ast.parse(current_source), include_attributes=False)
+          if baseline_ast != current_ast:
+              raise SystemExit("0019 migration AST changed beyond formatting")
+          print("0019 migration AST equivalence: PASS")
+          PY
 
           changed="$(git diff --name-only "$baseline"..HEAD)"
           while IFS= read -r path; do
