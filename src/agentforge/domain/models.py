@@ -218,6 +218,15 @@ class Run:
         self.owner_worker_id = None
         self.lease_expires_at = None
 
+    def wait_for_approval(self) -> None:
+        if self.status is not RunStatus.RUNNING:
+            raise ValueError(f"cannot wait for approval from {self.status}")
+        self.status = RunStatus.WAITING_APPROVAL
+        self.queue_reason = None
+        self.available_at = None
+        self.owner_worker_id = None
+        self.lease_expires_at = None
+
     def resume_after_action_resolution(self) -> None:
         if self.status is not RunStatus.WAITING_ACTION_RESOLUTION:
             raise ValueError(f"cannot resume action resolution from {self.status}")
@@ -361,6 +370,11 @@ class ToolCall:
             status=ToolCallStatus.DENIED,
             error=error,
         )
+
+    def await_approval(self) -> None:
+        if self.status is not ToolCallStatus.CREATED:
+            raise ValueError("tool call can only await approval from CREATED")
+        self.status = ToolCallStatus.AWAITING_APPROVAL
 
     def ready(self) -> None:
         if self.status is not ToolCallStatus.CREATED:
