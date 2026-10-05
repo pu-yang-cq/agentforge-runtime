@@ -67,7 +67,7 @@ create_run requires runtime:run:create.
 GET Run:
 - requester allowed; or
 - same-scope runtime:run:read:any allowed;
-- cross-scope -> 403/404 according to API non-disclosure contract.
+- cross-scope single-resource read -> 404 to avoid resource-existence disclosure.
 
 Legacy compatibility behavior remains separately tested.
 
@@ -433,6 +433,12 @@ Legacy Stage 3.2 API contract remains isolated in development compatibility mode
 ## AE. Governed read isolation
 
 Run get + approval list/detail must not leak across principal_scope.
+
+Mandatory:
+- cross-scope single-resource Run/approval lookup -> 404;
+- approval collection/list silently filters invisible requests;
+- same-scope mutation on a visible resource without the required role -> 403;
+- no response body leaks hidden requester/argument/digest metadata.
 
 Approval review projection is deterministic durable data, not model-written prose.
 
