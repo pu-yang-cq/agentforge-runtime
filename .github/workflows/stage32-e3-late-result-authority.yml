@@ -1,0 +1,117 @@
+name: Stage 3.2-E3 Late-result Authority
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - rc/RUN_STAGE32_E3
+
+permissions:
+  contents: write
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: true
+
+      - name: Apply Stage 3.2-E3 implementation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python scripts/stage32_e3_patch.py
+
+      - name: Canonically format Stage 3.2-E3 candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            -e UV_PROJECT_ENVIRONMENT=/tmp/agentforge-e3-venv \
+            -e UV_CACHE_DIR=/tmp/agentforge-e3-cache \
+            ghcr.io/astral-sh/uv:0.12.20-python3.14-trixie-slim \
+            sh -lc "uv sync --locked --all-groups >/dev/null && uv run --locked ruff format src tests"
+
+      - name: Verify E3 authority surface
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f docs/implementation/stage3.2-e2-action-resolution.md
+          test -f docs/implementation/stage3.2-e-slices-frozen.md
+          grep -R 'CANCEL_WON_BEFORE_SIDE_EFFECT_RESULT' -n src tests
+          grep -R 'CANCEL_WON_BEFORE_RECONCILIATION_RESULT' -n src tests
+          grep -R 'progression authority is fenced' -n src tests
+          grep -R 'test_e3_manual_resolution_wins_late_stale_result_cannot_overwrite' -n tests
+          grep -R 'test_e3_cancellation_wins_inflight_side_effect_result_records_truth_but_fences_worker' -n tests
+          grep -R 'test_e3_cancellation_wins_reconciliation_success_truth_without_continuation' -n tests
+
+      - name: Prove side-effect result still locks Run first
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          source = Path("src/agentforge/infrastructure/db/execution_recorder.py").read_text()
+          tree = ast.parse(source)
+          fn = next(
+              n for n in ast.walk(tree)
+              if isinstance(n, ast.AsyncFunctionDef) and n.name == "record_side_effect_succeeded"
+          )
+          calls = []
+          for n in ast.walk(fn):
+              if isinstance(n, ast.Call):
+                  if isinstance(n.func, ast.Name):
+                      calls.append((n.lineno, n.func.id))
+                  elif isinstance(n.func, ast.Attribute):
+                      calls.append((n.lineno, n.func.attr))
+          run_lock = min(line for line, name in calls if name == "_lock_owned_run")
+          first_select = min(
+              [line for line, name in calls if name in {"execute", "scalar"} and line > run_lock],
+              default=10**9,
+          )
+          if not run_lock < first_select:
+              raise SystemExit("Run lock must precede action/call/attempt result locks")
+          print("side-effect result Run-row serialization: PASS")
+          PY
+
+      - name: Prove manual resolution remains final
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          text = Path("src/agentforge/infrastructure/db/runtime_store.py").read_text()
+          required = [
+              "external action already has a contradictory final resolution",
+              "only MANUAL_REVIEW ExternalAction may be manually resolved",
+              ".with_for_update()",
+          ]
+          for token in required:
+              if token not in text:
+                  raise SystemExit(f"missing final-resolution guard: {token}")
+          print("ActionResolution finality guards: PASS")
+          PY
+
+      - name: Run Stage 3.2-E3 target gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ./scripts/validate_stage31_containerized.sh
+
+      - name: Commit Stage 3.2-E3 only if green
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "agentforge-stage32-bot"
+          git config user.email "agentforge-stage32-bot@users.noreply.github.com"
+          git rm scripts/stage32_e3_patch.py
+          git add src tests
+          git diff --cached --check
+          git commit -m "feat(runtime): fence late results behind cancellation authority"
+          git push origin HEAD:main
