@@ -4,15 +4,38 @@ from uuid import uuid4
 
 import pytest
 
+from agentforge.application.governed_consequence import plan_governed_tool_consequence
+from agentforge.application.run_manager import ExecutionJournal, RunManager
 from agentforge.domain.actions import ExternalAction
 from agentforge.domain.approvals import ApprovalRequest
 from agentforge.domain.enums import (
     ApprovalRequestStatus,
     ExternalActionStatus,
+    GovernanceDecision,
+    GovernanceMode,
+    GovernancePolicyStatus,
+    PrincipalType,
     RunStatus,
     ToolCallStatus,
+    ToolEffectType,
 )
-from agentforge.domain.models import Run, ToolCall, ToolProposal
+from agentforge.domain.governance import (
+    GovernanceApprovalRequirement,
+    GovernancePolicyRule,
+    GovernancePolicyVersion,
+)
+from agentforge.domain.models import (
+    AgentVersion,
+    Run,
+    RunState,
+    ToolBinding,
+    ToolCall,
+    ToolProposal,
+)
+from agentforge.runtime.fake_model import ScriptedFakeModel, ToolStep
+from agentforge.runtime.native_runner import NativeRunner
+from agentforge.runtime.tool_coordinator import ToolCoordinator
+from agentforge.runtime.tools import InMemoryToolRegistry, SideEffectFunctionTool
 
 NOW = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
 ROOT = Path(__file__).resolve().parents[2]
@@ -173,3 +196,180 @@ def test_0019_approval_intent_migration_extends_existing_progression_guards() ->
     assert "ck_approval_requests_status_decided_shape" in migration
     assert "CREATE" not in migration or "ApprovalDecision" not in migration
     assert "expire_due_approvals" not in migration
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "effect_type",
+    [ToolEffectType.EXTERNAL_SIDE_EFFECT, ToolEffectType.DESTRUCTIVE],
+)
+async def test_run_manager_side_effect_require_approval_enters_waiting_without_io(
+    effect_type: ToolEffectType,
+) -> None:
+    tool_version_id = uuid4()
+    policy_id = uuid4()
+    agent_version_id = uuid4()
+    calls: list[str] = []
+
+    registry = InMemoryToolRegistry(
+        [
+            SideEffectFunctionTool(
+                version_id=tool_version_id,
+                name="effect",
+                description="effect",
+                input_schema={"type": "object"},
+                func=lambda invocation: (
+                    calls.append(str(invocation.operation_id)) or {"ok": True}
+                ),
+            )
+        ]
+    )
+    binding = ToolBinding(
+        tool_version_id=tool_version_id,
+        name="effect",
+        effect_type=effect_type,
+        credential_ref="credential://effect",
+    )
+    version = AgentVersion(
+        id=agent_version_id,
+        agent_id=uuid4(),
+        version_number=1,
+        instructions="approval",
+        tool_bindings=(binding,),
+        governance_mode=GovernanceMode.GOVERNED,
+        policy_version_id=policy_id,
+    )
+    run = Run(
+        id=uuid4(),
+        agent_version_id=version.id,
+        input_text="needs approval",
+        policy_version_id=policy_id,
+        requester_principal_id="requester",
+        requester_principal_type=PrincipalType.USER,
+        requester_roles=("operator",),
+        requester_scope="tenant-c",
+        requester_authn_source="test-oidc",
+    )
+    run.queue()
+    policy = GovernancePolicyVersion(
+        id=policy_id,
+        policy_key="c-side-effect",
+        version_number=1,
+        status=GovernancePolicyStatus.PUBLISHED,
+        rules=(
+            GovernancePolicyRule(
+                rule_id="require",
+                priority=100,
+                decision=GovernanceDecision.REQUIRE_APPROVAL,
+                approval=GovernanceApprovalRequirement("approver", True, 600),
+            ),
+        ),
+        created_at=NOW,
+        published_at=NOW,
+    )
+    manager = RunManager(
+        NativeRunner(
+            ScriptedFakeModel([ToolStep("effect", {"ticket": "exact"})]),
+            registry,
+        ),
+        ToolCoordinator(registry),
+    )
+    journal = ExecutionJournal()
+
+    result = await manager.execute(
+        run=run,
+        run_state=RunState(run.id),
+        agent_version=version,
+        recorder=journal,
+        governance_policy=policy,
+    )
+
+    assert result is None
+    assert run.status is RunStatus.WAITING_APPROVAL
+    assert calls == []
+    assert len(journal.tool_calls) == 1
+    assert journal.tool_calls[0].status is ToolCallStatus.AWAITING_APPROVAL
+    assert len(journal.action_snapshots) == 1
+    assert len(journal.external_actions) == 1
+    assert journal.external_actions[0].status is ExternalActionStatus.AWAITING_APPROVAL
+    assert journal.external_actions[0].current_attempt_id is None
+    assert len(journal.approval_requests) == 1
+    assert journal.approval_requests[0].external_action_id == journal.external_actions[0].id
+    assert (
+        journal.approval_requests[0].action_snapshot_digest
+        == journal.action_snapshots[0].digest
+    )
+    assert journal.tool_attempts == []
+
+
+def test_require_approval_planner_rejects_missing_approver_metadata_without_preparing_io() -> None:
+    tool_version_id = uuid4()
+    policy_id = uuid4()
+    binding = ToolBinding(
+        tool_version_id=tool_version_id,
+        name="effect",
+        effect_type=ToolEffectType.EXTERNAL_SIDE_EFFECT,
+    )
+    version = AgentVersion(
+        id=uuid4(),
+        agent_id=uuid4(),
+        version_number=1,
+        instructions="approval metadata guard",
+        tool_bindings=(binding,),
+        governance_mode=GovernanceMode.GOVERNED,
+        policy_version_id=policy_id,
+    )
+    run = Run(
+        id=uuid4(),
+        agent_version_id=version.id,
+        input_text="guard",
+        policy_version_id=policy_id,
+        requester_principal_id="requester",
+        requester_principal_type=PrincipalType.USER,
+        requester_roles=("operator",),
+        requester_scope="tenant-c",
+        requester_authn_source="test-oidc",
+    )
+    policy = GovernancePolicyVersion(
+        id=policy_id,
+        policy_key="c-derived-approval",
+        version_number=1,
+        status=GovernancePolicyStatus.PUBLISHED,
+        rules=(
+            GovernancePolicyRule(
+                rule_id="raw-allow",
+                priority=100,
+                decision=GovernanceDecision.ALLOW,
+            ),
+        ),
+        created_at=NOW,
+        published_at=NOW,
+    )
+    proposal = ToolProposal.create(
+        run_id=run.id,
+        model_invocation_id=uuid4(),
+        tool_name="effect",
+        arguments={"ticket": "guard"},
+    )
+    calls: list[str] = []
+    registry = InMemoryToolRegistry(
+        [
+            SideEffectFunctionTool(
+                version_id=tool_version_id,
+                name="effect",
+                description="effect",
+                input_schema={"type": "object"},
+                func=lambda invocation: calls.append(str(invocation.operation_id)) or {"ok": True},
+            )
+        ]
+    )
+
+    with pytest.raises(ValueError, match="requires approval metadata"):
+        plan_governed_tool_consequence(
+            run=run,
+            agent_version=version,
+            proposal=proposal,
+            policy=policy,
+            tools=ToolCoordinator(registry),
+        )
+    assert calls == []
