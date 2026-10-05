@@ -158,9 +158,7 @@ def test_governed_policy_deny_binds_exact_tool_version_and_creates_no_prepared_i
 
 
 def test_governed_require_approval_remains_non_executable_in_stage33_b() -> None:
-    run, version, policy, proposal, tools, calls = _fixture(
-        GovernanceDecision.REQUIRE_APPROVAL
-    )
+    run, version, policy, proposal, tools, calls = _fixture(GovernanceDecision.REQUIRE_APPROVAL)
 
     plan = plan_governed_tool_consequence(
         run=run,
@@ -192,7 +190,6 @@ def test_governed_planner_rejects_policy_identity_drift() -> None:
         assert "exact pinned policy identity" in str(exc)
     else:
         raise AssertionError("policy identity drift must fail closed")
-
 
 
 def _runtime_fixture(decision: GovernanceDecision):
@@ -294,10 +291,7 @@ async def test_run_manager_governed_read_allow_uses_governed_recorder_before_io(
     assert calls == ["hello"]
     assert len(journal.governance_intents) == 1
     assert len(journal.governance_evaluations) == 1
-    assert (
-        journal.governance_evaluations[0].effective_decision
-        is GovernanceDecision.ALLOW
-    )
+    assert journal.governance_evaluations[0].effective_decision is GovernanceDecision.ALLOW
     assert len(journal.tool_attempts) == 1
     assert journal.tool_calls[0].status is ToolCallStatus.SUCCEEDED
 
@@ -334,9 +328,7 @@ async def test_run_manager_governed_deny_records_bound_denial_and_zero_io() -> N
 
 @pytest.mark.asyncio
 async def test_run_manager_require_approval_stops_at_stage33_c_boundary() -> None:
-    run, version, policy, registry, calls = _runtime_fixture(
-        GovernanceDecision.REQUIRE_APPROVAL
-    )
+    run, version, policy, registry, calls = _runtime_fixture(GovernanceDecision.REQUIRE_APPROVAL)
     manager = RunManager(
         NativeRunner(
             ScriptedFakeModel([ToolStep("lookup", {"q": "needs approval"})]),
