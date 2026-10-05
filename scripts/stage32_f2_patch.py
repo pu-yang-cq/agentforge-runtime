@@ -412,6 +412,7 @@ async def test_fake_external_ledger_never_stores_credential_reference_or_secret_
     assert secret not in representation
 '''
 
+Path("tests/__init__.py").write_text("")
 p=Path("tests/support")
 p.mkdir(parents=True, exist_ok=True)
 (p/"__init__.py").write_text("")
