@@ -23,10 +23,6 @@ jobs:
         run: |
           set -Eeuo pipefail
           baseline=46b97f7e7d73cf8239a00014ef7d51ded9fecc2d
-          stage32=fa747268cfbf1d5b57e5796b9cbc767abc3d4e0c
-          a2=9b8a9bd45dd8f76f93a06d1ece4a2846e7043af9
-          b=bdeef5adbda0408b7b17af9042ce1dd731ab3804
-
           test -f docs/design/stage3.3-governance-amendment-001-approval-metadata.md
           test -f docs/acceptance/stage3.3-governance-amendment-001-approval-metadata.md
 
