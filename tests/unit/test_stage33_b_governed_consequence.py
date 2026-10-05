@@ -12,6 +12,7 @@ from agentforge.domain.enums import (
     GovernanceMode,
     GovernancePolicyStatus,
     PrincipalType,
+    RunStatus,
     ToolCallStatus,
     ToolEffectType,
 )
@@ -327,7 +328,7 @@ async def test_run_manager_governed_deny_records_bound_denial_and_zero_io() -> N
 
 
 @pytest.mark.asyncio
-async def test_run_manager_require_approval_stops_at_stage33_c_boundary() -> None:
+async def test_run_manager_require_approval_preserves_zero_io_until_later_execution_bridge() -> None:
     run, version, policy, registry, calls = _runtime_fixture(GovernanceDecision.REQUIRE_APPROVAL)
     manager = RunManager(
         NativeRunner(
@@ -338,18 +339,21 @@ async def test_run_manager_require_approval_stops_at_stage33_c_boundary() -> Non
     )
     journal = ExecutionJournal()
 
-    with pytest.raises(RuntimeError, match="belongs to Stage 3.3-C"):
-        await manager.execute(
-            run=run,
-            run_state=RunState(run.id),
-            agent_version=version,
-            recorder=journal,
-            governance_policy=policy,
-        )
+    result = await manager.execute(
+        run=run,
+        run_state=RunState(run.id),
+        agent_version=version,
+        recorder=journal,
+        governance_policy=policy,
+    )
 
+    assert result is None
+    assert run.status is RunStatus.WAITING_APPROVAL
     assert calls == []
-    assert journal.governance_intents == []
-    assert journal.tool_calls == []
+    assert len(journal.governance_intents) == 1
+    assert len(journal.approval_requests) == 1
+    assert len(journal.tool_calls) == 1
+    assert journal.tool_calls[0].status is ToolCallStatus.AWAITING_APPROVAL
     assert journal.tool_attempts == []
 
 
